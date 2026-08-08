@@ -1,0 +1,22 @@
+/refs
+.direnv/
+node_modules/
+dist/
+.tmp/
+.cache/
+target/
+*.log
+
+# Tool state redirected into the project. .config/ itself is committed, because
+# it holds project config rather than state.
+/.docker/
+current-context.yml
+.envrc.local
+# lazysql has no variable of its own, so dev.kdl redirects XDG_CONFIG_HOME here
+# for it. Nothing committed lives under it, only the state it writes.
+materialize/.config/
+
+# per-stack overrides for the mirror example (.env.example is committed)
+.env
+
+/prompts.md
