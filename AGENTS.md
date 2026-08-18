@@ -61,6 +61,32 @@ specs/
 - `research.md` or `data-model.md` may be added beside them when pathfinding produced something worth keeping.
   Do not create them empty.
 
+### Artifact contract
+
+This table is the **only** declaration of the layout.
+Tooling and agent skills read it rather than hardcoding paths, so changing the layout means changing this table and nothing else.
+
+| Key | Value |
+| --- | --- |
+| `templates` | `specs/templates/spec.md`, `specs/templates/plan.md`, `specs/templates/tasks.md` |
+| `feature-dir` | `specs/NNN-short-name/`, `NNN` the next unused three-digit number |
+| `branch` | the feature directory's own name, `NNN-short-name` |
+| `artifacts` | `spec.md` the what and why · `plan.md` the how and the gate · `tasks.md` the increments |
+| `principles` | `docs/CONSTITUTION.md`, cited as `P1`…`P9` |
+| `usage-doc` | `docs/HANDBOOK.md` |
+| `read-first` | `AGENTS.md`, `docs/CONSTITUTION.md`, `docs/HANDBOOK.md`, every existing `specs/*/spec.md` |
+| `verification` | `scripts/validate.sh` |
+| `task-group-id` | `M<n>` on an H2, as `## M1 — title` |
+| `task-id` | `M<n><suffix>` on an H3, as `### M1a — title`. The suffix starts with a letter, so `M<digits>` stays unambiguous |
+| `task-status` | `(Status: <STATE>)` closing every H3, `STATE` one of `PENDING`, `IMPLEMENTING`, `IMPLEMENTED`, `DONE` |
+| `qualified-ref` | `NNN.M<id>`, as `001.M4c`, wherever the feature could be ambiguous. Numbering is local to each `tasks.md` |
+| `gate spec → plan` | no `[NEEDS CLARIFICATION]` remains, and the spec's review checklist is resolved |
+| `gate plan → tasks` | the Constitution Check passes, or every violation carries a Complexity Tracking row |
+| `gate task → DONE` | its command has actually passed, and any new check has its planted violation recorded in `plan.md` |
+
+`IMPLEMENTING` exists so that an abandoned session leaves a record of where things stood rather than silence.
+A task is marked `DONE` only on explicit human confirmation; the agent may take it as far as `IMPLEMENTED`.
+
 ## 3. Environment and tooling
 
 - The repository uses a nix flake with direnv, so commands usually run in the right environment already.

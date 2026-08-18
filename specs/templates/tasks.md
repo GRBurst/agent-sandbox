@@ -2,53 +2,56 @@
 
 **Spec**: [spec.md](spec.md) | **Plan**: [plan.md](plan.md)
 
-<!-- Copy this file to specs/NNN-short-name/tasks.md and delete the guidance
-comments.
+<!-- Copy this file to the feature directory as tasks.md and delete the
+guidance comments. The IDs, the status states and the gates are defined by the
+Artifact contract in AGENTS.md; this file only instantiates them.
 
 One task is one commit and one independently verifiable step. Tasks are in
 dependency order, and each carries the RED → GREEN → CLEAN cycle of
-Constitution P2 inside it.
-
-Tick a checkbox only when its command has actually passed. Do not paste output
-you have not seen. An unticked box is not backlog: it is work this feature
-still owes. -->
+Constitution P2 inside it. -->
 
 ## Rules for this file
 
 - **One scenario per task.**
-  A task that covers two scenarios is two tasks.
+  A task covering two scenarios is two tasks.
 - **RED before GREEN.**
   The first sub-step of every task is a check that fails, and the task records what the failure said.
 - **A new check is not done until its violation has been planted**, watched to FAIL, and recorded in [plan.md](plan.md#planted-violations).
-- **A refactor is its own task**, per Constitution **P6**, and carries the before-and-after eval diff that proves it changed nothing.
+- **A refactor is its own task**, per Constitution **P6**, carrying the before-and-after eval diff that proves it changed nothing.
 - **Roughly 50 lines of Nix or shell is the ceiling.**
   Past it, split the task.
-- The last task is always documentation.
+- **Status moves `PENDING` → `IMPLEMENTING` → `IMPLEMENTED` → `DONE`.**
+  Set `IMPLEMENTING` when work starts, so an abandoned session leaves a record rather than silence.
+  Only a human moves a task to `DONE`.
+- **Implementation Details** is added to a task after it is implemented, never during planning.
+- The last task group is always documentation.
 
-## Phase 1 — [foundation / whatever must exist first]
+______________________________________________________________________
+
+## M1 — [what must exist before any scenario can be checked]
 
 <!-- Only what genuinely blocks every scenario. If nothing does, delete this
-phase rather than inventing setup work. -->
+group rather than inventing setup work. -->
 
-### T001 — [title]
+### M1a — [title] (Status: PENDING)
 
-**Scenario**: [which scenario from spec.md, by number]
+**Scenario**: [which scenario in spec.md, by number]
 
 **RED**: [the check to write, and the failure it must produce first]
 
 - [ ] Check written and seen to FAIL with: `…`
 - [ ] `<command>` passes
 - [ ] Violation planted, seen to FAIL, reverted, recorded in plan.md
-- [ ] `nixfmt` / `shfmt` clean on what was touched
+- [ ] Formatted and linted per [AGENTS.md](../../AGENTS.md#4-verify-every-change)
 
 ______________________________________________________________________
 
-## Phase 2 — Journey 1 (P1)
+## M2 — Journey 1 (P1)
 
-<!-- The MVP slice. After this phase, journey 1 works on its own and could be
+<!-- The MVP slice. After this group, journey 1 works on its own and could be
 handed to a consumer even if nothing else lands. -->
 
-### T002 — [title]
+### M2a — [title] (Status: PENDING)
 
 **Scenario**: Journey 1.1
 
@@ -58,12 +61,12 @@ handed to a consumer even if nothing else lands. -->
 - [ ] `<command>` passes
 - [ ] Violation planted, seen to FAIL, reverted, recorded in plan.md
 
-### T003 — [title]
+### M2b — [title] (Status: PENDING)
 
 **Scenario**: Refusal 1
 
-<!-- The denial scenarios usually belong in the earliest phase that can carry
-them, because they are what the feature exists to guarantee. -->
+<!-- Denial scenarios belong in the earliest group that can carry them,
+because they are what the feature exists to guarantee. -->
 
 **RED**: …
 
@@ -75,9 +78,9 @@ them, because they are what the feature exists to guarantee. -->
 
 ______________________________________________________________________
 
-## Phase 3 — Journey 2 (P2)
+## M3 — Journey 2 (P2)
 
-### T004 — [title]
+### M3a — [title] (Status: PENDING)
 
 **Scenario**: Journey 2.1
 
@@ -90,12 +93,12 @@ ______________________________________________________________________
 
 ______________________________________________________________________
 
-## Phase N — Documentation
+## Mn — Documentation
 
 <!-- Always last, and always present. This is where truth moves out of the
 spec and into the docs, per AGENTS.md step 5. -->
 
-### T00n — Close out
+### Mna — Close out (Status: PENDING)
 
 - [ ] `docs/HANDBOOK.md` updated: how to use what landed, and the coverage gap from plan.md
 - [ ] Known drift entries this feature retired are deleted from `docs/HANDBOOK.md`
