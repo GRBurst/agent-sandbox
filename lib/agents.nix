@@ -22,10 +22,11 @@ let
       groups = mkOption {
         type = types.listOf types.str;
         description = ''
-          Confinement groups to include by name. A group is included rather
-          than its paths granted individually, because a group grants exactly
-          the access it was written for where a path grant gives read and
-          write.
+          Confinement groups to include by name. Empty unless a group grants
+          strictly less than writing its paths out would: M3c measured
+          `filesystem.read` granting read alone, so the reason a group was
+          preferred does not hold, and a group's extra paths are reach nobody
+          here asked for.
         '';
       };
       stateVars = mkOption {
@@ -51,9 +52,13 @@ in
 lib.mapAttrs (_: checkAgent) {
 
   claude-code = {
-    # /nix/store is absent from the confinement floor, so a session without
-    # this group cannot execute the agent at all: M1g observed the child exit
-    # 127 with nono reporting the binary readable but unexecutable.
+    # No group at all, per D15. The store is absent from the confinement floor
+    # and a session without it cannot execute the agent — M1g observed the child
+    # exit 127 with nono reporting the binary readable but unexecutable — but
+    # `nix_runtime` pays for the store with six further paths, two of them under
+    # the home directory. M3c measured a path grant on the store conferring read
+    # alone, so the substrate is granted from the leak registry instead, where
+    # its justification is written down and `check_sc1` keeps it in view.
     #
     # git_config is deliberately not here. It grants read on the host's git
     # configuration, and read-only is no protection when the danger is that a
@@ -61,7 +66,7 @@ lib.mapAttrs (_: checkAgent) {
     # session pick up the host's `credential.helper = cache` and try to start a
     # daemon. FR-23 wants the toolchain pointed at configuration this
     # environment wrote, which the confinement does with GIT_CONFIG_GLOBAL.
-    groups = [ "nix_runtime" ];
+    groups = [ ];
 
     # M1g set these by observation, not by documentation. Thirteen variables
     # were candidates and ten received nothing; these three carry the whole of

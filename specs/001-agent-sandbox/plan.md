@@ -74,7 +74,7 @@ Complexity tracking is empty: the gate passed cleanly.
 
 <a id="d2"></a>
 
-- <a id="d2"></a>**D2 — the mechanism's own state root is an accepted leak, not a registry entry.** The spec (line 272) says it is "the registry's first entry". That is wrong and must be corrected in place: nono **refuses to start** when a grant overlaps its own state root, so it cannot be granted. The leak registry enumerates *granted reach* (FR-2/FR-3); the state root is *state written outside the checkout* by the mechanism itself. Two different concerns; the plan keeps them apart. Consequence: the registry is expected to be empty at landing, which makes `check_sc1` strictly stronger — granted reach **equals** the project directory.
+- <a id="d2"></a>**D2 — the mechanism's own state root is an accepted leak, not a registry entry.** The spec (line 272) says it is "the registry's first entry". That is wrong and must be corrected in place: nono **refuses to start** when a grant overlaps its own state root, so it cannot be granted. The leak registry enumerates *granted reach* (FR-2/FR-3); the state root is *state written outside the checkout* by the mechanism itself. Two different concerns; the plan keeps them apart. Consequence: the registry carries nothing on the state root's account, and [D15](#d15) later gives it its one entry — the execution substrate. `check_sc1` asserts an **equality** either way: granted reach is the project directory plus whatever the registry justifies, and nothing else.
   The path is `$XDG_STATE_HOME/nono`, observed in `M1c` and `M1e` — not `$HOME/.nono`, which one research round asserted and which the mechanism does not use. It holds the audit log, the session records, the per-session interception authority and the credential store.
 
 <a id="d3"></a>
@@ -114,7 +114,7 @@ Complexity tracking is empty: the gate passed cleanly.
 <a id="d10"></a>
 
 - <a id="d10"></a>**D10 — A confinement description names no parent and takes what it needs by group inclusion.** `M1e` found the mechanism ships **no agent preset** — nine built-in profiles, all language runtimes — so the original plan to extend a per-agent preset had nothing to extend, and the packaged descriptions that do exist grant the authenticating agent's whole credential directory read-write, which is the leak this feature removes. It also found that a description naming the built-in floor and one naming nothing resolve to **byte-identical** manifests, so naming it buys nothing.
-  Chosen over extending a registry pack, which lost on P8 (a run-time fetch), on P1 (an inherited grant nobody here wrote), and on drift (a pack can change under a mechanism upgrade with nothing in this repository changing). Consequence: `/nix/store` is **absent from the floor**, so a description must include the `nix_runtime` group, which contributes exactly four **read** grants. Granting the store by path instead would make it writable, which is wrong and was observed being done by hand.
+  Chosen over extending a registry pack, which lost on P8 (a run-time fetch), on P1 (an inherited grant nobody here wrote), and on drift (a pack can change under a mechanism upgrade with nothing in this repository changing). Consequence: `/nix/store` is **absent from the floor**, so the execution substrate has to be declared — see [D15](#d15) for how, which is not by group inclusion.
 
 <a id="d11"></a>
 
@@ -136,6 +136,22 @@ Complexity tracking is empty: the gate passed cleanly.
 
 - <a id="d14"></a>**D14 — The other agents take their credential from the mediated session, not from the first agent's store.** FR-7 spans agents as well as projects, and there were two ways to reach that. The prior art shares credentials by plugin: one agent shells out to another, or reads its credential file directly, which needs that credential directory granted read-write inside the boundary. This environment instead lets the mechanism capture the token flow into its supervisor-side store and exposes it to every process in the session as an environment variable plus a mediated base URL, picked up by `opencode` through its provider options and by `pi` through its provider base URL and header interpolation.
   This is **forced rather than preferred**: FR-6 and FR-3 together already exclude the alternative, since granting the credential store would put a credential that works outside the boundary inside it, on a justification of convenience rather than of structural impossibility. Sequencing consequence: `opencode` and `pi` depend on the captured credential, so the credential milestone lands before the remaining agents finish.
+
+<a id="d15"></a>
+
+- <a id="d15"></a>**D15 — The execution substrate is granted by path and registered, not inherited from a group.** `M3c` measured what [D10](#d10) had assumed. Three findings, each against `nono` 0.73.0:
+
+  1. `filesystem.read = [ storeDir ]` grants **read only**. `nono why --path /nix/store --op write` answers `denied`, with `Path is covered by '/nix/store', which grants read access from profile but write was requested`. D10's premise that a path grant would make the store writable is false, and the agent table's claim that a group "grants exactly the access it was written for where a path grant gives read and write" is false with it.
+  1. The `nix_runtime` group contributes **seven** read grants, not four: the store, two individual store paths, `/nix/var/nix/profiles`, `/etc/profiles/per-user`, and **two paths under `$HOME`** (`$HOME/.nix-defexpr`, `$HOME/.local/state/nix/profiles`). So declaring the store by path is *strictly narrower* than including the group — this decision removes reach rather than adding it, and removes home reach in particular.
+  1. There is no middle ground between the two. See the Landlock note below.
+
+  The store is therefore the leak registry's one entry, with `builtins.storeDir` as its path so that the value is derived rather than restated, and `groups` is empty for every agent. The registry already feeds `filesystem.read`, so no second mechanism appears: the grant *is* the entry, which is what makes `check_sc1`'s equality hold by construction and keeps the compromise somewhere a reviewer reads.
+
+  **Provisional, and knowingly so.** FR-3 asks for a structural justification and this entry's is temporal: the store closure of a session cannot be computed before the agent package exists, which is `M4b`. `M4c` replaces the entry with a `closureInfo`-derived grant set. The measurement that makes that worth doing: `strace` over a real session needs **55** store paths where the static closure of the same tool set grants **62**, so the closure is a tight upper bound rather than a guess, and the whole store is 61,799 paths of which 211 are `*-source` trees belonging to unrelated projects. Read-only cross-project source disclosure is precisely what this repository exists to prevent, so the wholesale grant is a two-milestone compromise and not an end state.
+
+  **Landlock is allow-only, so a deny cannot carve a hole in a granted parent.** `filesystem.deny = [ "/nix/store/*-source" ]` beside a store grant passes `nono profile validate --strict` and appears verbatim in the resolved manifest, and then the session refuses to start: `Landlock deny-overlap is not enforceable on Linux. Refusing to start with conflicting policy. 1082483 deny rule(s) cannot apply under an allowed parent directory.` An exact-path deny fails identically with one conflict. Two consequences. The narrowing in `M4c` has to be a narrower *grant*, because there is no subtractive option at any granularity. And the Landlock constraint this plan records below is **enforced by the mechanism at initialisation**, not merely assumed by us — which makes a deny-group path inside a project checkout a startup refusal rather than a warning, and that is `M4b`'s risk to clear.
+
+  **`nono why` is not a proxy for enforcement.** It answered `denied` / `filesystem_deny` for exactly the path whose deny the kernel cannot enforce and whose session will not start. This extends D9's second rule: a `why` verdict is a statement about nono's static resolution, so a claim about what the kernel does is an integration-layer claim and can never be made from `why` or from a manifest.
 
 ## Repository layout
 
@@ -187,13 +203,14 @@ The sketch below is the table's final shape, not its first one. `M3b` wrote only
 #
 # There is no `preset` field: M1e found the mechanism ships no agent preset, so
 # every description is authored here (D10). `groups` names the built-in security
-# groups it includes — never `git_config`, per D11.
+# groups it includes — never `git_config`, per D11, and never `nix_runtime`,
+# per D15: the store is granted by path from the registry instead.
 { lib }:
 {
   claude-code = {
     package   = pkgs: pkgs.claude-code;         # unfree; allowUnfree scoped to this pkgs
     binary    = "claude";
-    groups    = [ "nix_runtime" ];              # the store is absent from the floor (D10)
+    groups    = [ ];                            # the substrate comes from the registry (D15)
     # M1g observed which of the thirteen candidates govern: three do, and
     # together they cover the whole default home layout. The rest are set by
     # M8b for the paths a one-turn session never reaches. XDG_* is absent
@@ -209,7 +226,7 @@ The sketch below is the table's final shape, not its first one. `M3b` wrote only
   opencode = {
     package   = pkgs: pkgs.opencode;
     binary    = "opencode";
-    groups    = [ "nix_runtime" ];
+    groups    = [ ];
     # Its own variables, not XDG_DATA_HOME: P1 forbids a blanket XDG override
     # where the tool exposes a specific one.
     stateVars = w: {
@@ -221,7 +238,7 @@ The sketch below is the table's final shape, not its first one. `M3b` wrote only
   pi = {
     package   = pkgs: pkgs.pi;
     binary    = "pi";
-    groups    = [ "nix_runtime" ];
+    groups    = [ ];
     stateVars = w: {
       # The whole root: settings, credentials, sessions and installed packages.
       # PI_CODING_AGENT_SESSION_DIR is documented but absent from the binary — M1d.
@@ -238,16 +255,19 @@ The sketch below is the table's final shape, not its first one. `M3b` wrote only
 ### `lib/leak-registry.nix`
 
 ```nix
-# FR-3. The single file. Expected to evaluate to [] at landing (D2).
+# FR-3. The single file. One entry at landing: the execution substrate (D15).
 # entry ∷ { path ∷ str, mode ∷ enum ["read" "readwrite"],
 #           agents ∷ listOf agentName, why ∷ str, whyNotNarrower ∷ str }
 { lib }:
 {
   entryType = lib.types.submodule { options = { … }; };   # P7: never attrsOf str
   entries = [
-    # Empty. An entry is admissible only where the tool structurally cannot be
-    # directed elsewhere (FR-3). The mechanism's own state root is NOT an entry:
-    # nono refuses any grant overlapping it, so it cannot be granted at all (D2).
+    # An entry is admissible only where the tool structurally cannot be directed
+    # elsewhere (FR-3). One qualifies: `builtins.storeDir`, read, because a
+    # session cannot execute without the substrate its binaries live in and the
+    # closure is not computable until M4b packages them (D15). The mechanism's
+    # own state root is NOT an entry: nono refuses any grant overlapping it, so
+    # it cannot be granted at all (D2).
   ];
 }
 ```
@@ -309,7 +329,7 @@ pkgs.writeText "nono-profile-${name}.json" (builtins.toJSON {
 
 `HOME` is allowed through but **not** rewritten — D13. It reaches the session as the host home, which is denied, so a tool that ignores its own relocation variable fails outright rather than writing somewhere nobody declared. The `XDG_*` variables are absent from `allow_vars` for the same reason in reverse: leaving them pointing at host paths would have a tool fail at a path this environment never chose, where dropping them makes it fall back to its own default under `HOME` and fail there, which is the one denial the pre-flight already proves.
 
-Note the Landlock constraint: granting `$WORKDIR` recursively is safe only because no deny-group path lies inside a project checkout. If one ever does, Linux emits warnings and the grant is wrong — `check_component_merge` asserts no overlap.
+Note the Landlock constraint: granting `$WORKDIR` recursively is safe only because no deny-group path lies inside a project checkout. If one ever does, the session does not start at all — nono checks for deny-overlap before it calls `landlock_restrict_self` and refuses ([D15](#d15)). So this is a condition on every project that consumes the environment, not only on ours, and `check_component_merge` asserts no overlap.
 
 ### `lib/confined-agent.nix`
 
@@ -406,23 +426,32 @@ check_sc3() {
 `check_sc1` derives its expectation from the registry rather than restating it (Journey 7, third `Then`):
 
 ```bash
-# ∀ agent. ∀ p ∈ granted(agent). p ⊑ $PWD ∨ p ∈ registry
+# granted(agent) ∖ floor  =  {$PWD} ∪ {e.path | e ∈ registry, agent ∈ e.agents}
 check_sc1() {
-  local registry granted
-  registry=$(nix eval --json .#leakRegistry --apply 'r: map (e: e.path) r.entries')
-  for agent in $(nix eval --json .#confinedAgentNames | jq -r '.[]'); do
-    # --format manifest, not profile: M1e found `profile` is the human rendering
-    # and `manifest` the only JSON one. Its resolved shape is filesystem.grants[],
-    # each {access, path, type} — not the source profile's allow/read lists.
-    granted=$(nono profile show "$(profile_path "$agent")" --format manifest \
-              | jq -r '.filesystem.grants[].path')
-    while read -r p; do
-      is_under "$p" "$PWD" || in_registry "$p" "$registry" \
-        || fail "granted path outside project and not in registry: $p ($agent)"
-    done <<< "$granted"
-  done
+  # The floor is subtracted, not listed (D4). Deriving it from the description
+  # under test with every capability key stripped means a floor that grows in a
+  # later nono release moves the baseline instead of breaking the check.
+  jq '{meta}' "$profile" > "$tmp/floor.json"
+  # --format manifest, not profile: M1e found `profile` is the human rendering
+  # and `manifest` the only JSON one. Its resolved shape is filesystem.grants[],
+  # each {access, path, type} — not the source profile's allow/read lists.
+  manifest_grants "$profile"        "$cfg" > "$tmp/agent.grants"
+  manifest_grants "$tmp/floor.json" "$cfg" > "$tmp/floor.grants"
+  registry=$(nix eval --json .#leakRegistry \
+             --apply "es: builtins.filter (e: builtins.elem \"$agent\" e.agents) es")
+
+  while IFS=$'\t' read -r access path; do   # ⊆ direction
+    under_project "$path" || in_registry "$path" "$registry" \
+      || fail "granted path outside project and not in registry: $path ($agent)"
+  done < <(comm -13 "$tmp/floor.grants" "$tmp/agent.grants")
+
+  # The ⊇ direction: under_project records that it saw the project's own grant,
+  # and every registry entry must appear in agent.grants with its declared mode.
+  # That is what makes a stale entry a failure rather than dead text.
 }
 ```
+
+`manifest_grants` runs the resolver from the repository root, because `nono profile show` has no `--workdir` and `$WORKDIR` is therefore its cwd, and normalises `/proc/<pid>` away, because nono grants the resolving process its own `/proc` entry and that differs between two invocations. It must never redirect the resolver's stdout to a file it then compares: nono grants stdout's file `readwrite`, so the comparison would find the comparison's own artefact.
 
 ## Dependencies & impact
 
@@ -437,7 +466,7 @@ check_sc1() {
 | Layer | Where | Needs | Covers |
 | --- | --- | --- | --- |
 | **Unit** | `nix eval`, `scripts/checks/unit.sh` | nothing — no build, no network, no `$HOME` | Registry invariants; the scenario ↔ check bijection (`check_sc3`); the bootstrap-variable mirror between `.envrc` and `flake.nix`; agent-table totality |
-| **Component** | `nono profile validate` / `show` / `why` against generated profiles, `scripts/checks/component.sh` | an evaluator and `nono`, no kernel enforcement | Generated JSON validates against nono's schema; `extends` merge semantics are what D4 claims; granted reach `⊆ $WORKDIR ∪ registry` (`check_sc1`); no deny-group path lies inside a project checkout |
+| **Component** | `nono profile validate` / `show` / `why` against generated profiles, `scripts/checks/component.sh` | an evaluator and `nono`, no kernel enforcement | Generated JSON validates against nono's schema; the three-way merge is what D4 claims; granted reach `= $WORKDIR ∪ registry` (`check_sc1`); no deny-group path lies inside a project checkout |
 | **Integration** | real confined sessions in this checkout, `scripts/checks/integration.sh` | a build and a real kernel | Every refusal R1–R6 and R8–R10; Journeys 2, 3, 4, 6; the pre-flight; environment filtering. **This is the only layer where kernel enforcement is observed at all** |
 | **End to end** | `nix develop github:GRBurst/agent-sandbox` with `HOME=$(mktemp -d)`, `scripts/checks/e2e.sh` | a build and a clean machine | Journeys 1, 5, 7; Rep1, Rep2; SC-5. Run in CI on both platforms from the pushed ref, never from the working tree |
 
@@ -486,14 +515,14 @@ Every row was audited against one question, after `check_j6_1` was twice written
 | Rep1 | `check_rep1` — enter twice; assert tracked files unchanged and granted reach byte-identical | e2e |
 | Rep2 | `check_rep2` — run `validate.sh` twice; assert same result and no residue | e2e |
 | Rep3 | `check_rep3` — authenticate twice; assert the resulting state is indistinguishable | integration |
-| SC-1 | `check_sc1` — the reach property, derived from the registry | component |
+| SC-1 | `check_sc1` — the reach property, derived from the registry; `M4c` adds the trace arm that narrows the substrate to the session's own closure | component, then integration |
 | SC-2 | `check_registry` — registry invariants | unit |
 | SC-3 | `check_sc3` — the scenario ↔ check bijection | unit |
 | P1 mirror | `check_bootstrap_mirror` — the bootstrap variables resolve to the same values in `.envrc` and `flake.nix` | unit |
 | D4 | `check_component_merge` — the floor, the included groups and the description's own declarations combine as [D4](#d4) claims, read off the resolved manifest | component |
 | D9 | `check_controls` — every refusal check invokes a positive control | unit |
 
-Where a refusal is observed through `nono why` rather than by attempting the action, the check reads `.reason` as well as `.status` and treats any `*_unavailable` reason as an error — that command exits 0 for a refusal, for a grant, and for a question it could not answer ([D9](#d9)).
+Where a refusal is observed through `nono why` rather than by attempting the action, the check reads `.reason` as well as `.status` and treats any `*_unavailable` reason as an error — that command exits 0 for a refusal, for a grant, and for a question it could not answer ([D9](#d9)). And it is never the observer for a refusal the kernel has to enforce, because `why` answers from the resolved policy and will report a deny Landlock cannot apply at all ([D15](#d15)).
 
 #### `check_j6_1`, in three arms
 
@@ -545,12 +574,14 @@ Mandatory per P2. Tick `Verified` only after seeing red, **and only after confir
 | `check_confinement_validates` | Reduce the negative control's mutation to `jq '.'`, so nothing malformed is offered | `negative control absent: validate accepted a profile naming a group that does not exist, so its acceptance above proves nothing` | [x] |
 | `check_confinement_validates` | Add `extends = [ "default" ]` | `the description names a parent, but D10 says naming one implies an inheritance that does not happen` | [x] |
 | `check_confinement_validates` | Set `meta.name` to something other than the agent's name | `meta.name is something-else, not the agent name claude-code` | [x] |
-| `check_confinement_validates` | Empty `groups` in the agent table | `groups.include does not carry nix_runtime, so the session cannot execute from the store` | [x] |
+| `check_confinement_validates` | Point the registry's substrate entry at `/tmp/__planted__`, so nothing grants the store | `filesystem.read does not carry /nix/store, so the session cannot execute from the store` | [x] |
 | `check_confinement_validates` | Add `git_config` to the agent's groups | `groups.include carries git_config, which D11 excludes` | [x] |
 | `check_confinement_validates` | Drop `CLAUDE_CONFIG_DIR` from the description's `set_vars` but not from the agent table | `set_vars does not carry the agent table entry CLAUDE_CONFIG_DIR=$WORKDIR/.agents/claude` | [x] |
 | `check_confinement_validates` | Delete `GIT_CONFIG_GLOBAL` from `set_vars` | `set_vars does not carry GIT_CONFIG_GLOBAL, so the version-control toolchain is undirected` | [x] |
-| `check_sc1` | Add `$HOME/.ssh` to `filesystem.read` in `confinement.nix` | `granted path outside project and not in registry: …/.ssh` | [ ] |
+| `check_sc1` | Add `$HOME/.ssh` to `filesystem.read` in `confinement.nix` | `granted path outside project and not in registry: /home/…/.ssh (claude-code)` | [x] |
 | `check_component_merge` | Assert that a description's own grant beats a `required` group's `deny` for the same path | the resolved manifest still denies the path, so the assertion fails | [ ] |
+| `check_component_merge` | Point a `filesystem.deny` at a path inside the project | `deny path inside the project: …`, from the check itself — `nono profile validate --strict` accepts the overlap, so validation cannot be the observer | [ ] |
+| `check_sc1` | Drop a path the session needs from the closure the substrate is derived from (`M4c`) | the trace carries an `EACCES` no probe asked for, naming the dropped path | [ ] |
 | `check_r5` | Make the wrapper read the in-checkout agent config when composing the description | the `$HOME` the checkout asked for appears in the resolved reach | [ ] |
 | `check_r8` | Collapse both failure paths onto one message in the wrapper | the two messages no longer differ | [ ] |
 | `check_j1_1` | Put the unconfined binary on `PATH` under the agent's own name | there is no manifest to read, so the reach comparison cannot be made | [ ] |
