@@ -605,6 +605,25 @@ The exchange is credential-free and no requirement asks otherwise: `M1c` establi
 
 ______________________________________________________________________
 
+### M7f — A commit needs no key (Status: PENDING)
+
+**Scenario**: Journey 6.2, R11
+
+Unsigned commits are the default, and a key that is genuinely needed arrives from an agent or a secret service rather than from a granted directory ([D16](plan.md#d16)). Not hypothetical: this repository's own `M3c` commits failed exactly this way — `gpg` was denied its temporary file beneath `$HOME/.gnupg`, and `git` then reported `fatal: failed to write commit object`. It fires on the first commit, so a consumer meets it immediately.
+
+**RED**: `check_j6_2` and `check_r11`, in one session, each the other's control ([D9](plan.md#d9)).
+
+- [ ] `check_j6_2`: a commit made inside the session exists afterwards, carries no signature, and the configuration this environment wrote is confirmed not to ask for one (FR-24)
+- [ ] `check_r11`: in a checkout whose *own* configuration demands a signature, the commit fails, the message names the key material that could not be reached, and no commit object was created
+- [ ] The two run in the same session and stand as each other's control — `check_r11`'s failure is attributable to the demand only because `check_j6_2` committed successfully beside it
+- [ ] Neither check grants a key store, and this task leaves the leak registry unchanged; `check_sc1` is re-run to prove it
+- [ ] `bash scripts/validate.sh --layer integration` passes
+- [ ] Violations planted for both checks, seen to FAIL, reverted, recorded in plan.md
+
+Where a consumer does want signatures, the route is the forwarded socket [D16](plan.md#d16) names, supplied at invocation under FR-15. This task does not build that route: it fixes the default and makes the refusal legible. Building it is a new feature number, not an extension of this one.
+
+______________________________________________________________________
+
 ## M8 — The remaining agents
 
 `claude-code` is already confined, from `M4b`. What is left is its own awkward corners, then the two agents that depend on it. The order is `claude-code` → `opencode` → `pi`, and it is the order [D14](plan.md#d14) forces rather than a preference.

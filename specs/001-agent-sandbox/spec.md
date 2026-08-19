@@ -119,7 +119,15 @@ This journey exists because credential substitution inspects encrypted traffic, 
    **When** the session exchanges with that remote over HTTPS
    **Then** the exchange succeeds.
 
+1. **Given** a confined session in a checkout this environment configured
+   **When** the session commits
+   **Then** the commit succeeds
+   **And** it carries no signature
+   **And** nothing outside the session's reach was read in order to produce it.
+
 The exchange is one that needs no credential. Nothing here supplies the version-control toolchain with a credential, and every host store it would otherwise read is denied outright, so a push would fail for want of a credential whatever the inspecting authority did — which is the opposite of what this journey is for. Trust in the inspecting authority is the property, and FR-17 is the requirement; authenticating the toolchain is a separate concern, addressed under Out of scope.
+
+Signing is the second step's subject, and it is this journey's failure mode rather than a new one: a signature needs a key, every store a key lives in is denied, so a toolchain configured to sign fails partway through an otherwise ordinary commit and reads as the checkout being unwritable. Unsigned is therefore what the environment configures, and FR-24 says where a signature is wanted the key arrives as a forwarded agent socket or a secret-service request rather than as a granted directory. R11 is the refused half, for the checkout that demands a signature anyway.
 
 ### Journey 7 — The claims are checked on clean machines (P1)
 
@@ -191,6 +199,14 @@ The exchange is one that needs no credential. Nothing here supplies the version-
    **Then** the toolchain reads no configuration file from outside the project directory
    **And** its effective configuration is one this environment wrote, so the host directive does not run.
 
+1. **R11 — A signature the session cannot produce is refused, loudly.**
+   FR-24's refused half, and the one case the environment cannot configure away: a checkout's own configuration outranks the global file this environment writes, so the demand for a signature survives into the session while the key does not.
+   **Given** a confined session in a checkout whose own configuration demands signed commits, and no key forwarded into the session
+   **When** the session commits
+   **Then** the commit fails
+   **And** the message names the key material that could not be reached, so the failure is not mistaken for the checkout being unwritable
+   **And** no unsigned commit is created in its place.
+
 ### Repetition scenarios
 
 1. **Rep1 — Entering twice changes nothing.**
@@ -244,6 +260,7 @@ The exchange is one that needs no credential. Nothing here supplies the version-
 - **FR-21** A pre-existing host-global agent configuration MUST neither reach a confined session nor prevent one from working. A consumer who already configures these agents for their whole machine adopts this environment for one project without changing the rest, and the usage document states that path.
 - **FR-22** Where an agent extends itself by fetching code at run time, that extension MUST be provisioned before the session rather than fetched from inside it.
 - **FR-23** A confined session's version-control toolchain MUST be directed at configuration this environment wrote, rather than left to search the home directory for it. Withholding the grant would already stop the host file being read, but it would leave the outcome dependent on what the host happens to contain, and it would leave the session without a commit identity. Directing the toolchain instead makes the effective configuration the same on every machine, which is what the repetition scenarios ask for, and gives that identity somewhere to live. The author's name and address are copied out of the host once, at setup: they are not credential material, the copy is visible in the file it produces, and a consumer may supply their own values in place of the host's.
+- **FR-24** A confined session's commits MUST NOT depend on key material outside its reach. Unsigned is the default, and the configuration this environment writes does not ask for a signature. Where a consumer wants signatures, the key MUST reach the session as a forwarded agent socket or a secret-service request supplied at invocation under FR-15 — never as a granted directory. FR-3 excludes that grant anyway: `ssh` and `gpg` both take a key from an agent over a socket, so a key directory is redirectable and the grant would rest on convenience. A checkout that demands a signature the session cannot produce fails visibly, per R11 and **P9**, rather than being committed unsigned.
 
 **Non-functional.**
 The change honours [docs/CONSTITUTION.md](../../docs/CONSTITUTION.md), and the plan's Constitution Check records how.

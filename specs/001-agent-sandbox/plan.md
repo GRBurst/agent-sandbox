@@ -153,6 +153,14 @@ Complexity tracking is empty: the gate passed cleanly.
 
   **`nono why` is not a proxy for enforcement.** It answered `denied` / `filesystem_deny` for exactly the path whose deny the kernel cannot enforce and whose session will not start. This extends D9's second rule: a `why` verdict is a statement about nono's static resolution, so a claim about what the kernel does is an integration-layer claim and can never be made from `why` or from a manifest.
 
+<a id="d16"></a>
+
+- <a id="d16"></a>**D16 — A commit needs no key: unsigned by default, and a signature arrives as a socket rather than a directory.** Demonstrated rather than reasoned. This repository's own `M3c` commits failed with `gpg: failed to create temporary file '/home/pallon/.gnupg/…': Permission denied`, and `git` then reported `fatal: failed to write commit object` — from a session confined by a different mechanism, but with exactly the denial shape a confined agent session will have. The failure fires on the *first* commit, so it is the first thing a consumer meets rather than an exotic path.
+
+  Three parts. The configuration this environment writes ([D11](#d11)) does not ask for a signature, so the default commit is unsigned and reads nothing outside the project. A key directory is not admissible as a registry entry, because FR-3's test is whether the tool can be directed elsewhere and a key can: `ssh` and `gpg` both take theirs from an agent over a socket, so the grant would rest on convenience. And where a consumer does want signatures, the socket is forwarded at invocation under FR-15 — nono carries a family of `--allow-unix-socket` flags for precisely this — which keeps the widening a visible act by the human rather than a property of the repository.
+
+  The one case the environment cannot configure away: git's repository-local configuration outranks the global file this environment writes, so a checkout demanding `commit.gpgsign` demands it inside the session too. That is R11, and **P9** decides its shape — the commit fails and the message names the key, rather than being silently written unsigned. Overriding the checkout's own policy would be the silent fallback P9 forbids, and it would mean this environment quietly producing commits a project has decided it does not accept.
+
 ## Repository layout
 
 ```text
@@ -501,6 +509,7 @@ Every row was audited against one question, after `check_j6_1` was twice written
 | Journey 4.1 | `check_j4_1` — assert every readable credential value matches the substitute form (mock credentials). **Control**: the real value is asserted present in the supervisor's store outside the boundary, so "the agent holds a substitute" is not satisfied by there being no credential at all. Live rejection is a coverage gap | integration |
 | Journey 5.1 | `check_j5_1` — authenticate in checkout A, assert authenticated state in checkout B **and** in a second agent without a login of its own (FR-7's two axes). **Control**: a third, unauthenticated identity is asserted *not* to work, so the check cannot pass by treating everything as authenticated | e2e |
 | Journey 6.1 | `check_j6_1` — three arms, see below. Narrowed from "push a commit" by [`M1c`](research.md#m1c--git-credentials-inside-the-boundary) | integration |
+| Journey 6.2 | `check_j6_2` — commit in a throwaway checkout inside the project; assert the commit object exists, that it carries no signature, and that the configuration this environment wrote does not ask for one. **Control**: `check_r11` runs in the same session, so a session that cannot commit at all cannot satisfy this row | integration |
 | Journey 7.1 | `check_j7_1` — `validate.sh` runs unattended per platform and reports success; then plant a registry entry and observe the expected set change **with the check unedited**. The second arm is the discriminator: exit 0 alone would also be produced by a suite that ran nothing, which is why `validate.sh` fails when no check ran | e2e |
 | R1 | `check_r1` — plant an SSH key in the fake `$HOME`, read it from inside, assert the read fails and no key material appears in the output. **Control**: a file inside the project is read successfully in the same session | integration |
 | R2 | `check_r2` — create a file in `$HOME` from inside; assert failure **and** non-existence. **Control**: the same write into `$WORKDIR` succeeds and the file exists | integration |
@@ -512,6 +521,7 @@ Every row was audited against one question, after `check_j6_1` was twice written
 | R8 | `check_r8` — invalidate the stored substitute, make a request, assert the message is an authentication failure and **differs from** a denial message. The difference is the assertion; a single failure string proves nothing | integration |
 | R9 | `check_r9` — populate the fake `$HOME` with a host-global agent config; assert unreadable from inside **and** that the session still starts and works. The second clause is the control | integration |
 | R10 | `check_r10` — plant a host git configuration carrying a directive that runs a program; from inside, assert the effective configuration is the one this environment wrote and the directive is absent. **Control**: a setting this environment *did* write is read back, so an empty configuration cannot pass. Second arm: no process was started and nothing was written outside `$WORKDIR` | integration |
+| R11 | `check_r11` — a checkout whose *own* configuration demands a signature; assert the commit fails, that the message names the key material that could not be reached, and that no commit object was created. **Control**: `check_j6_2`'s unsigned commit in the same session, so the failure is attributable to the demand rather than to a session that cannot commit | integration |
 | Rep1 | `check_rep1` — enter twice; assert tracked files unchanged and granted reach byte-identical | e2e |
 | Rep2 | `check_rep2` — run `validate.sh` twice; assert same result and no residue | e2e |
 | Rep3 | `check_rep3` — authenticate twice; assert the resulting state is indistinguishable | integration |
@@ -602,6 +612,8 @@ Mandatory per P2. Tick `Verified` only after seeing red, **and only after confir
 | `check_j2_1` | Drop the state variable from `set_vars` | the `$HOME` diff is non-empty outside the registry | [ ] |
 | `check_j3_1` | Grant the sibling checkout in the profile | the other project directory is reachable | [ ] |
 | `check_j6_1` | Ask for the destination as a plain-string `allow_domain` instead of an inspected one | arm 1 fails: none of the five trust-bundle variables is set | [ ] |
+| `check_j6_2` | Set `commit.gpgsign = true` in the configuration this environment writes | the commit fails for want of a key the session cannot reach, so the default is no longer keyless | [ ] |
+| `check_r11` | Grant a key store through the registry, so the demanded signature succeeds | the commit succeeds and the refusal the row asserts is gone | [ ] |
 | `check_rep2` | Make `validate.sh` write a log file into the checkout | the second run differs from the first | [ ] |
 | `check_controls` | Delete the control call from one refusal check | `refusal check asserts no permitted action: check_r2` | [ ] |
 | every refusal check | Point the wrapper at a description that denies the workdir, so no session works at all | each check fails **on its control**, not on its refusal — this is the one planted violation that proves [D9](#d9) across the suite rather than check by check | [ ] |
