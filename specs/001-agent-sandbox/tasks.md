@@ -134,7 +134,7 @@ Decides whether a `numtide/llm-agents.nix` input is added at all. It is not adde
 - Upstream `HEAD` moved from `3589c005…` to `c4c6673c…` while `M1` was in flight, so the lock must pin a revision rather than track the branch or the versions recorded here stop describing what is built.
 - Availability was established by evaluation, not by building. Nothing was built for `aarch64-darwin`, and no check in this repository can reach that platform.
 
-### M1g — Spike: does `claude-code`'s configuration root relocate? (Status: PENDING)
+### M1g — Spike: does `claude-code`'s configuration root relocate? (Status: DONE)
 
 The last open fork, and the one the rest of the feature now rests on. `M1d` asked this of `pi` because a research round had contradicted itself; nobody asked it of `claude-code`, when it was one agent among four. It is now the reference case (FR-1) **and** the credential source the other two draw from ([D14](plan.md#d14)), so FR-4 and FR-7 both stand on the answer.
 
@@ -144,13 +144,21 @@ A first look at the payload counts thirteen candidate variables rather than one 
 
 **RED**: not applicable; a spike has no check. It is a task because it is a commit and it blocks two milestones.
 
-- [ ] Set the candidate variables into the project, run `claude`, and record what is written under each — and whether anything at all is written under `$HOME`
-- [ ] Run the **control**: the same invocation with nothing set, so the default is fixed by observation and the override is shown to be what moved it, as `M1d` did for `pi`
-- [ ] Establish where the credential comes to rest, since FR-7 reads it from there and `M7a` asserts its form
-- [ ] Record whether any surviving path needs a registry entry (FR-3), with both justification fields drafted if so
-- [ ] `research.md` states the finding per variable with its evidence; `plan.md`'s `lib/agents.nix` sketch and `spec.md`'s relocation assumption are corrected in place to match
+- [x] Set the candidate variables into the project, run `claude`, and record what is written under each — and whether anything at all is written under `$HOME`
+- [x] Run the **control**: the same invocation with nothing set, so the default is fixed by observation and the override is shown to be what moved it, as `M1d` did for `pi`
+- [x] Establish where the credential comes to rest, since FR-7 reads it from there and `M7a` asserts its form
+- [x] Record whether any surviving path needs a registry entry (FR-3), with both justification fields drafted if so
+- [x] `research.md` states the finding per variable with its evidence; `plan.md`'s `lib/agents.nix` sketch and `spec.md`'s relocation assumption are corrected in place to match
 
-A live `claude` cannot run from an agent session here, for the reason `M1c` recorded. Either a human runs it, or it runs on a machine where `$HOME` is writable.
+`M1c` recorded that a confined session cannot be started from an agent session at all. That is too strong, and `research.md` corrects it: a real `nono run` is reachable from here under four conditions, so all five criteria were observed from an agent session, including the credential one — `claude auth status` answers "where does it rest" behaviourally, by losing the credential when the root moves, without anyone logging in again.
+
+**Implementation notes.** A five-phase harness under `.tmp/m1g/` (gitignored, not a check): unconfined control, unconfined override, confined control, confined override, credential. Each candidate went to its own leaf directory named after the variable, so a write attributes to the one variable that could have moved it.
+
+Three of thirteen govern — `CLAUDE_CONFIG_DIR`, `CLAUDE_CODE_TMPDIR`, `CLAUDE_CODE_REMOTE_MEMORY_DIR` — and together they cover the whole default layout, with nothing left under `$HOME`. **No registry entry is forced**, so the fallback in `spec.md` went unused and the registry stays empty as [D2](plan.md#d2) expected. All four `XDG_*` roots got nothing, falsifying the inference from `XDG_CONFIG_HOME`'s strings count; occurrence has now failed to predict behaviour three times in this feature.
+
+The credential rests in `.claude.json` at the root of `CLAUDE_CONFIG_DIR` and **relocates with it**: `claude auth status` goes from `loggedIn: true` to `loggedIn: false` when only that variable and `CLAUDE_SECURESTORAGE_CONFIG_DIR` change. So FR-7 is not satisfiable by relocation, which confirms rather than redirects [D1](plan.md#d1) and [D14](plan.md#d14). `CLAUDE_SECURESTORAGE_CONFIG_DIR` governs nothing observable. The key name inside that file is left to `M7a`, which is what needs it; reading `~/.claude.json` is denied to an agent session here.
+
+Two constraints on the description came out of failures rather than from the question asked, and both are recorded in `plan.md`: `--allow-cwd` grants the working directory **read-only** by default, and `TMPDIR` must resolve inside the working directory or claude refuses to start. `DISABLE_AUTOUPDATER` is inherited on the developing host, so the description must set it or P8 holds only here.
 
 **Checkpoint**: every architectural fork in `plan.md` is closed. Implementation may begin.
 
@@ -160,21 +168,31 @@ ______________________________________________________________________
 
 Independent of everything else, and it clears the ground. Doing it first means no later check passes because a Kafka leftover happened to satisfy it.
 
-### M2a — No artefact of the prior project remains (Status: PENDING)
+### M2a — No artefact of the prior project remains (Status: DONE)
 
 **Scenario**: R7
 
 **RED**: write `check_r7`, which evaluates the devShell and asserts no artefact of the prior project appears by name in packages, variables or `.gitignore`, **and** that a package the environment does need is found — the positive control [D9](plan.md#d9) requires, without which the check passes against an empty devShell.
 
-- [ ] Check written and seen to FAIL with: `kafka artefact present in devShell: kcat`
-- [ ] FR-18 satisfied: remove the packages `kcat kafkactl postgresql lazysql openjdk25 maven nodejs zellij` and the six variables `KCAT_CONFIG KAFKA_CTL_CONFIG PSQLRC PSQL_HISTORY MAVEN_ARGS MAVEN_OPTS` from `flake.nix`; correct `description` from `"Hivemind Kafka Playground"`; remove `materialize/.config/`, `current-context.yml`, `.env` from `.gitignore`
-- [ ] `bash scripts/validate.sh --layer unit` passes
-- [ ] Violation planted (re-add `kcat`), seen to FAIL, reverted, recorded in plan.md
-- [ ] `nixfmt` and `nix flake check` clean
+- [x] Check written and seen to FAIL with: `kafka artefact present in devShell: kcat`
+- [x] FR-18 satisfied: remove the packages `kcat kafkactl postgresql lazysql openjdk25 maven nodejs zellij` and the six variables `KCAT_CONFIG KAFKA_CTL_CONFIG PSQLRC PSQL_HISTORY MAVEN_ARGS MAVEN_OPTS` from `flake.nix`; correct `description` from `"Hivemind Kafka Playground"`; remove `materialize/.config/`, `current-context.yml`, `.env` from `.gitignore`
+- [x] `bash scripts/validate.sh --layer unit` reports `check_r7` passing, and the set `check_sc3` names shrinks by exactly `r7` with nothing else moved
+- [x] Violation planted (re-add `kcat`), seen to FAIL, reverted, recorded in plan.md
+- [x] `nixfmt` and `nix flake check` clean
+
+**Implementation notes**
+
+- **The criterion "`validate.sh --layer unit` passes" was wrong as written, and has been corrected in place.** `check_sc3` is deliberately red until the last scenario lands, which [M1a](#m1a--the-scenario--check-bijection-status-done) recorded as the feature's progress bar. The criterion now states the property M1a actually defined: `check_r7` passes, and the set `check_sc3` names shrinks by exactly `r7`. Observed 20 → 19, `comm` in both directions giving `r7` and nothing else. The same stale wording survives in `M2c` and `M3a`; it will be corrected as each is reached.
+- **The check matches package names as nix reports them, not as `flake.nix` spells them.** `openjdk25` evaluates to pname `openjdk` and `bash` to `bash-interactive`, so the forbidden list holds the reported name. A version bump cannot then reintroduce one under a new attribute, which an exact match on the attribute spelling would have missed.
+- **One evaluation supplies both halves.** `devshell_facts` evaluates `devShells.<system>.default` once, with `--apply`, into `{ packages, hook }`; the system comes from `builtins.currentSystem` rather than being hardcoded, so `M9`'s second platform needs no edit here. `mkShell` folds its `packages` argument into `nativeBuildInputs`, which is what gets read. 0.7s, no build.
+- **The description is asserted by property, not by value**: it must not match `kafka|hivemind|playground`, case-insensitively. Pinning the new string would make the check a restatement of `flake.nix`. It now reads `"Per-project confined agent sessions"`.
+- **`.gitignore` rules are matched as whole lines.** `.env` is a substring of the `.envrc.local` rule that stays, so a substring match would have reported a false positive forever.
+- **Two violations were planted, not one.** Re-adding `kcat` was the one the task named. The second removes `jq`, the positive control [D9](plan.md#d9) requires, and was seen to FAIL with `positive control absent: the devShell declares no jq, so the assertions above hold vacuously` — which is the only evidence that the control is load-bearing rather than decorative. Both are recorded in `plan.md`.
+- **`npm_config_cache` and `NPM_CONFIG_USERCONFIG` were kept** although `nodejs` went. Two of the three agents are node programs and will run `npm` inside a session, so those two redirections are this feature's, not the prior project's. The task's list of six variables was followed exactly.
 
 The leftovers are not only a tidiness matter. A live session was observed inheriting `JAVA_HOME` and an `XDG_DATA_DIRS` carrying openjdk, postgresql, zellij and nodejs store paths, so they are on the boundary this feature is drawing, not beside it. Formatting is `nixfmt`, per [AGENTS.md](../../AGENTS.md#4-verify-every-change); an `alejandra`-formatted `flake.nix` was discarded once already.
 
-### M2b — The two bootstrap variables are mirrored (Status: PENDING)
+### M2b — The two bootstrap variables are mirrored (Status: DONE)
 
 P1's bootstrap exception requires a check that parses both files. `flake.nix` claims one exists; it does not.
 
@@ -182,18 +200,39 @@ P1's bootstrap exception requires a check that parses both files. `flake.nix` cl
 
 **RED**: write `check_bootstrap_mirror`. It parses `TMPDIR` and `XDG_CACHE_HOME` out of `.envrc` and out of `flake.nix` and compares them byte-for-byte. It must be bash, not zsh, because of `${!v}`.
 
-- [ ] Check written and seen to FAIL with: `bootstrap variables differ between .envrc and flake.nix` after a deliberate edit
-- [ ] The stale `flake.nix` comment referencing `.claude/settings.json` and a non-existent `scripts/validate.sh` is corrected to name the real check
-- [ ] Violation planted (change `TMPDIR` in `.envrc` only), seen to FAIL, reverted, recorded in plan.md
+- [x] Check written and seen to FAIL with: `bootstrap variables differ between .envrc and flake.nix` after a deliberate edit
+- [x] The stale `flake.nix` comment referencing `.claude/settings.json` and a non-existent `scripts/validate.sh` is corrected to name the real check
+- [x] Violation planted (change `TMPDIR` in `.envrc` only), seen to FAIL, reverted, recorded in plan.md
 
-### M2c — The container and the orphans are deleted (Status: PENDING)
+**Implementation notes.**
+
+`check_bootstrap_mirror` lives in `scripts/checks/unit.sh` alongside two helpers.
+
+- **The variable list is derived, not written down.** `envrc_bootstrap_exports` takes every `export` line above the `use flake` directive, which is what "bootstrap" means — the variables nix needs before it can read the flake. A third one added later is covered without touching the check.
+- **It compares resolved values, not source text.** `resolve_bootstrap` runs each fragment in its own `bash -c`, `cd`-ed into one shared temporary directory so the embedded `$PWD` resolves identically, then reports each name through `${!v-<unset>}`. `plan.md` said byte-identical; that is the wrong criterion, because nix's indented strings escape where a shell does not, so equal text is neither necessary nor sufficient. Corrected there in place. A variable missing from the hook entirely surfaces as `<unset>` against a value.
+- **The flake side is read through `nix eval`,** reusing `check_r7`'s `devshell_facts`, so what is compared is the hook the shell would actually run.
+- **The anti-vacuity guard bit unplanted, on the first run.** It reported `no exports found before 'use flake' in .envrc; the mirror comparison would be vacuous` — because line 6 of `.envrc` mentions `use flake` inside a comment and the region parser stopped there. Fixed by matching the directive (`^[[:space:]]*use[[:space:]]+flake`) rather than the words. The comment was deliberately left saying `use flake`, so the file keeps the trap the parser has to survive.
+- **Both stale comments were corrected,** not just the one the criterion names. `.envrc` carried the same fiction — "scripts/validate.sh compares both files against .claude/settings.json" — and now names `check_bootstrap_mirror`. Neither `.claude/settings.json` nor that comparison has ever existed.
+- **`check_sc3` is unmoved at 19,** as it should be: "P1 mirror" is a plan-level property, not one of the spec's numbered scenarios, so this check is not a scenario check and the bijection does not see it.
+
+### M2c — The container and the orphans are deleted (Status: DONE)
 
 **Scenario**: none — deletion. Verified by the absence of any check that referenced them and by `nix flake check` still passing.
 
-- [ ] Delete `devenv.nix`, `devenv.yaml`, `ai.nix`, `draft1.md`, `draft2.md`
-- [ ] Delete the `.devenv*`, `devenv.local.nix` and `devenv.local.yaml` entries from `.gitignore`, which have nothing left to ignore
-- [ ] Add `/.agents/` to `.gitignore` ([D8](plan.md#d8))
-- [ ] `nix flake check` passes; `bash scripts/validate.sh --layer unit` passes
+- [x] Delete `devenv.nix`, `devenv.yaml`, `ai.nix`, `draft1.md`, `draft2.md`
+- [x] Delete the `.devenv*`, `devenv.local.nix` and `devenv.local.yaml` entries from `.gitignore`, which have nothing left to ignore
+- [x] Add `/.agents/` to `.gitignore` ([D8](plan.md#d8))
+- [x] Every instruction a reader could run that names a deleted file is corrected: `AGENTS.md`'s source-of-truth list, and `docs/HANDBOOK.md`'s devenv commands and format command
+- [x] `nix flake check` passes; `bash scripts/validate.sh --layer unit` reports `check_r7` and `check_bootstrap_mirror` passing, and the set `check_sc3` names is unchanged
+
+**Implementation notes.**
+
+- **The deletion falsified two documents, and one of them was a runnable command.** `grep` for each filename before deleting found `AGENTS.md`'s source-of-truth list naming `devenv.nix` as code, and `docs/HANDBOOK.md`'s `nixfmt flake.nix ai.nix devenv.nix`, which a human following the handbook would now watch fail. Both corrected, along with the `devenv shell` / `devenv container build` block, which described a capability this task removes; it now says there is no devenv path and why.
+- **Four Known drift entries were retired early, because they named files that no longer exist.** The devcontainer's four bind mounts, `ai.nix` being an unimported orphan, `devenv.nix`'s stray `^`, and `devenv.nix` claiming Apple Silicon against `flake.nix`'s hardcoded system. A drift entry about a deleted file is not drift, it is fiction, so `AGENTS.md` §1 requires fixing it where the wrong statement is rather than waiting. `M10` still owns the rest of that list.
+- **A criterion was corrected in place, the same stale wording `M2a` hit.** "`bash scripts/validate.sh --layer unit` passes" cannot hold while `check_sc3` is the progress bar. It now names the two checks that must pass and requires `check_sc3`'s set to be *unchanged*, which is the right property for a task that adds no scenario. Observed: 19 before and 19 after, the same list. `M3a` carries the last copy of the stale wording.
+- **No check was written, and none was needed.** Nothing in the suite referenced the deleted files, so there was no RED to reach; the deletion's own criterion is `nix flake check` still passing, observed `all checks passed!` exit 0. This is the one task in `M2` with no planted violation, because it adds no guard.
+- **`/.agents/` was verified to bite, not just to be present**: `git check-ignore -v .agents/probe` reported `.gitignore:17:/.agents/`.
+- **Two `devenv` mentions survive on purpose.** `AGENTS.md`'s preamble and `docs/HANDBOOK.md`'s opening both say a project can point at this repository "from a flake, a devenv configuration or a devcontainer". Those describe the *consumable surface offered to a downstream project*, not this repository's own deleted devenv files. Whether that offer is still honest is `M9`'s question, not this task's.
 
 `ai.nix` is the prior art and it earned its keep during `M1`: its comment "nono has no general `--env` flag" turned out true of the command line and false of the confinement description, which is how [D4](plan.md#d4) and [D6](plan.md#d6) came to be confirmed rather than guessed, and its `~/.claude` read-write grants are the arrangement [D14](plan.md#d14) rejects. All of that is now in `research.md` with its evidence, so deleting the file here — before `M8` reaches the agents it configured — loses nothing that `M8` will need.
 
@@ -201,35 +240,62 @@ ______________________________________________________________________
 
 ## M3 — The registry and the confinement description
 
-### M3a — The leak registry is typed and well-formed (Status: PENDING)
+### M3a — The leak registry is typed and well-formed (Status: DONE)
 
 **Scenario**: SC-2
 
 **RED**: write `check_registry` asserting the three invariants in [plan.md § Properties](plan.md#properties). It fails because `lib/leak-registry.nix` does not exist.
 
-- [ ] Check written and seen to FAIL with: `lib/leak-registry.nix: no such file`
-- [ ] `lib/leak-registry.nix` written with the `submodule` entry type and an **empty** entry list, carrying the comment explaining why the mechanism's own state root is not an entry ([D2](plan.md#d2)). That root is `$XDG_STATE_HOME/nono`, not `$HOME/.nono` — one research round claimed the latter and `M1c` observed the former
-- [ ] The spec's assumption about the mechanism's state root reads as an accepted leak rather than a registry entry, corrected in place if it does not
-- [ ] `nix eval --json .#leakRegistry` succeeds; `bash scripts/validate.sh --layer unit` passes
-- [ ] Both registry violations planted, seen to FAIL, reverted, recorded in plan.md
+- [x] Check written and seen to FAIL with: `lib/leak-registry.nix: no such file`
+- [x] `lib/leak-registry.nix` written with the `submodule` entry type and an **empty** entry list, carrying the comment explaining why the mechanism's own state root is not an entry ([D2](plan.md#d2)). That root is `$XDG_STATE_HOME/nono`, not `$HOME/.nono` — one research round claimed the latter and `M1c` observed the former
+- [x] The spec's assumption about the mechanism's state root reads as an accepted leak rather than a registry entry, corrected in place if it does not
+- [x] `nix eval --json .#leakRegistry` succeeds; `check_registry` passes, and the set `check_sc3` names is unchanged, this task adding no scenario check
+- [x] Both registry violations planted, seen to FAIL, reverted, recorded in plan.md
+- [x] `shellcheck` and `shfmt` are in the devShell and resolve from the store rather than a user profile, and the Known drift entry saying they are absent is retired
 
 An empty list is the expected outcome, not a placeholder: `M1b` resolved [D1](plan.md#d1) to the branch where no agent needs a credential file granted, and [D14](plan.md#d14) closed the one route that would have added one. The check must therefore hold over an empty list without passing vacuously — `check_registry` asserts the entry *type* rejects a malformed entry, which is a property of the type and does not need an instance.
 
-### M3b — A confinement description is generated and validates (Status: PENDING)
+**Implementation notes.**
+
+- The fourth criterion originally read "`bash scripts/validate.sh --layer unit` passes", which cannot hold while `check_sc3` is the feature's progress bar. Corrected in place to the property `M1a`, `M2a` and `M2c` already use. This was the last copy of that wording in `tasks.md`.
+- **The type settles shape, the check settles content.** `entryType` is a `types.submodule` with five named options, so `mode` outside `[read readwrite]` and any sixth key fail evaluation. `why = ""` deliberately *does* type-check, because an empty justification is a judgement about the text rather than about its type, and `check_registry` is what rejects it. That split is what makes the plan's two planted violations land on the check rather than on nix.
+- `entries = map checkEntry [ ]` rather than a bare list, so an entry cannot join the list unchecked without editing that line. `checkEntry` runs the candidate through `lib.evalModules` against `entryType`, and is exported as the flake output `leakRegistryCheckEntry` so the check can probe the type from outside.
+- **The empty list is not a vacuity problem, it is the answer.** Three of the check's assertions are properties of the type and need no instance: a well-formed entry must be accepted (the positive control), a bad `mode` must be rejected, and an extra key must be rejected. All three were planted against and all three bit.
+- **An ordering guard emerged that the plan did not anticipate.** Invariant 3 — every agent an entry names exists in the agent set — cannot be checked before `lib/agents.nix` exists, which is `M3b`. Rather than skip it silently or leave an untestable branch, the check looks up `.#agents` only when the registry is non-empty and fails with `the registry has entries but the agent set does not evaluate` if it cannot. Both entry plantings triggered it as a second finding, which is correct: today an entry genuinely cannot be added before `M3b` lands. Recorded as a sixth planted-violation row.
+- One real bug, caught before GREEN: capturing `nix eval` with `2>&1` fed `warning: Git tree … is dirty` into `jq`, giving `jq: parse error: Invalid numeric literal`. Fixed by not merging stderr where the output is parsed, and merging it only where a nix failure is the expected result. `run_check` prints captured output solely on FAIL, so a check's diagnostics can flow freely without being noise on a pass.
+- `lib/leak-registry.nix` had to be `git add`ed before `nix eval` could see it — a flake reads the git tree, not the working directory, so an untracked file is invisible.
+- **`shellcheck` and `shfmt` folded in on request.** Both are named in AGENTS.md's lint table and had been resolving from a user profile, so under §3 the lint step was not reproducible for a stranger. Now in the devShell, verified resolving from `/nix/store`.
+- **Six further Known drift entries retired**, having been falsified by `M2a`, `M2b` and this task rather than by close-out: the whole "environment still belongs to the previous project" block, the claim that `scripts/validate.sh` does not exist, the byte-identical mirror criterion, the hand-run bootstrap comparison now automated, and the absent linters. The handbook's verification section now names `scripts/validate.sh` and explains why it exits non-zero by design. `plan.md`'s close-out list was corrected to say which entries remain.
+
+### M3b — A confinement description is generated and validates (Status: DONE)
 
 **Scenario**: none directly — this is the artefact SC-1 asserts against. Verified by nono's own schema.
 
 **RED**: write the component check that runs `nono profile validate` on the generated profile. It fails because `lib/confinement.nix` does not exist.
 
-- [ ] Check written and seen to FAIL
-- [ ] `lib/agents.nix` and `lib/confinement.nix` written per [plan.md § Implementation shapes](plan.md#implementation-shapes), for `claude-code` only
-- [ ] The description names **no parent** and takes what it needs by group inclusion ([D10](plan.md#d10)); `meta.name` is set, because nono refuses the profile without it
-- [ ] `groups.include` carries `nix_runtime`, and does **not** carry `git_config` ([D11](plan.md#d11))
-- [ ] `environment.set_vars` carries the relocation variables `M1g` established, plus `GIT_CONFIG_GLOBAL` and `GIT_CONFIG_SYSTEM`
-- [ ] `nono profile validate` passes on the generated profile
-- [ ] Each omitted path carries a comment saying **why it is not granted** (P5)
+- [x] Check written and seen to FAIL
+- [x] `lib/agents.nix` and `lib/confinement.nix` written per [plan.md § Implementation shapes](plan.md#implementation-shapes), for `claude-code` only
+- [x] The description names **no parent** and takes what it needs by group inclusion ([D10](plan.md#d10)); `meta.name` is set, because nono refuses the profile without it
+- [x] `groups.include` carries `nix_runtime`, and does **not** carry `git_config` ([D11](plan.md#d11))
+- [x] `environment.set_vars` carries the relocation variables `M1g` established, plus `GIT_CONFIG_GLOBAL` and `GIT_CONFIG_SYSTEM`
+- [x] `nono profile validate` passes on the generated profile
+- [x] Each omitted path carries a comment saying **why it is not granted** (P5)
 
 `nix_runtime` is not optional cosmetics: `/nix/store` is absent from the floor, and a session without it exits 127 before the agent runs. It is included as a group rather than granted by path, because the group grants read and a path grant would give read **and** write to the store.
+
+**Implementation.** RED was `FAIL check_confinement_validates` / `lib/confinement.nix: no such file`. GREEN came on the first build after wiring the flake. The resolved manifest is 42 grants and 51 denies, against `M1e`'s bare-description baseline of 33 and 48; the eleven added `/nix` grants are all read.
+
+`lib/agents.nix` holds only `groups` and `stateVars`, and only `claude-code`. A field nothing reads is how a table starts lying, so `package` and `binary` wait for `M4`, `credential` for `M7`, and the other two agents for `M8`. The plan's sketch was annotated to say so rather than left reading as though this task fell short of it. Both this table and the registry run every entry through `lib.evalModules`, so a field is type-enforced from the moment it exists.
+
+**The description cannot suppress the update check, and the plan was wrong about how that fails.** The sketch had `NONO_NO_UPDATE_CHECK = "1"` in `set_vars`. It is not ignored: `validate` rejects the whole description with `Invalid set_vars key 'NONO_NO_UPDATE_CHECK': the NONO_* prefix is reserved`, exit 1, and `PATH` is refused the same way. Corrected in `plan.md` in place, including the P8 row of the Constitution Check; the entry point exports it before `exec`, which is where it belongs, since the call it suppresses is the supervisor's rather than the boundary's.
+
+The `set_vars` assertion is derived, not restated: the check applies the agent table's own `stateVars` function and requires every key and value to appear in the built description. Planting a `removeAttrs` in the description alone — leaving the table untouched — is what proves it, and that is the drift a restated list could never catch. `M8b` adding a variable needs no edit to the check.
+
+`validate` exiting 0 is a weak observable on its own, so the check carries a negative control in the same run: a copy of the description with one unresolvable group reference must be rejected. Neutering that mutation is one of the eight recorded plantings.
+
+**A lesson about plantings, now written into `plan.md`'s preamble.** The unknown-key planting appeared not to bite. The cause was a `sed` pattern that did not match the file, so nothing was planted at all — and a planting that never applied is indistinguishable from a check that never fires. Re-done against the real text, the check failed with nono's full enumeration of its thirty-five legal top-level keys, matching `M1e`'s record. The artefact is now inspected for the violation before its absence is believed.
+
+`shellcheck`'s `SC2016` is suppressed once, with its reason: `$WORKDIR` in the `--apply` expression must reach nono unexpanded.
 
 ### M3c — Granted reach is the project directory (Status: PENDING)
 

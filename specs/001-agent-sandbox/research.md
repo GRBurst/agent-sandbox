@@ -151,9 +151,41 @@ GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null git config --get credent
 
 **Decision.** Do not include nono's `git_config` group, grant no host git configuration file, and set `GIT_CONFIG_GLOBAL` to a project-owned file plus `GIT_CONFIG_SYSTEM=/dev/null` through `environment.set_vars`. Withholding the grant alone would already stop the read, but directing the toolchain instead makes the effective configuration identical on every machine — which is what the repetition scenarios ask for — and gives the commit identity somewhere to live. The author's name and address are copied out of the host once, at setup, and a consumer may override them; they are not credential material and the copy is visible in the file it produces. This is `spec.md`'s new **R10** and **FR-23**.
 
-### Verification gap — closed, with one constraint standing
+### Verification gap — closed, and the constraint it recorded was too strong
 
-`nono run` cannot be executed from inside this session: the outer sandbox denies `$HOME`, and nono fails to create `~/.local/state/nono/audit/…`. Everything above that needed a live session was therefore run outside it and reported back. The constraint stands for later work — anything requiring a live confined session is run by the human, or by the checks on a machine where `$HOME` is writable.
+Everything above that needed a live session was run outside this one and reported back, because a bare `nono run` from inside it fails:
+
+```text
+nono: Snapshot error: Failed to create session directory
+      /home/pallon/.local/state/nono/audit/…: Permission denied (os error 13)
+```
+
+`M1c` concluded from that failure that a confined session is unreachable from an agent session in this repository. **That is false, and the correction matters to the suite rather than only to the record**: nono derives its state root from the environment, so pointing the environment somewhere writable is enough. A real, kernel-enforced session runs from inside the outer sandbox under four conditions, each found by the failure it removes.
+
+| # | Condition | Observed failure when it is missing |
+| --- | --- | --- |
+| 1 | `TMPDIR` points inside the project | `nono: Sandbox initialization failed: Refusing to grant '/home/pallon/.cache/opencode/tmp' (source: group:system_write_linux) because it overlaps protected nono state root '…/nonostate/nono'.` |
+| 2 | `XDG_STATE_HOME` points at a writable path **outside** the project that no group grants | the state root is not granted to the supervisor, and the run fails after the child has finished |
+| 3 | `$XDG_STATE_HOME/nono/audit/ledger.ndjson` exists before the run | `nono: Snapshot error: Failed to copy legacy audit ledger to temporary file …/audit/ledger.ndjson.tmp: Permission denied (os error 13)` |
+| 4 | `/nix/store` is granted read | `/bin/sh` exits **127**, with nono's own diagnostic that it "resolved to /bin/sh and is readable, but execution still failed" |
+
+Condition 1 is the fail-closed refusal `plan.md` Risk 4 wants pinned, now observed rather than predicted: nono will not grant a path that overlaps its own state root, and says so instead of proceeding. Conditions 1 and 2 are therefore one constraint seen from both sides — the state root must be somewhere the sandbox neither grants nor denies. Condition 4 is `M1e`'s `nix_runtime` finding arriving by a different route.
+
+**Condition 3 is load-bearing for every check in this repository, not just for running by hand.** The migration that fails runs *after* the child exits, and its failure **replaces the child's exit status with 1**. A session whose child exited 0 reports 1; a refusal that should exit 77 reports 1. Every assertion in the suite that reads an exit status — the pre-flight's `77`, the refusal scenarios, their positive controls — would be reading the supervisor's cleanup rather than the child, and `check_controls` could not tell the difference. `touch`ing the ledger suppresses it; unsetting `NONO_AUTO_MIGRATE` does not. `scripts/checks/integration.sh` must establish it before its first session, and `NONO_NO_UPDATE_CHECK=1` from `M1e` goes in the same place.
+
+The incantation that satisfies all four:
+
+```sh
+env -u NONO_AUTO_MIGRATE -u NONO_CAP_FILE \
+  TMPDIR="$PWD/.tmp/t" \
+  XDG_STATE_HOME=/some/writable/path/outside/the/project \
+  NONO_NO_UPDATE_CHECK=1 \
+  nono run --allow-cwd --read /nix/store -- <cmd>
+```
+
+Verified with it, in this checkout, from an agent session: exit statuses propagate faithfully (`true` → 0, `false` → 1, `exit 77` → 77); a child's stdout is returned; a child reading `$HOME` is denied; a child writing a canary outside the project fails and the canary does not exist afterwards. So kernel enforcement is observable here, and the integration layer is not the human-only layer `M1c` took it for.
+
+**What still needs a human** is narrower than a layer. An interactive OAuth login needs a browser, and a live provider rejection needs a real account in a real state; both are already in `plan.md`'s coverage gap. That is why `M1g` is run by hand — not because a confined session is out of reach.
 
 ## M1d — pi's configuration root
 
@@ -450,7 +482,7 @@ Every version in the table above was read at `3589c005…`, so the lock must pin
 Availability was established by evaluation, not by building.
 `codex` was built during `M1b` and substituted without compiling; the other four were not built on either platform, and nothing here was built for `aarch64-darwin`, which no check in this repository can reach.
 
-## M1g — claude-code's configuration root (pending)
+## M1g — claude-code's configuration root
 
 The one relocation question `M1` left open, and it moved from peripheral to load-bearing when `claude-code` became both the reference case and the credential source for the other two agents. `M1d` did this work for `pi`; nothing equivalent was ever done here. `spec.md` only ever claimed relocation "with known fallback cases", on the strength of documentation rather than observation.
 
@@ -475,3 +507,56 @@ A first look at the payload, by `strings` occurrence count, says it relocates th
 Enough to expect success; nowhere near enough for FR-4 to lean on. A count of strings says a variable is read somewhere, not that it governs what it appears to govern — the `pi` case proved that in the other direction, where a variable the shipped documentation described did not exist in the binary at all.
 
 `M1g` mirrors `M1d` exactly: set the candidates, run the agent, observe whether anything is written beneath the home directory, and — the part `M1d` did not need — establish where the credential comes to rest, since FR-7's arrangement reads it from there. Same evidentiary standard: a control run without the overrides, so the default is fixed and the override is shown to be what moved it.
+
+### How it was observed
+
+Five phases, each a real `claude` invocation of `--version` and then one `-p` turn, against `claude` 2.1.233 and `nono` 0.73.0. Phases 1 and 2 run unconfined under a throwaway home directory, without and then with every candidate set, so the default is fixed by observation before the override is credited with moving it. Phases 3 and 4 repeat the pair inside a real confined session, which is what `M1c`'s correction above made reachable. Phase 5 asks the credential question directly, against the host's own authenticated state.
+
+Each candidate is exported to its **own** leaf directory named after the variable in lower case, so a file that appears attributes to the one variable that could have moved it rather than to a shared root. `CLAUDE_PROJECT_DIR` is set to the working directory and excluded from that scheme deliberately: it tells hooks where the project is, and a write diff cannot speak to a variable that governs no writes. Four `XDG_*` roots were added to the eleven remaining `CLAUDE_*` candidates, making fifteen, because the mechanism's own shipped `claude` package grants `$HOME/.cache/claude` and `$HOME/.local/state/claude/locks` and so implies the agent uses them.
+
+### It relocates, and three of the fifteen carry all of it
+
+| Variable | What was written under it, confined |
+| --- | --- |
+| `CLAUDE_CONFIG_DIR` | the whole root — `.claude.json`, `backups/.claude.json.backup.<epoch>`, `sessions/`, and the turn's transcript at `projects/<slug>/<uuid>.jsonl` |
+| `CLAUDE_CODE_TMPDIR` | `claude-1000/`, the per-uid scratch directory that otherwise lands in `/tmp` |
+| `CLAUDE_CODE_REMOTE_MEMORY_DIR` | `projects/<slug>/memory/` |
+
+The other twelve received nothing across every phase: `CLAUDE_JOB_DIR`, `CLAUDE_TMPDIR`, `CLAUDE_SECURESTORAGE_CONFIG_DIR`, `CLAUDE_CODE_PLUGIN_CACHE_DIR`, `CLAUDE_CODE_PLUGIN_SEED_DIR`, `CLAUDE_CODE_ADDITIONAL_DIR`, `CLAUDE_SKILL_DIR`, `CLAUDE_CODE_DEBUG_LOGS_DIR` and all four `XDG_*` roots. A one-turn exercise does not reach a plugin install or a background job, so silence here means *not needed for a session to run*, not *dead*. `M8b` sets them anyway, because the cost of setting a variable that governs nothing is zero and the cost of missing one is an escape.
+
+The control fixes the default precisely. With nothing set, claude created `$HOME/.claude/{backups,projects,sessions}`, `$HOME/.claude/projects/<slug>/memory/`, `$HOME/.claude.json` and a dated backup beside it. So the default home layout has exactly the three parts the three variables move, and the mapping is complete rather than merely non-empty.
+
+**`$HOME/.claude.json` is not a fallback.** It is the same file as `$CLAUDE_CONFIG_DIR/.claude.json`, and it moves. On the developing host `~/.claude.json` is a symlink into `~/.claude/`, which is that host's dotfile management and not the agent's behaviour — the throwaway-home control shows claude creating it as a real file.
+
+**Nothing was written beneath the home directory once the three were set.** The phase-2 diff of the throwaway home before and after the run is empty, and the confined phases left the real `~/.claude` and `~/.claude.json` untouched. This is criterion 1, and it is the answer FR-4 needs.
+
+### claude ignores XDG entirely
+
+All four `XDG_*` roots received nothing, which falsifies the inference drawn above from `XDG_CONFIG_HOME`'s 26 `strings` occurrences. The only thing that wrote into the relocated `XDG_CONFIG_HOME` was **the mechanism itself**, laying down `nono/profiles` and `nono/profile-drafts` — a supervisor artefact, from outside the boundary, not the agent's. That the shipped `claude` package grants `$HOME/.cache/claude` says what its author expected, not what the binary does.
+
+This is the third time in this feature that occurrence has failed to predict behaviour, after `pi`'s documented-but-absent override in `M1d` and the substitution premise `M1b` falsified. The four `XDG_*` roots stay out of `set_vars`, consistent with D13 and with plan.md's reasoning that a host-pointing `XDG_*` merely relocates the failure.
+
+### The credential rests inside the configuration root, so relocation alone cannot satisfy FR-7
+
+`claude auth status` emits JSON and is the machine-readable observable this question needed. Against the host's real home, with nothing overridden, it reports `loggedIn: true` with `authMethod: "claude.ai"` and `apiProvider: "firstParty"`, exit 0 — and a live `-p` turn returns its answer. Changing exactly two things, `CLAUDE_CONFIG_DIR` and its plausible companion `CLAUDE_SECURESTORAGE_CONFIG_DIR`, and nothing else, the same command reports `loggedIn: false` with `authMethod: "none"`, exit 1, and the turn prints `Not logged in · Please run /login`.
+
+So the credential lives inside the configuration root and follows it. It rests in `.claude.json` at that root's top level — the file the relocation moves, mode `0600` and 77 kB on the authenticated host — and **not** in the secure store, which stayed empty through every phase. `CLAUDE_SECURESTORAGE_CONFIG_DIR` governs nothing observable here.
+
+That closes criterion 3 with the answer the branch in plan.md called the second one: **FR-7 is not satisfiable by relocation.** Confining each project to its own configuration root logs each project out, so a machine-level credential has to reach the session by some route other than the filesystem — which is the supervisor-side injection [D1](plan.md#d1) and [D14](plan.md#d14) already chose, for independent reasons. The spike confirms the architecture rather than redirecting it. What `M7a` still owes is the key name inside that file, which it needs in order to write a `credential_key`; the outer sandbox denies reading `~/.claude.json` from an agent session, so that one fact is a human's to supply, and it is `M7a`'s question rather than this one's.
+
+**Criterion 4 is therefore answered in the negative: no path survives that forces a leak-registry entry.** Every path the agent writes relocates into the project. The only reason to grant anything outside it would be to let a confined claude read the host credential, which is precisely what D1 rejects. The registry stays empty, as [D2](plan.md#d2) concluded on separate grounds.
+
+### Two constraints on the confinement description, found by tripping over them
+
+Neither is about relocation, and both would have been found later and more expensively.
+
+- **The working directory must be granted read **and** write explicitly.** `--allow-cwd` grants it read-only by default — the flag's own help says "level set by profile, defaults to read-only" — and the first confined override run failed with `EACCES: permission denied, mkdir '…/.agents/claude/claude_code_tmpdir/claude-1000'`. That is the sandbox refusing, not the agent misbehaving, and read-only reach makes every agent useless. The description must set the level, or the entry point must grant `$WORKDIR` read-write itself.
+- **`TMPDIR` must resolve inside the working directory.** With `TMPDIR` outside it, claude refuses to start: `Temp directory …/.tmp/claude-1000 is not readable (its mode may have been altered, or a path component denies search). Refusing to use it … Set CLAUDE_CODE_TMPDIR to a directory you control`. The bootstrap's `TMPDIR=$PWD/.tmp` already satisfies this, and now has a reason attached rather than being a convention. Note that claude's own diagnostic names `CLAUDE_CODE_TMPDIR`, corroborating the table above from a second direction.
+
+The confined control is worth stating on its own, because it is FR-21 and FR-16 observed at once: with nothing set and the host home denied by the boundary, `claude --version` still exits 0 and the turn reports `Not logged in` rather than crashing on an unreadable path. Host-global configuration neither reaches the session nor breaks it, and the resulting failure is legibly an authentication failure and not a confinement denial.
+
+### Incidental, and carried into implementation
+
+`claude doctor` reports `Auto-updates: disabled (set by env: DISABLE_AUTOUPDATER)` — inherited from the developing session, so the description must set `DISABLE_AUTOUPDATER` itself rather than depend on it, or P8 holds only on this machine. `claude plugin list` and `claude mcp list` both exit 0 with a definite empty answer, which gives `M7` and `M8b` clean observables. `claude project purge` deletes all state for one project. A `.claude.json.lock` **directory** appears under the configuration root, which is the fallback path spec Risk 12 names and `M8b` owns.
+
+The harness and its full transcript live under `.tmp/m1g/`, which is gitignored; nothing in it is a check, and the checks that make these findings permanent belong to `M4b`, `M7a` and `M8b`.

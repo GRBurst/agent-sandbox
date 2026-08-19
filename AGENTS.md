@@ -12,7 +12,7 @@ This file describes **how we work**.
 
 ## 1. Source of truth
 
-1. **The code** — `flake.nix`, `devenv.nix`, `.envrc`, the modules and the scripts.
+1. **The code** — `flake.nix`, `.envrc`, the modules and the scripts.
    Behaviour is whatever they say.
 1. **[docs/HANDBOOK.md](docs/HANDBOOK.md)** — how to use the repository today, including what it does not yet do.
 1. **[docs/CONSTITUTION.md](docs/CONSTITUTION.md)** — the principles every change is measured against.

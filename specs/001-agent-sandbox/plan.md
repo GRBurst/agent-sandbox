@@ -6,11 +6,11 @@
 
 **Motivation.** The repository keeps its own tools inside the checkout and does nothing to keep an *agent* there. Its only attempt at confinement — a generated devcontainer bind-mounting four host agent directories read-write — shares credentials and session state with every other consumer of that home. This feature replaces it with kernel-enforced host-level confinement.
 
-**Approach.** `flake.nix` exports a devShell whose `PATH` carries one confined entry point per agent. Each entry point is `pkgs.writeShellApplication` that (1) runs a **functional** pre-flight — a confined child that must fail to write outside the project, else exit `77` — and (2) `exec`s `nono run --profile <store path> --workdir "$PWD"`. The confinement description is a JSON profile built by Nix into the store, naming **no parent** and declaring everything it wants, using nono's own `$WORKDIR` expansion so **nothing is generated per project**. Agent state is relocated into `$WORKDIR/.agents/<agent>` via `environment.set_vars`; host variables are filtered default-deny via `environment.allow_vars`. `scripts/validate.sh` is the single entry point and derives its expected reach from `lib/leak-registry.nix` rather than restating it.
+**Approach.** `flake.nix` exports a devShell whose `PATH` carries one confined entry point per agent. Each entry point is `pkgs.writeShellApplication` that (1) runs a **functional** pre-flight — a confined child that must fail to write outside the project, else exit `77` — and (2) `exec`s `nono run --profile <store path> --workdir "$PWD"`. The confinement description is a JSON profile built by Nix into the store, naming **no parent** and declaring everything it wants, using nono's own `$WORKDIR` expansion so **nothing is generated per project**. Agent state is relocated into `$WORKDIR/.agents/<agent>` via `environment.set_vars`; host variables are filtered default-deny via `environment.allow_vars`. `$WORKDIR` is granted **read and write** explicitly, because `M1g` found `--allow-cwd` grants it read-only by default and a read-only project makes every agent useless. `scripts/validate.sh` is the single entry point and derives its expected reach from `lib/leak-registry.nix` rather than restating it.
 
 **Predicted diff shape.** `devenv.*`, `ai.nix` and the drafts are deleted; `flake.nix` is rewritten around two systems and a `lib/` of four small Nix files; `scripts/validate.sh` and a two-platform CI workflow are new; `docs/` is updated at close-out.
 
-**The pivot, resolved.** `M1b` closed [Decision D1](#d1) by falsifying its premise, and `M1c`–`M1f` closed the rest. One question remains open and it now sits under the first agent rather than the last: whether `claude-code`'s configuration root relocates far enough, which spike `M1g` settles before `M4` starts. `claude-code` is the reference case because `opencode` and `pi` take their credential from the session it authenticates (FR-7), so nothing about FR-6 or FR-7 is demonstrable until it works.
+**The pivot, resolved.** `M1b` closed [Decision D1](#d1) by falsifying its premise, and `M1c`–`M1g` closed the rest. `M1g` was the last of them and the one that could have redirected the design: `claude-code`'s configuration root does relocate, through three of thirteen candidate variables, and nothing survives beneath the home directory — but the credential relocates **with** it, so FR-7 is not satisfiable by relocation and needs exactly the supervisor-side injection D1 and [D14](#d14) had already chosen. `claude-code` is the reference case because `opencode` and `pi` take their credential from the session it authenticates (FR-7), so nothing about FR-6 or FR-7 is demonstrable until it works.
 
 ## Read first
 
@@ -25,7 +25,7 @@ Read these before writing anything. Do not skim `ai.nix`; it is the working prio
 | `docs/CONSTITUTION.md` | P1…P9. The Constitution Check below is a gate against this file |
 | `docs/HANDBOOK.md` | Current truth and the Known drift list this feature retires |
 | `ai.nix` | The reference implementation of host-side nono confinement, with the hard-won facts as comments |
-| `flake.nix`, `.envrc`, `.gitignore` | What is being rewritten; the two bootstrap variables must stay byte-identical across the first two |
+| `flake.nix`, `.envrc`, `.gitignore` | What is being rewritten; the two bootstrap variables must resolve to the same value in the first two |
 | `draft1.md`, `draft2.md` | The option surface proposals. Read for intent; the spec deliberately does not adopt them |
 | `devenv.nix`, `devenv.yaml` | What is being deleted, including the four bind mounts that are the leak |
 | `specs/templates/tasks.md` | The task shape `tasks.md` instantiates |
@@ -52,14 +52,14 @@ Read these before writing anything. Do not skim `ai.nix`; it is the working prio
 
 | Principle | Verdict | How |
 | --- | --- | --- |
-| **P1** Isolation is the product | **PASS** | Agent state is relocated into `$WORKDIR/.agents/<agent>` with each agent's *own* variable, never a blanket `XDG_CONFIG_HOME`. Granted reach is `$WORKDIR` ∪ registry, asserted by `check_sc1` against `lib/leak-registry.nix`. One new accepted leak: `$XDG_STATE_HOME/nono`, enumerated and justified in `docs/HANDBOOK.md`, joining the existing `source_up_if_exists`. The two bootstrap variables stay byte-identical in `.envrc` and `flake.nix`, now with a check that parses both |
+| **P1** Isolation is the product | **PASS** | Agent state is relocated into `$WORKDIR/.agents/<agent>` with each agent's *own* variable, never a blanket `XDG_CONFIG_HOME`. Granted reach is `$WORKDIR` ∪ registry, asserted by `check_sc1` against `lib/leak-registry.nix`. One new accepted leak: `$XDG_STATE_HOME/nono`, enumerated and justified in `docs/HANDBOOK.md`, joining the existing `source_up_if_exists`. The two bootstrap variables resolve to the same value in `.envrc` and `flake.nix`, now with a check that runs both and compares what each leaves behind |
 | **P2** Test first, prove the check bites | **PASS** | `check_sc3` (scenario ↔ check bijection) goes red first, before any implementation exists. Every check below has a row in [Planted violations](#planted-violations), and every check whose observable is a *failure* carries a positive control in the same session per [D9](#d9), so the failure is attributable to the boundary rather than to a session that never started |
 | **P3** Scenarios are the success criteria | **PASS** | 20 scenarios, 20 checks, bijection asserted executably by `check_sc3` rather than by review |
 | **P4** One step at a time | **PASS** | `tasks.md` is one scenario per task; the two tasks that risk the ~50-line ceiling (`M4a` pre-flight, `M7a` credential profile) are split at their natural seam |
 | **P5** Clean code invariants | **PASS** | `mkConfinedAgent`, `mkConfinementDescription`, `preflight_or_die` each do one thing. Comments record *why a path is not granted*: `$XDG_STATE_HOME/nono` (nono refuses overlapping grants), `$XDG_RUNTIME_DIR` (holds keyring and D-Bus), every host git configuration file (a directive in one runs a program inside the boundary — [D11](#d11)) |
 | **P6** Refactor as a separate phase | **PASS** | `M8a` is a pure refactor: extract `mkConfinedAgent` from the `claude-code`-specific wrapper. Preservation proven by `nix eval --json .#confinement.claude-code \| jq -S .` diffing empty across it |
 | **P7** Ubiquitous language, modelled options | **PASS** | The spec's Vocabulary is used verbatim in Nix attribute names, shell function names and docs. A registry entry is a `submodule` with five typed fields, never `attrsOf str`. nono's boundary merge semantics are written down in [D4](#d4) because they are part of the contract |
-| **P8** Purity, effects at the boundary, idempotency | **PASS** | No `builtins.getEnv`, no `--impure`. Confinement descriptions name no parent and declare everything, so nothing is fetched from `registry.nono.sh` at run time and a description cannot inherit a grant a packaged one chooses to make — `M1e` found the mechanism ships no agent preset at all, only language runtimes, and that a description resolves identically whether or not it names the built-in floor. `NONO_NO_UPDATE_CHECK=1` is set so no background network call happens either — `M1e` observed that without it even `nono profile list` calls home. Rep1–Rep3 cover idempotency |
+| **P8** Purity, effects at the boundary, idempotency | **PASS** | No `builtins.getEnv`, no `--impure`. Confinement descriptions name no parent and declare everything, so nothing is fetched from `registry.nono.sh` at run time and a description cannot inherit a grant a packaged one chooses to make — `M1e` found the mechanism ships no agent preset at all, only language runtimes, and that a description resolves identically whether or not it names the built-in floor. `NONO_NO_UPDATE_CHECK=1` is exported by the entry point so no background network call happens either — `M1e` observed that without it even `nono profile list` calls home, and `M3b` found the description structurally cannot carry it because the `NONO_*` prefix is reserved in `set_vars`. Rep1–Rep3 cover idempotency |
 | **P9** Explicit outcomes, no silent fallbacks | **PASS** | `set -euo pipefail` throughout. The pre-flight has **three** assertions, not one, so "nono failed to start" cannot be mistaken for "the child was denied". No bare `or`; the agent table is an `enum`-keyed attrset with an assertion on lookup failure |
 
 Complexity tracking is empty: the gate passed cleanly.
@@ -143,7 +143,7 @@ Complexity tracking is empty: the gate passed cleanly.
 .
 ├── flake.nix                        modified  description, 2 systems, devShell, packages, checks
 ├── flake.lock                       modified  nono + agent packages pinned
-├── .envrc                           unchanged the two bootstrap variables stay byte-identical
+├── .envrc                           comment only the two bootstrap variables resolve alike
 ├── .gitignore                       modified  Kafka rules out; /.agents/ in
 ├── README.md                        new       AGENTS.md §6: component table + 2 mermaid diagrams
 ├── devenv.nix                       deleted   the container and its four bind mounts
@@ -178,6 +178,8 @@ Signatures and structures, laid out so implementation is mechanical. Types in `�
 
 ### `lib/agents.nix`
 
+The sketch below is the table's final shape, not its first one. `M3b` wrote only `groups` and `stateVars`, and only for `claude-code`, because a field nothing reads is how a table starts lying: `package` and `binary` arrive with `M4`, which builds the entry point that runs them, `credential` with `M7`, which asserts its shape, and the other two agents with `M8`, where the checks that observe them live. The type is a `submodule` evaluated per entry, so each field is enforced from the moment it exists.
+
 ```nix
 # agent ∷ { package, binary, groups, stateVars, credential }
 # The set of agents is closed (FR-1) and keyed by name; P9 forbids a silent
@@ -192,10 +194,16 @@ Signatures and structures, laid out so implementation is mechanical. Types in `�
     package   = pkgs: pkgs.claude-code;         # unfree; allowUnfree scoped to this pkgs
     binary    = "claude";
     groups    = [ "nix_runtime" ];              # the store is absent from the floor (D10)
-    # M1g fills this in. The binary reads many candidate variables rather than
-    # one, and a strings count does not establish which of them governs; pi
-    # proved the converse, documenting an override that does not exist.
-    stateVars = w: { CLAUDE_CONFIG_DIR = "${w}/.agents/claude"; };
+    # M1g observed which of the thirteen candidates govern: three do, and
+    # together they cover the whole default home layout. The rest are set by
+    # M8b for the paths a one-turn session never reaches. XDG_* is absent
+    # because M1g found claude ignores it entirely, despite the strings count.
+    stateVars = w: {
+      CLAUDE_CONFIG_DIR             = "${w}/.agents/claude";
+      CLAUDE_CODE_TMPDIR            = "${w}/.agents/claude/tmp";
+      CLAUDE_CODE_REMOTE_MEMORY_DIR = "${w}/.agents/claude/memory";
+      DISABLE_AUTOUPDATER           = "1";   # M1g: inherited on the dev host, so P8 needs it set here
+    };
     credential = { tokenHost = "platform.claude.com"; apiHost = "api.anthropic.com"; };
   };
   opencode = {
@@ -287,7 +295,6 @@ pkgs.writeText "nono-profile-${name}.json" (builtins.toJSON {
   environment = {
     allow_vars = [ "HOME" "USER" "LOGNAME" "TERM" "LANG" "LC_*" "PWD" "SHELL" "TZ" "COLORTERM" ];
     set_vars   = (a.stateVars w) // {
-      NONO_NO_UPDATE_CHECK = "1";
       # D11 / FR-23. The toolchain is directed, not merely denied, so its
       # effective configuration is the same on every machine.
       GIT_CONFIG_GLOBAL = "${w}/.agents/git/config";
@@ -297,6 +304,8 @@ pkgs.writeText "nono-profile-${name}.json" (builtins.toJSON {
   network = { … };            # filled by M7 per D1, D12 and D14
 })
 ```
+
+`set_vars` cannot carry `NONO_NO_UPDATE_CHECK`, and `M3b` found out which way that fails. The prefix is not merely ignored: `validate` rejects the description outright with `Invalid set_vars key 'NONO_NO_UPDATE_CHECK': the NONO_* prefix is reserved`, exit 1, and `PATH` is refused the same way. So the description cannot suppress the update check, and the entry point exports the variable itself before it `exec`s — which is where it belongs anyway, since the call it suppresses is made by the supervisor rather than inside the boundary.
 
 `HOME` is allowed through but **not** rewritten — D13. It reaches the session as the host home, which is denied, so a tool that ignores its own relocation variable fails outright rather than writing somewhere nobody declared. The `XDG_*` variables are absent from `allow_vars` for the same reason in reverse: leaving them pointing at host paths would have a tool fail at a path this environment never chose, where dropping them makes it fall back to its own default under `HOME` and fail there, which is the one denial the pre-flight already proves.
 
@@ -420,8 +429,8 @@ check_sc1() {
 - **Files touched**: `flake.nix`, `flake.lock`, `.gitignore`, new `lib/` (4 files), new `scripts/` (5 files), new `.github/workflows/verify.yml`, new `README.md`, `docs/HANDBOOK.md`, `docs/CONSTITUTION.md`, `AGENTS.md` (one sentence). Deleted: `devenv.nix`, `devenv.yaml`, `ai.nix`, `draft1.md`, `draft2.md`.
 - **Consumers affected**: none exist yet. The devcontainer path disappears; `docs/HANDBOOK.md` currently documents it as unverified, so nothing verified is withdrawn.
 - **Inputs added or bumped**: `nixpkgs` re-locked. A pinned `numtide/llm-agents.nix` input is added — `M1f` found `pi` absent from nixpkgs entirely, which was the condition. It is the **sole** source of `nono`, `claude-code`, `opencode` and `pi`, both in the environment a human enters and in every check, so that one pin describes what is verified and what is shipped. Its `nixConfig` is not inherited by a consumer of this flake, so `https://cache.numtide.com` and its key `niks3.numtide.com-1:DTx8wZduET09hRmMtKdQDxNNthLQETkc/yaX7M4qK0g=` are declared here as well and passed explicitly in CI; without that, a clean machine builds every one of them from source.
-- **Tools added to the environment**: `nono` (the mechanism), `shellcheck` + `shfmt` (AGENTS.md names them and they are absent — Known drift), `jq` (checks parse JSON; P9 requires generated JSON be validated rather than eyeballed).
-- **Docs to update at close-out**: `docs/HANDBOOK.md` — retires the Known drift entries for the Kafka leftovers, the `x86_64-linux` hardcoding, the four devcontainer bind mounts, the orphaned `ai.nix`, the stray `^`, the missing `scripts/validate.sh`, the missing `README.md` and the absent `shellcheck`/`shfmt`; adds the accepted-leak entry for `$XDG_STATE_HOME/nono` and the coverage gap. `README.md` — new. `AGENTS.md` — the "no CD pipeline" sentence gains "non-deploying CI is permitted". `docs/CONSTITUTION.md` — P1's accepted-leak list gains its second entry.
+- **Tools added to the environment**: `nono` (the mechanism), `shellcheck` + `shfmt` (AGENTS.md names them; added to the devShell in `M3a`, having resolved only from a user profile until then), `jq` (checks parse JSON; P9 requires generated JSON be validated rather than eyeballed).
+- **Docs to update at close-out**: `docs/HANDBOOK.md` — the Known drift entries for the Kafka leftovers, the four devcontainer bind mounts, the orphaned `ai.nix`, the stray `^`, the missing `scripts/validate.sh` and the absent `shellcheck`/`shfmt` were each retired by the task that falsified them, since a drift entry about code that no longer exists is fiction; what remains for close-out is the `x86_64-linux` hardcoding, the missing `README.md`, the isolation entry, and adding the accepted-leak entry for `$XDG_STATE_HOME/nono` and the coverage gap. `README.md` — new. `AGENTS.md` — the "no CD pipeline" sentence gains "non-deploying CI is permitted". `docs/CONSTITUTION.md` — P1's accepted-leak list gains its second entry.
 
 ## Test strategy
 
@@ -480,7 +489,7 @@ Every row was audited against one question, after `check_j6_1` was twice written
 | SC-1 | `check_sc1` — the reach property, derived from the registry | component |
 | SC-2 | `check_registry` — registry invariants | unit |
 | SC-3 | `check_sc3` — the scenario ↔ check bijection | unit |
-| P1 mirror | `check_bootstrap_mirror` — the two bootstrap variables byte-identical in `.envrc` and `flake.nix` | unit |
+| P1 mirror | `check_bootstrap_mirror` — the bootstrap variables resolve to the same values in `.envrc` and `flake.nix` | unit |
 | D4 | `check_component_merge` — the floor, the included groups and the description's own declarations combine as [D4](#d4) claims, read off the resolved manifest | component |
 | D9 | `check_controls` — every refusal check invokes a positive control | unit |
 
@@ -503,7 +512,7 @@ Asserted as properties, derived from the system under test, so a new agent or a 
 - `∀ a ∈ agents. ∀ p ∈ granted(a). realpath(p) ⊑ $PWD ∨ p ∈ registry` — SC-1, and with the registry empty it collapses to equality, which is stronger
 - `∀ a ∈ agents. ∀ (k,v) ∈ set_vars(a). v ⊑ "$WORKDIR"` — FR-4 as a property over the agent table, not a list of variable names
 - `scenarios(spec.md) = checks(validate.sh)` as sets — SC-3
-- `bootstrap_vars(.envrc) ≡ bootstrap_vars(flake.nix)` byte-for-byte — P1
+- `resolve(bootstrap_exports(.envrc)) ≡ resolve(shellHook(flake.nix))` over the names `.envrc` itself exports before handing over to the flake — P1. Comparing resolved values rather than source text, because nix's indented strings escape where a shell does not, so equal text is neither necessary nor sufficient
 - `∀ e ∈ registry. e.why ≠ "" ∧ e.whyNotNarrower ≠ "" ∧ ¬(e.path ⊑ "$WORKDIR")` — FR-3
 - `∀ a ∈ agents. deny_group_paths ∩ subtree($WORKDIR) = ∅` — the Landlock constraint that a broad grant must not span a deny path
 - `granted(a) on linux ≡ granted(a) on darwin` — FR-20, asserted by comparing the two CI jobs' resolved output
@@ -513,7 +522,7 @@ Literals are pinned in exactly two places, and both are criteria rather than val
 
 ### Planted violations
 
-Mandatory per P2. Tick `Verified` only after seeing red.
+Mandatory per P2. Tick `Verified` only after seeing red, **and only after confirming the planting actually landed**. `M3b` planted an unknown top-level key with a `sed` whose pattern did not match the file, saw the check pass, and nearly recorded that as a check which does not bite. A planting that never applied and a check that never fires look identical from the outside, so the artefact is inspected for the violation before its absence is believed.
 
 | Check | Violation planted | Must FAIL with | Verified |
 | --- | --- | --- | --- |
@@ -522,10 +531,24 @@ Mandatory per P2. Tick `Verified` only after seeing red.
 | `check_sc3` | Point `SPEC` at a file declaring no scenarios | `parsed no scenarios out of …; the parser and the spec have drifted` | [x] |
 | `validate.sh` | Select a layer whose file carries no check | `no checks ran; the suite would report success without testing anything`, exit `2` | [x] |
 | `validate.sh` | Pass an argument outside the accepted set | `unknown argument: --bogus`, exit `2` | [x] |
-| `check_registry` | Add an entry with `whyNotNarrower = ""` | `registry entry '<path>' does not say why a narrower grant fails` | [ ] |
-| `check_registry` | Add an entry whose `path` is `"$WORKDIR/.agents"` | `registry entry inside the project is not an exception` | [ ] |
-| `check_bootstrap_mirror` | Change `TMPDIR` in `.envrc` only | `bootstrap variables differ between .envrc and flake.nix` | [ ] |
-| `check_r7` | Re-add `kcat` to the devShell package list | `kafka artefact present in devShell: kcat` | [ ] |
+| `check_registry` | Add an entry with `whyNotNarrower = ""` | `registry entry '<path>' does not say why a narrower grant fails` | [x] |
+| `check_registry` | Add an entry whose `path` is `"$WORKDIR/.agents"` | `registry entry inside the project is not an exception: $WORKDIR/.agents` | [x] |
+| `check_registry` | Type `path` as `types.int`, so the type rejects a well-formed entry | `positive control absent: the entry type rejects a well-formed entry, so the rejection below proves nothing` | [x] |
+| `check_registry` | Weaken `mode` from `types.enum` to `types.str` | `the entry type accepted a malformed entry: { … mode = "sideways"; … }` | [x] |
+| `check_registry` | Give the submodule a `freeformType`, so a fifth key is admitted | `the entry type accepted a malformed entry: { … extra = true; }` | [x] |
+| `check_registry` | Add any entry while `.#agents` does not yet exist | `the registry has entries but the agent set does not evaluate` | [x] |
+| `check_bootstrap_mirror` | Change `TMPDIR` in `.envrc` only | `bootstrap variables differ between .envrc and flake.nix` | [x] |
+| `check_bootstrap_mirror` | Delete both exports from `.envrc`, emptying the bootstrap region | `no exports found before 'use flake' in .envrc; the mirror comparison would be vacuous` | [x] |
+| `check_r7` | Re-add `kcat` to the devShell package list | `kafka artefact present in devShell: kcat` | [x] |
+| `check_r7` | Remove the positive control `jq` from the devShell | `positive control absent: the devShell declares no jq, so the assertions above hold vacuously` | [x] |
+| `check_confinement_validates` | Add an unknown top-level key `not_a_real_key` to the description | `the generated description for claude-code does not validate`, and nono enumerates the whole profile surface | [x] |
+| `check_confinement_validates` | Reduce the negative control's mutation to `jq '.'`, so nothing malformed is offered | `negative control absent: validate accepted a profile naming a group that does not exist, so its acceptance above proves nothing` | [x] |
+| `check_confinement_validates` | Add `extends = [ "default" ]` | `the description names a parent, but D10 says naming one implies an inheritance that does not happen` | [x] |
+| `check_confinement_validates` | Set `meta.name` to something other than the agent's name | `meta.name is something-else, not the agent name claude-code` | [x] |
+| `check_confinement_validates` | Empty `groups` in the agent table | `groups.include does not carry nix_runtime, so the session cannot execute from the store` | [x] |
+| `check_confinement_validates` | Add `git_config` to the agent's groups | `groups.include carries git_config, which D11 excludes` | [x] |
+| `check_confinement_validates` | Drop `CLAUDE_CONFIG_DIR` from the description's `set_vars` but not from the agent table | `set_vars does not carry the agent table entry CLAUDE_CONFIG_DIR=$WORKDIR/.agents/claude` | [x] |
+| `check_confinement_validates` | Delete `GIT_CONFIG_GLOBAL` from `set_vars` | `set_vars does not carry GIT_CONFIG_GLOBAL, so the version-control toolchain is undirected` | [x] |
 | `check_sc1` | Add `$HOME/.ssh` to `filesystem.read` in `confinement.nix` | `granted path outside project and not in registry: …/.ssh` | [ ] |
 | `check_component_merge` | Assert that a description's own grant beats a `required` group's `deny` for the same path | the resolved manifest still denies the path, so the assertion fails | [ ] |
 | `check_r5` | Make the wrapper read the in-checkout agent config when composing the description | the `$HOME` the checkout asked for appears in the resolved reach | [ ] |
