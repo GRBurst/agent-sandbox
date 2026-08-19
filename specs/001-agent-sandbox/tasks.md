@@ -10,7 +10,7 @@ ______________________________________________________________________
 
 The four spikes exist because [D1](plan.md#d1) forks the architecture and the fork cannot be guessed. Each spike ends with a written finding in `research.md`, not with code.
 
-### M1a — The scenario ↔ check bijection (Status: PENDING)
+### M1a — The scenario ↔ check bijection (Status: IMPLEMENTED)
 
 The first check written, before any implementation exists. It fails immediately and keeps failing until the last scenario lands, so it is the feature's progress bar.
 
@@ -18,12 +18,21 @@ The first check written, before any implementation exists. It fails immediately 
 
 **RED**: `scripts/validate.sh` does not exist. Create it with `set -euo pipefail`, a `--list` flag and `check_sc3` only. It parses scenario IDs out of `spec.md` and `check_*` function names out of itself, and diffs the sets.
 
-- [ ] Check written and seen to FAIL with: `scenario ↔ check bijection broken` listing all 19 missing checks
-- [ ] `bash scripts/validate.sh --layer unit` runs and reports the 19 as missing without erroring on its own parsing
-- [ ] Violation planted (delete `check_r5` once stubs exist), seen to FAIL, reverted, recorded in [plan.md](plan.md#planted-violations)
-- [ ] `shellcheck` and `shfmt -d` clean
+- [x] Check written and seen to FAIL with: `scenario ↔ check bijection broken` listing all 19 missing checks
+- [x] `bash scripts/validate.sh --layer unit` runs and reports the 19 as missing without erroring on its own parsing
+- [x] Violation planted (delete `check_r5` once stubs exist), seen to FAIL, reverted, recorded in [plan.md](plan.md#planted-violations)
+- [x] `shellcheck` and `shfmt -d` clean
 
-### M1b — Spike: can each agent be pointed at a substituted endpoint? (Status: PENDING)
+**Implemented.** `scripts/validate.sh` is the driver and `scripts/checks/<layer>.sh` holds the checks, one file per layer, `unit component integration e2e` cheapest first. Nothing enumerates the checks: the driver greps `^check_*()` out of each layer file, so a check cannot be added without being run.
+
+Decisions the plan did not anticipate:
+
+- **Checks live in `scripts/checks/<layer>.sh`, not inside `validate.sh`.** The plan's sketch put `check_sc3` in `validate.sh` itself. A single file holding all 19 scenario checks across four layers would not survive M5–M8, and the layer a check belongs to is then implicit. The file *is* the layer declaration. `check_sc3` derives both sides of the bijection from source — scenario IDs by parsing the spec's `## Scenarios` section, check IDs by grepping the layer files — so neither side is a list anyone maintains by hand.
+- **Every layer file is sourced even under `--layer`**, because `check_sc3` asserts over the whole suite; running only the unit layer must not make the bijection look satisfied.
+- **Three anti-vacuity guards were added and each was proven to bite**, since a bijection between two empty sets holds while testing nothing: a suite that ran no checks exits `2`, a spec that parses to no scenarios fails, and an unrecognised argument exits `2` rather than being ignored (P9).
+- The planted violation for `check_r5` needed a green suite to bite, so all 19 checks were stubbed transiently, the deletion was observed to isolate exactly `r5`, and the stubs were removed. The suite is intentionally left RED: `check_sc3` is the feature's progress bar and goes green only when the last scenario lands.
+
+### M1b — Spike: can each agent be pointed at a substituted endpoint? (Status: IMPLEMENTED)
 
 The pivot. Determines whether the leak registry is empty or holds one credential file per agent, per [D1](plan.md#d1).
 
@@ -31,51 +40,95 @@ The pivot. Determines whether the leak registry is empty or holds one credential
 
 **RED**: not applicable; a spike has no check. It is a task because it is a commit and it blocks `M7`.
 
-- [ ] For each of `codex`, `claude-code`, `opencode`, `pi`: record whether the provider base URL is configurable, and by which variable or config key
-- [ ] Record whether `network.credentials` proxy-side injection reaches each agent, or only `credential_providers` phantom capture
-- [ ] `research.md` states the finding per agent with its source
-- [ ] [D1](plan.md#d1) resolved in `plan.md` to (a) or (b), per agent, with the weaker tier named where it applies
+- [x] For each of `codex`, `claude-code`, `opencode`, `pi`: record whether the provider base URL is configurable, and by which variable or config key
+- [x] Record whether `network.credentials` proxy-side injection reaches each agent, or only `credential_providers` phantom capture
+- [x] `research.md` states the finding per agent with its source
+- [x] [D1](plan.md#d1) resolved in `plan.md` to (a) or (b), per agent, with the weaker tier named where it applies
 
-### M1c — Spike: where does `git` get its credential inside the boundary? (Status: PENDING)
+**Implementation notes.**
+
+- The spike's premise was wrong and the correction is the finding. `nono` is a TLS-terminating proxy with its own generated CA (`nono proxy --proxy-ca-cert/--proxy-ca-key/--proxy-ca-validity`), so a credential is injected on the way past the real hostname and endpoint substitution is a fallback for clients that cannot be intercepted, not a precondition. `base_url_env_var` is optional on both `CommandCredentialConfig` and `credential_routes`.
+- Both mechanisms hold the real secret in the un-sandboxed supervisor, so `credential_providers` is the OAuth **shape**, not a weaker tier. D1 resolves to **(a) for all four agents**, no weaker tier, registry still expected empty.
+- All four agents were inspected rather than reasoned about: `claude-code` `ANTHROPIC_BASE_URL`, `opencode` `provider.<id>.options.baseURL`, `pi` `providers.<id>.baseUrl`, `codex` `model_providers.<id>.base_url`. `codex` was built from the pinned nixpkgs to check it; it substituted without compiling.
+- Two findings the plan did not anticipate, recorded in `research.md` and carried forward: `nono run --credential __bogus__ --dry-run true` exits 0, so nono does not validate credential service names and the wrapper must; and the shipped `nolabs-ai/claude` pack grants `$HOME/.claude` read-write, which is the leak this feature removes, so that pack cannot be extended unmodified.
+- `spec.md` Risk 1 (line 302) asserts "whether each agent's provider endpoint is configurable is what FR-6 actually turns on". That is now falsified. Left unedited: the spec is human-approved, and Risk 1 is retired at close-out in `M10`.
+
+### M1c — Spike: where does `git` get its credential inside the boundary? (Status: IMPLEMENTED)
 
 Journey 6 may be unachievable as written — spec Risk 2, which is a gap in the spec rather than in the research.
 
 **Scenario**: none — investigation blocking Journey 6.
 
-- [ ] Establish what a host credential helper, `~/.git-credentials` and the system keychain each do under confinement
-- [ ] Decide: a registry entry for `git`, routing `git` through substitution, or narrowing Journey 6 to a credential-free toolchain
-- [ ] `research.md` records the decision; if Journey 6 narrows, `spec.md` is corrected in place rather than annotated
+- [x] Establish what a host credential helper, `~/.git-credentials` and the system keychain each do under confinement
+- [x] Decide: a registry entry for `git`, routing `git` through substitution, or narrowing Journey 6 to a credential-free toolchain
+- [x] `research.md` records the decision; if Journey 6 narrows, `spec.md` is corrected in place rather than annotated
 
-### M1d — Spike: does `pi`'s configuration root actually relocate? (Status: PENDING)
+**Implementation notes.**
+
+- All three sources are unreachable, and two of them by a floor no profile can lower: `~/.git-credentials` sits in `deny_credentials` and the keychains in `deny_keychains_{linux,macos}`, all three groups carrying `"required": true`. A helper is not discovered at all, because `~/.gitconfig` is readable only through the `git_config` group, which the plan already declines over `core.hooksPath`.
+- **Decision: narrow Journey 6, and give `git` no registry entry.** Routing `git` through substitution was rejected as a shipped default rather than as impossible — it works, but it names one forge and demands a token no requirement asks for. It is recorded in `research.md` as the consumer's extension and in `spec.md` under Out of scope.
+- The journey's *purpose* was never authentication. It exists for FR-17, trust in the inspecting authority, and nono propagates that to `git` through `GIT_SSL_CAINFO`. A credential-free exchange tests exactly that property and nothing else; a push would have conflated it with one no requirement supplies.
+- `spec.md` was corrected in place, as this task's third criterion directs: Journey 6's When, Then and *Independently verifiable by*, a new Out of scope bullet, and Risk 2 rewritten as resolved by its own stated fallback. This is the sanctioned counterpart to `M1b`, where no criterion authorised a spec edit and none was made.
+- One trap for `M8`: nono's `codex_macos` group grants `$HOME/Library/Keychains/login.keychain-db` read **and write**, which would undo `deny_keychains_macos`.
+- **Verification gap**: `nono run` cannot execute from this session, because the outer sandbox denies `$HOME` and nono fails to create `~/.local/state/nono/audit/…`. The CA-variable finding is therefore read out of the binary and the profile guide, not observed live. `check_j6_1` observes it for real.
+
+### M1d — Spike: does `pi`'s configuration root actually relocate? (Status: IMPLEMENTED)
 
 The finding reversed once between research rounds, so it is verified before FR-4 leans on it.
 
 **Scenario**: none — investigation blocking `M8c`.
 
-- [ ] Set `PI_CODING_AGENT_DIR` and `PI_CODING_AGENT_SESSION_DIR`, run `pi`, observe whether anything is written under `~/.pi`
-- [ ] Record whether `pi` needs a registry entry, and whether its npm extension install lands inside the project (FR-22)
-- [ ] `research.md` states the finding; the spec's `pi` edge case is corrected in place to match
+- [x] Set `PI_CODING_AGENT_DIR` and `PI_CODING_AGENT_SESSION_DIR`, run `pi`, observe whether anything is written under `~/.pi`
+- [x] Record whether `pi` needs a registry entry, and whether its npm extension install lands inside the project (FR-22)
+- [x] `research.md` states the finding; the spec's `pi` edge case is corrected in place to match
 
-### M1e — Spike: is nono's resolved policy machine-readable? (Status: PENDING)
+**Implementation notes.**
+
+- **It relocates, and `pi` needs no registry entry.** `PI_CODING_AGENT_DIR` is the whole root; the binary resolves it in one place, defaulting to `~/.pi/agent`, and the shipped `quickstart.md` confirms that settings, credentials, sessions and installed packages all live there. Of the five `homedir()`-rooted constructions in the binary, only that one is `pi` state.
+- Observed both ways round, which is what makes it a finding rather than a reading. With the override, `pi install` writes only under it. Without it, the same command fails with `EACCES: permission denied, mkdir '/home/pallon/.pi/agent/settings.json.lock'` — the control that fixes the default and shows `pi` writes rather than merely reads there.
+- **`PI_CODING_AGENT_SESSION_DIR` does not exist.** The task named it and `docs/environment-variables.md` documents it, but the string is absent from the 112 MB binary, where `PI_CODING_AGENT_DIR` occurs exactly once. Setting it is a no-op. It is dropped from the plan's `stateVars` sketch, with the reason recorded there.
+- **FR-22 is not satisfied by relocation.** Relocation puts the npm install inside the project — `$PI_CODING_AGENT_DIR/npm/node_modules/…`, observed — which satisfies FR-4. But `pi` still "installs any missing packages automatically on startup", `pi install` runs a real `npm install` that reached the registry here even under `PI_OFFLINE=1`, and the `package.json` it generates loosens a pinned spec to a caret range. So the environment ships no `pi` packages and sets `PI_OFFLINE`, added to the plan's sketch.
+- `spec.md` was corrected in place, as this task's third criterion directs: the `pi` edge case, and the assumption at *Assumptions validated by research* that still described the finding as unverified. The *Assumptions the plan must confirm* checklist was left alone — it is a to-do list retired at close-out, not a statement of fact, and the same reasoning left `M1b`'s counterpart untouched.
+
+### M1e — Spike: is nono's resolved policy machine-readable? (Status: IMPLEMENTED)
 
 `check_sc1` is hermetic only if there is structured output to assert against; spec Risk 15.
 
 **Scenario**: none — investigation blocking `M3c`.
 
-- [ ] Compare `nono profile show --format profile`, `nono why --path … --op …` and `nono run --dry-run` for machine-readable output
-- [ ] Confirm the compiled-in presets `codex`, `claude-code`, `opencode` exist without any registry pull, via `nono profile list` on a clean `$HOME`
-- [ ] Confirm `nono profile schema` exports a schema usable by `nono profile validate`
-- [ ] `research.md` records which command `check_sc1` and `check_component_merge` will use
+- [x] Compare `nono profile show --format profile`, `nono why --path … --op …` and `nono run --dry-run` for machine-readable output
+- [x] Establish which presets exist without any registry pull, via `nono profile list` on a clean `$HOME`
+- [x] Confirm `nono profile schema` exports a schema usable by `nono profile validate`
+- [x] `research.md` records which command `check_sc1` and `check_component_merge` will use
 
-### M1f — Spike: which agent packages exist, and where? (Status: PENDING)
+**Implementation notes**
+
+- The second criterion was written as "confirm the compiled-in presets `codex`, `claude-code`, `opencode` exist", and **its premise is false**. On a clean `$HOME` nono 0.73.0 ships nine built-in profiles and every one is a language runtime: `bun-dev default go-dev java-dev linux-host-compat mise-dev node-dev python-dev rust-dev`. The four agent profiles on the developing machine come from `$XDG_CONFIG_HOME/nono/packages/nolabs-ai/*`, and there is no `codex` profile from any source. The criterion was **rewritten in place to the question it was really asking**, rather than being ticked against a claim that is not true. A spike exists to settle a fork, so a criterion that presumes the answer is the thing that is wrong.
+- Consequence, recorded in `plan.md`'s **P8** row: the environment authors its own confinement descriptions extending `default`. That is also what the boundary wants — `M1b` found the `nolabs-ai/claude` pack grants `$HOME/.claude` read-write, so extending it was never going to be viable.
+- `nono profile show <name> --format manifest` is the structured output. `--format` takes exactly `profile` and `manifest`; `nono run --dry-run` is human text and `--diagnostics-json` prints only after a run, so neither serves. The manifest is the sandbox-capability view only, so `check_sc1` asserts grants against it while credential wiring is asserted against profile source.
+- **`nono why --json` exits 0 whether the verdict is `allowed` or `denied`.** Every refusal check must read `.status`, or it passes vacuously. `nono profile validate` is the opposite and does report its verdict in the exit status, proven on three planted arms.
+- Two hermeticity findings that change what the environment must set. nono makes a network update check on almost any invocation and caches it under `$XDG_STATE_HOME/nono`; `NONO_NO_UPDATE_CHECK=1` suppresses it with identical output and zero files written. And nono **silently falls back to the host's `$HOME/.config`** when `XDG_CONFIG_HOME` names a directory that does not exist, warning rather than failing — so the directory must be created before nono runs or the redirection is quietly undone.
+- `ai.nix`'s "nono has no general `--env` flag" holds for the command line and not for the profile: `environment.set_vars` / `allow_vars` / `deny_vars` exist, with `$WORKDIR` expansion. This confirms D4 and D6 rather than contradicting them, and it means each agent's relocation variables live in the confinement description rather than in a wrapper. D4's *merge* claims remain unsettled and are `check_component_merge`'s job.
+
+### M1f — Spike: which agent packages exist, and where? (Status: IMPLEMENTED)
 
 Decides whether a `numtide/llm-agents.nix` input is added at all. It is not added speculatively.
 
 **Scenario**: none — investigation blocking `M4b`.
 
-- [ ] For each agent, record availability in the pinned `nixpkgs` for **both** `x86_64-linux` and `aarch64-darwin`
-- [ ] Record which need `allowUnfree`, and scope that to the smallest `pkgs` that needs it
-- [ ] `research.md` records the source per agent; add the extra input only if something is genuinely missing
+- [x] For each agent, record availability in the pinned `nixpkgs` for **both** `x86_64-linux` and `aarch64-darwin`
+- [x] Record which need `allowUnfree`, and scope that to the smallest `pkgs` that needs it
+- [x] `research.md` records the source per agent; add the extra input only if something is genuinely missing
+
+**Implementation notes**
+
+- Evaluated against the revision in `flake.lock`, not against the `nixpkgs#` registry alias, which on this machine resolves elsewhere and gives different versions. The alias was used first and its answers were discarded.
+- **`pi` is absent from the pinned `nixpkgs` entirely**, on both platforms. That is the "something genuinely missing" the task made the condition, so `numtide/llm-agents.nix` is added rather than declined. It carries all four agents plus `nono`, identically on `x86_64-linux` and `aarch64-darwin`.
+- A second reason emerged that the plan did not anticipate: the pinned `nixpkgs` has `nono-0.68.0`, while every finding in `M1b`, `M1c` and `M1e` was observed against `0.73.0`. Taking `nono` from the same input as the agents keeps the confinement descriptions and the binary that reads them on one pin. `plan.md`'s Technical context said 0.71.0, matching neither source; that row was corrected in place.
+- **`allowUnfree` is set explicitly for `claude-code` even though the chosen source does not require it.** `llm-agents.nix` labels it `fullName = "Unfree"`, `redistributable = false`, yet sets `free = true`, so the gate never fires; the pinned `nixpkgs` sets `free = false` and it does. Depending on an upstream mislabel to pass a gate is the silent fallback **P9** forbids — it would break on the day the label is corrected, with nothing here having changed. Scoped to a `pkgs` instantiated for that one package.
+- **The input is the sole source of all five packages, in the environment and in the checks alike**, confirmed with the user after this task's findings were reported. Its `nixConfig.extra-substituters` for `https://cache.numtide.com` is not inherited by a consumer of this flake, so that substituter and its key `niks3.numtide.com-1:DTx8wZduET09hRmMtKdQDxNNthLQETkc/yaX7M4qK0g=` are re-declared here and passed explicitly in CI; the earlier note treating the cache as a first-run cost for the handbook understated it, and `research.md` was corrected in place. The input also pins its own unstable `nixpkgs`, leaving the `follows`-or-not question to `M4b`, and sets `allow-import-from-derivation = false`, which **P8** wants and nothing here relaxes.
+- Upstream `HEAD` moved from `3589c005…` to `c4c6673c…` while `M1` was in flight, so the lock must pin a revision rather than track the branch or the versions recorded here stop describing what is built.
+- Availability was established by evaluation, not by building. Nothing was built for `aarch64-darwin`, and no check in this repository can reach that platform.
 
 **Checkpoint**: every architectural fork in `plan.md` is closed. Implementation may begin.
 

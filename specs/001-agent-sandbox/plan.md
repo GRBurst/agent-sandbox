@@ -44,7 +44,7 @@ Read these before writing anything. Do not skim `ai.nix`; it is the working prio
 | **Languages touched** | Nix, bash, generated JSON |
 | **Consumed as** | flake — `nix develop github:GRBurst/agent-sandbox`, and as a flake input by a downstream project |
 | **Platforms that must work** | `x86_64-linux`, `aarch64-darwin` |
-| **New inputs or tools** | `pkgs.nono` (nixpkgs, 0.71.0, Apache-2.0, both platforms); agent packages `codex`, `claude-code`, `opencode`, `pi` — from nixpkgs where available, else a pinned `numtide/llm-agents.nix` input; `shellcheck`, `shfmt`, `jq` added to the devShell |
+| **New inputs or tools** | `nono` and all four agent packages from a pinned `numtide/llm-agents.nix` input — `M1f` found `pi` absent from the pinned nixpkgs, and taking `nono` (0.73.0 there, 0.68.0 in nixpkgs) from the same input keeps the binary and the confinement descriptions it reads on one pin; `allowUnfree` scoped to `claude-code` alone; that input's substituter `https://cache.numtide.com` and its key re-declared here, since a `nixConfig` on an input does not reach this flake's consumer; `shellcheck`, `shfmt`, `jq` added to the devShell |
 | **Effects introduced** | Shell hook (`mkdir -p` of `.tmp`, `.cache`, `.agents`); the confined entry point at run time. No build-time effect, no activation script |
 | **State written outside the checkout** | `$HOME/.nono` only — nono's own audit log, session records and credential store. Not relocatable, not granted to the sandbox. This is the feature's single new accepted leak, and it is **not** a leak-registry entry (see [D2](#d2)) |
 
@@ -59,7 +59,7 @@ Read these before writing anything. Do not skim `ai.nix`; it is the working prio
 | **P5** Clean code invariants | **PASS** | `mkConfinedAgent`, `mkConfinementDescription`, `preflight_or_die` each do one thing. Comments record *why a path is not granted*: `$HOME/.nono` (nono refuses overlapping grants), `$XDG_RUNTIME_DIR` (holds keyring and D-Bus), `~/.config/git` (an agent could set `core.hooksPath`) |
 | **P6** Refactor as a separate phase | **PASS** | `M8a` is a pure refactor: extract `mkConfinedAgent` from the codex-specific wrapper. Preservation proven by `nix eval --json .#confinement.codex \| jq -S .` diffing empty across it |
 | **P7** Ubiquitous language, modelled options | **PASS** | The spec's Vocabulary is used verbatim in Nix attribute names, shell function names and docs. A registry entry is a `submodule` with five typed fields, never `attrsOf str`. nono's boundary merge semantics are written down in [D4](#d4) because they are part of the contract |
-| **P8** Purity, effects at the boundary, idempotency | **PASS** | No `builtins.getEnv`, no `--impure`. Confinement descriptions extend **compiled-in presets**, so nothing is fetched from `registry.nono.sh` at run time and the descriptions are versioned with the pinned `nono`. `NONO_NO_UPDATE_CHECK=1` is set so no background network call happens either. Rep1–Rep3 cover idempotency |
+| **P8** Purity, effects at the boundary, idempotency | **PASS** | No `builtins.getEnv`, no `--impure`. Confinement descriptions extend `default`, the only preset `M1e` found to be genuinely compiled in, so nothing is fetched from `registry.nono.sh` at run time and the descriptions are versioned with the pinned `nono`. `NONO_NO_UPDATE_CHECK=1` is set so no background network call happens either — `M1e` observed that without it even `nono profile list` calls home. Rep1–Rep3 cover idempotency |
 | **P9** Explicit outcomes, no silent fallbacks | **PASS** | `set -euo pipefail` throughout. The pre-flight has **three** assertions, not one, so "nono failed to start" cannot be mistaken for "the child was denied". No bare `or`; the agent table is an `enum`-keyed attrset with an assertion on lookup failure |
 
 Complexity tracking is empty: the gate passed cleanly.
@@ -70,6 +70,7 @@ Complexity tracking is empty: the gate passed cleanly.
 
 - **D1 — Credential substitution by proxy-side injection, falling back to a granted phantom store.** Preferred: `network.credentials` / `credential_routes`, where nono holds the real key and injects it at the proxy, so the agent holds *nothing*. Then FR-7 is automatic (the store is machine-wide under `$HOME/.nono`) and the leak registry stays **empty**. Fallback: `credential_providers` with `oauth_capture`, where the agent persists a phantom — which must then be machine-scoped to satisfy FR-7, making each agent's credential file a registry entry.
   **This is the architecture's pivot**: option (a) yields an empty registry, option (b) yields ≤4 entries. It turns on whether each agent accepts a substituted API base URL, *not* on the credential's file format. Resolved by spike `M1b` before `M7` starts.
+  **Resolved by `M1b` to (a), for all four agents, with no weaker tier.** The fork's premise was wrong: nono is a TLS-terminating proxy with its own generated CA, so a credential is injected on the way past `https://api.anthropic.com` and endpoint substitution is optional rather than required. Both mechanisms keep the real secret in the supervisor, outside the boundary, so neither is the weaker tier — `credential_providers` is the OAuth *shape*, not a degraded fallback. `claude-code` and `codex` authenticate by token exchange and take `credential_providers`; `opencode` and `pi` present a key per request and take `network.credentials`. All four agents honour `NODE_EXTRA_CA_CERTS` and all four also expose a base-URL knob as a second route, so no agent is stuck on one mechanism. **The leak registry stays empty**, provided `credential_key` resolves through `env://` or `cmd://` rather than `file://`. Evidence per agent in [research.md](research.md#m1b--credential-substitution-per-agent).
 
 <a id="d2"></a>
 
@@ -177,8 +178,12 @@ Signatures and structures, laid out so implementation is mechanical. Types in `�
     binary    = "pi";
     preset    = null;                           # no compiled-in preset; authored from groups
     stateVars = w: {
-      PI_CODING_AGENT_DIR         = "${w}/.agents/pi";
-      PI_CODING_AGENT_SESSION_DIR = "${w}/.agents/pi/sessions";
+      # The whole root: settings, credentials, sessions and installed packages.
+      # PI_CODING_AGENT_SESSION_DIR is documented but absent from the binary — M1d.
+      PI_CODING_AGENT_DIR = "${w}/.agents/pi";
+      # FR-22: with no packages declared there is nothing to install on startup,
+      # and this also stops the update check and the model-catalogue refresh.
+      PI_OFFLINE = "1";
     };
     credential = { … };
   };
@@ -343,8 +348,11 @@ check_sc1() {
   local registry granted
   registry=$(nix eval --json .#leakRegistry --apply 'r: map (e: e.path) r.entries')
   for agent in $(nix eval --json .#confinedAgentNames | jq -r '.[]'); do
-    granted=$(nono profile show "$(profile_path "$agent")" --format profile \
-              | jq -r '.filesystem.allow[]?, .filesystem.read[]?')
+    # --format manifest, not profile: M1e found `profile` is the human rendering
+    # and `manifest` the only JSON one. Its resolved shape is filesystem.grants[],
+    # each {access, path, type} — not the source profile's allow/read lists.
+    granted=$(nono profile show "$(profile_path "$agent")" --format manifest \
+              | jq -r '.filesystem.grants[].path')
     while read -r p; do
       is_under "$p" "$PWD" || in_registry "$p" "$registry" \
         || fail "granted path outside project and not in registry: $p ($agent)"
@@ -357,7 +365,7 @@ check_sc1() {
 
 - **Files touched**: `flake.nix`, `flake.lock`, `.gitignore`, new `lib/` (4 files), new `scripts/` (5 files), new `.github/workflows/verify.yml`, new `README.md`, `docs/HANDBOOK.md`, `docs/CONSTITUTION.md`, `AGENTS.md` (one sentence). Deleted: `devenv.nix`, `devenv.yaml`, `ai.nix`, `draft1.md`, `draft2.md`.
 - **Consumers affected**: none exist yet. The devcontainer path disappears; `docs/HANDBOOK.md` currently documents it as unverified, so nothing verified is withdrawn.
-- **Inputs added or bumped**: `nixpkgs` re-locked. A pinned `numtide/llm-agents.nix` input **only if** an agent is missing from nixpkgs — spike `M1f` decides, and the input is not added speculatively.
+- **Inputs added or bumped**: `nixpkgs` re-locked. A pinned `numtide/llm-agents.nix` input is added — `M1f` found `pi` absent from nixpkgs entirely, which was the condition. It is the **sole** source of `nono`, `codex`, `claude-code`, `opencode` and `pi`, both in the environment a human enters and in every check, so that one pin describes what is verified and what is shipped. Its `nixConfig` is not inherited by a consumer of this flake, so `https://cache.numtide.com` and its key `niks3.numtide.com-1:DTx8wZduET09hRmMtKdQDxNNthLQETkc/yaX7M4qK0g=` are declared here as well and passed explicitly in CI; without that, a clean machine builds five agents from source.
 - **Tools added to the environment**: `nono` (the mechanism), `shellcheck` + `shfmt` (AGENTS.md names them and they are absent — Known drift), `jq` (checks parse JSON; P9 requires generated JSON be validated rather than eyeballed).
 - **Docs to update at close-out**: `docs/HANDBOOK.md` — retires the Known drift entries for the Kafka leftovers, the `x86_64-linux` hardcoding, the four devcontainer bind mounts, the orphaned `ai.nix`, the stray `^`, the missing `scripts/validate.sh`, the missing `README.md` and the absent `shellcheck`/`shfmt`; adds the accepted-leak entry for `$HOME/.nono` and the coverage gap. `README.md` — new. `AGENTS.md` — the "no CD pipeline" sentence gains "non-deploying CI is permitted". `docs/CONSTITUTION.md` — P1's accepted-leak list gains its second entry.
 
@@ -398,7 +406,7 @@ Run stages 1–2 after every Nix edit, 4 after every shell edit, 6 before every 
 | Journey 3.1 | `check_j3_1` — two checkouts, two **concurrent** sessions, write in one, assert the other unchanged | integration |
 | Journey 4.1 | `check_j4_1` — assert every readable credential value matches the substitute form (mock credentials); live rejection is a coverage gap | integration |
 | Journey 5.1 | `check_j5_1` — authenticate in checkout A, assert authenticated state in checkout B | e2e |
-| Journey 6.1 | `check_j6_1` — push a commit to a scratch remote over HTTPS from inside a session; assert exit 0 | integration |
+| Journey 6.1 | `check_j6_1` — run a credential-free `git` HTTPS exchange with a remote from inside a session; assert exit 0, which holds only if the interception CA reached `git` via `GIT_SSL_CAINFO`. Narrowed from "push a commit" by [`M1c`](research.md#m1c--git-credentials-inside-the-boundary) | integration |
 | Journey 7.1 | `check_j7_1` — `validate.sh` exits 0 unattended per platform; plant a registry entry and observe the expected set change with the check unedited | e2e |
 | R1 | `check_r1` — plant an SSH key in the fake `$HOME`, read it from inside, assert failure and absence of key material in output | integration |
 | R2 | `check_r2` — create a file in `$HOME` from inside; assert failure **and** non-existence | integration |
@@ -438,7 +446,11 @@ Mandatory per P2. Tick `Verified` only after seeing red.
 
 | Check | Violation planted | Must FAIL with | Verified |
 | --- | --- | --- | --- |
-| `check_sc3` | Delete `check_r5` from `validate.sh` | `scenario ↔ check bijection broken` naming `r5` | [ ] |
+| `check_sc3` | Delete `check_r5` from `scripts/checks/unit.sh` | `scenario ↔ check bijection broken` naming `r5` | [x] |
+| `check_sc3` | Add an orphan `check_r99` to a green suite | `check with no scenario: r99` | [x] |
+| `check_sc3` | Point `SPEC` at a file declaring no scenarios | `parsed no scenarios out of …; the parser and the spec have drifted` | [x] |
+| `validate.sh` | Select a layer whose file carries no check | `no checks ran; the suite would report success without testing anything`, exit `2` | [x] |
+| `validate.sh` | Pass an argument outside the accepted set | `unknown argument: --bogus`, exit `2` | [x] |
 | `check_registry` | Add an entry with `whyNotNarrower = ""` | `registry entry '<path>' does not say why a narrower grant fails` | [ ] |
 | `check_registry` | Add an entry whose `path` is `"$WORKDIR/.agents"` | `registry entry inside the project is not an exception` | [ ] |
 | `check_bootstrap_mirror` | Change `TMPDIR` in `.envrc` only | `bootstrap variables differ between .envrc and flake.nix` | [ ] |

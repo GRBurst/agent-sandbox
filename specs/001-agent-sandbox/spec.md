@@ -110,11 +110,13 @@ The strongest observable in this file, and the reason confinement is worth havin
 
 This journey exists because credential substitution inspects encrypted traffic, and the documented failure mode is that the agent keeps working while ordinary tools reject the interception certificate — which users misread as a filesystem denial.
 
-**Independently verifiable by**: the push's exit status against a scratch remote.
+**Independently verifiable by**: the exit status of an ordinary tool's HTTPS exchange with that remote.
 
 1. **Given** a confined session in a checkout with a remote
-   **When** the session pushes a commit over HTTPS
-   **Then** the push succeeds.
+   **When** the session exchanges with that remote over HTTPS
+   **Then** the exchange succeeds.
+
+The exchange is one that needs no credential. Nothing here supplies the version-control toolchain with a credential, and every host store it would otherwise read is denied outright, so a push would fail for want of a credential whatever the inspecting authority did — which is the opposite of what this journey is for. Trust in the inspecting authority is the property, and FR-17 is the requirement; authenticating the toolchain is a separate concern, addressed under Out of scope.
 
 ### Journey 7 — The claims are checked on clean machines (P1)
 
@@ -201,7 +203,7 @@ This journey exists because credential substitution inspects encrypted traffic, 
 ### Edge cases
 
 - **The project directory is wiped.** Agent state lives in the checkout, so deleting untracked files destroys conversation history. Accepted; documented, not mitigated.
-- **`pi` relocates, on the second reading of the evidence.** Two rounds of research disagreed: the first found no relocation mechanism, the second found separate documented overrides for the configuration root and for session storage, the former redirecting reads and writes wholly. If the second holds, `pi` needs no registry entry and installs its extensions inside the project like any other state. Because the finding reversed once, the plan verifies it before relying on it, and the fallback is a read-only registry entry.
+- **`pi` relocates, through one variable rather than two.** Two rounds of research disagreed, so the plan verified it against the agent itself before relying on it. It relocates: a single documented override redirects the configuration root, and everything `pi` persists — settings, credentials, sessions and installed extensions — lives beneath it. `pi` therefore needs no registry entry, and installs its extensions inside the project like any other state. The second round was itself half wrong: the separate session-storage override it reported is documented but absent from the agent, so setting it does nothing. Neither round could be taken on trust.
 - **`claude-code` partially escapes its own override.** Its configuration-root variable is documented as having fallback cases in subagent and lock paths. Those fallbacks are either confined by other means or registered; they are not ignored.
 - **The two platforms enforce differently.** One is allow-list only, the other permits deny-inside-allow, so an identical description yields different effective reach. Per-platform enforcement strength is recorded rather than smoothed over.
 - **The registry grows.** Every addition is a reviewable diff with a justification, so length is itself a signal. The bound is not a number but a kind: an entry is admissible only where the tool structurally cannot be redirected, never because redirecting it is inconvenient.
@@ -267,7 +269,7 @@ The change honours [docs/CONSTITUTION.md](../../docs/CONSTITUTION.md), and the p
 - Operating-system-level confinement is available on current Linux and on macOS; no container runtime is required.
 - Grants and injected environment values can be bound to the current project directory without generating anything per project, so per-project variance needs no code generation.
 - Which host environment variables reach a confined session is controllable. FR-5 rests on this.
-- Configuration roots relocate through a documented variable for `codex` fully, for `claude-code` with known fallback cases, for `opencode` at directory granularity, and — on the later of two conflicting findings — for `pi` fully as well. FR-4 admits registry entries because some agent may yet resist relocation, not because a particular one is known to.
+- Configuration roots relocate through a documented variable for `codex` fully, for `claude-code` with known fallback cases, for `opencode` at directory granularity, and — verified against the agent itself, the two research rounds having disagreed — for `pi` fully as well. FR-4 admits registry entries because some agent may yet resist relocation, not because a particular one is known to.
 - Usable confinement descriptions for the named agents ship compiled into the mechanism, alongside a locally authored tier and a network registry tier. Nothing need be fetched from the registry, so P8's ban on unpinned run-time fetching costs no capability, and the descriptions are versioned with the pinned mechanism rather than drifting under it.
 - The mechanism anchors its own supervisory state at a fixed path beneath the home directory, which cannot be relocated, and refuses to start if a grant overlaps it. That path is therefore the registry's first entry, and the home directory is never granted broadly.
 - The mechanism refuses to start, fatally, when a grant would expose its own supervisory state, rather than starting open. This is a fail-closed behaviour the pre-flight check can rely on.
@@ -290,6 +292,7 @@ The change honours [docs/CONSTITUTION.md](../../docs/CONSTITUTION.md), and the p
 
 - **Editor delegation.** Handing a confined agent a channel to a host editor, which both drafts carry.
 - **General network egress policy.** Restricting which hosts an agent may contact beyond what credential substitution requires.
+- **Authenticating the version-control toolchain.** Every host store it would read is denied and stays denied. Writing to a remote is work done outside the confined session. A consumer who wants it inside declares a substitution route of their own, which the mechanism already supports; shipping one would name a particular forge and demand a credential no requirement here asks for.
 - **Resource limits.** Memory and process caps.
 - **A second confinement backend**, and any abstraction anticipating one.
 - **Agents beyond the four named.** SC-1 exists so a fifth does not reopen the checks.
@@ -301,7 +304,7 @@ The change honours [docs/CONSTITUTION.md](../../docs/CONSTITUTION.md), and the p
 
 1. **Credential substitution may not reach every agent.** The intent is settled and uniform, and so is the fallback: an agent it cannot reach ships with the weaker guarantee, said plainly. What is unverified is the route. Rewriting a token-endpoint response cannot apply to an agent that never performs that exchange, so those agents depend instead on proxy-side injection, which requires the agent to accept a substituted endpoint address. **Whether each agent's provider endpoint is configurable is what FR-6 actually turns on — not the credential's file format — and it is the first thing the plan should establish.** *Fallback*: the plugin approach already present in this repository, routing one agent's authentication through another's; failing that, a narrowly scoped short-lived key with egress filtering, recorded as the weaker tier.
 
-1. **`git` may have no credential inside the boundary.** Journey 6 asserts that a push over HTTPS still works, but a host credential helper, a stored credentials file and a system keychain all sit outside the boundary, and the default deny groups cover the latter two. As written the journey may be unachievable unless `git` gets a registry entry of its own or is routed through substitution as well. **This is a gap in the spec rather than in the research**, and it is the second thing the plan should establish. *Fallback*: Journey 6 narrows to a toolchain that needs no credential, and pushing is documented as work done outside the confined session.
+1. **`git` has no credential inside the boundary.** Journey 6 originally asserted that a push over HTTPS still works, but a host credential helper, a stored credentials file and a system keychain all sit outside the boundary, and the default deny groups cover them. *Resolved by taking the stated fallback*: none of the three is reachable, and no requirement here supplies a credential in their place, so Journey 6 narrows to an exchange that needs no credential and the version-control toolchain gets no registry entry. Authenticating it is Out of scope; `research.md` records what each of the three does under confinement.
 
 1. **The credential at rest may be unreachable on one platform.** Journey 4 is the strongest observable here and asserts that what sits at rest inside the project authenticates nowhere. On macOS the token-flow agent may keep its credential in the system credential store, which the mechanism denies by default — leaving nothing at rest to assert against, and a substitution path that may never engage. *Mitigation*: make the observable platform-specific and assert, per platform, against what actually exists there. SC-8 already forbids claiming a platform that is neither verified nor documented as weaker.
 
