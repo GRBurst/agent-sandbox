@@ -1,6 +1,6 @@
 # Research — 001-agent-sandbox
 
-Findings from the `M1` spikes.
+Findings from the `M1` spikes, and from the one `M3c` needed in order to state its criterion at all.
 Each section records what was observed, against which artefact, so a later reader can re-run the observation rather than trust the conclusion.
 
 Versions observed: `nono` 0.73.0, `claude-code` 2.1.233, `opencode` 1.18.18, `pi` 0.84.2, `codex` 0.146.0.
@@ -560,3 +560,84 @@ The confined control is worth stating on its own, because it is FR-21 and FR-16 
 `claude doctor` reports `Auto-updates: disabled (set by env: DISABLE_AUTOUPDATER)` — inherited from the developing session, so the description must set `DISABLE_AUTOUPDATER` itself rather than depend on it, or P8 holds only on this machine. `claude plugin list` and `claude mcp list` both exit 0 with a definite empty answer, which gives `M7` and `M8b` clean observables. `claude project purge` deletes all state for one project. A `.claude.json.lock` **directory** appears under the configuration root, which is the fallback path spec Risk 12 names and `M8b` owns.
 
 The harness and its full transcript live under `.tmp/m1g/`, which is gitignored; nothing in it is a check, and the checks that make these findings permanent belong to `M4b`, `M7a` and `M8b`.
+
+## M3c — The execution substrate, and how a session is actually run
+
+`M3c` could not state its equality without deciding where the Nix store comes from, and that could not be decided from the manifest alone. So the substrate question was settled by running real sessions. The conclusions are [D15](plan.md#d15); what follows is the observation, and the invocation needed to repeat it.
+
+### Running `nono` from inside this repository, non-interactively
+
+Four things must all hold, and each was found by tripping over it:
+
+```sh
+# suppress the update check; M1e found it is a network call on almost any invocation
+NONO_NO_UPDATE_CHECK=1
+# must EXIST, or nono silently falls back to the host's $HOME/.config (M1e)
+XDG_CONFIG_HOME=$PWD/.tmp/<scratch>/config
+# must overlap NO grant — see below. Not under the project, not under /tmp
+XDG_STATE_HOME=<somewhere outside every granted path>
+# must resolve inside the project, or the floor's $TMPDIR grant lands outside it
+TMPDIR=$PWD/.tmp
+nono run -s --workdir "$PWD" --allow-cwd \
+  --no-rollback --no-rollback-prompt --no-audit \
+  --profile <path-or-name> -- <cmd>
+```
+
+- **`nono run` refuses outright without `--allow-cwd` in non-interactive mode**, even when the description sets `workdir.access = "readwrite"`: `nono: CWD access requires --allow-cwd in non-interactive mode`. `M1g` already found the flag grants read-only unless the description says otherwise; this is the other half — without it there is no session at all. `M4b`'s entry point needs both facts.
+- **`--workdir` exists on `run` but not on `profile show`.** So a check that resolves a description reads whatever cwd it was invoked from, which is why `manifest_grants` runs from the repository root.
+
+### nono's state root cannot be moved into the project, and nono cannot nest
+
+nono refuses to start when its own state root overlaps **any** granted path, naming both sides:
+
+```text
+nono: Sandbox initialization failed: Refusing to grant '/tmp' (source: group:system_write_linux)
+  because it overlaps protected nono state root '/tmp/m3c-state/nono'.
+nono: Sandbox initialization failed: Refusing to grant '…/agent-sandbox' (source: user)
+  because it overlaps protected nono state root '…/.tmp/m3c/state/nono'.
+```
+
+`/tmp` is granted by the floor and the project is granted by us, so the state root has nowhere inside the project to go. That is what makes [D2](plan.md#d2)'s accepted leak unavoidable rather than merely convenient, and it should be stated that way in the handbook at `M10a`.
+
+The same protection means **nono cannot run inside nono**: attempted from within a sandboxed session, it fails with `Failed to write config to /home/…/.local/state/nono/sessions/<id>.json: Permission denied (os error 13)`. Anyone developing this repository from inside a confined agent has to point `XDG_STATE_HOME` outside the outer sandbox's reach to run the integration layer at all — a real constraint on `M9c`.
+
+### A deny cannot carve a hole in a grant. Landlock, not nono
+
+`filesystem.deny: ["/nix/store/*-source", "/nix/store/*-source/**"]` beside `filesystem.read: ["/nix/store"]` **passes `nono profile validate --strict`** and appears verbatim in the manifest's `.filesystem.deny[].path`. The session then does not start:
+
+```text
+nono: Sandbox initialization failed: Landlock deny-overlap is not enforceable on Linux.
+Refusing to start with conflicting policy.
+1082483 deny rule(s) cannot apply under an allowed parent directory.
+- deny '/nix/store/01x5…-source' overlaps allowed parent '/nix/store' (source: profile)
+```
+
+nono expands the glob by walking the store, finds a million conflicts, and stops. An **exact** path deny fails identically with `1 deny rule(s) cannot apply`. Landlock rules only ever add access to a subtree; nothing subtracts from one. So the only way not to grant a path is not to grant its parent, and there is no pattern-based middle ground to reach for.
+
+Two consequences already carried into the tasks. `nono why` answers from the resolved policy and reported `denied` / `filesystem_deny` for a path Landlock cannot deny at all, so it is not a proxy for enforcement. And because `validate --strict` accepts the overlap, validation cannot be the observer either — `M3d` asserts the disjointness as a set property over the manifest.
+
+### Closure versus whole store, measured by `strace`
+
+Two descriptions, each declaring only `meta`, `workdir.access = "readwrite"` and `filesystem.read`, run over a probe under `strace -f -qq -e trace=openat`:
+
+| | `read /nix/store` | `filesystem.read` = 62-path closure of bash, coreutils, nodejs |
+| --- | --- | --- |
+| store paths opened | **55** | 113, of which 62 are nono opening each grant to build its rule |
+| `EACCES` / `EPERM` | 3: `/home/pallon`, two cgroup files | those 3, plus the deliberate `ls /nix/store`, plus `…-glibc-locales-2.42-67/lib/locale/locale-archive` and `/run/current-system/sw/lib/locale/locale-archive` |
+| probe result | bash, coreutils and `node` all run; `$HOME` denied | the same, and store enumeration additionally denied |
+
+So the closure **works**, and is a tight upper bound — 62 granted against 55 needed. Its failure mode is a path wanted at runtime but absent from the static closure, and both instances were the locale archive, one of them outside the store. That is why `M4c` makes `LOCALE_ARCHIVE` a criterion rather than a discovery.
+
+Scale on the developing machine: 61,799 store paths in total; 211 of them `-source` trees belonging to other projects; 128 paths in the closure of a realistic session set (bash, coreutils, nodejs, git, jq, ripgrep). The 211 are the argument for `M4c` — read access to another project's source is the leak this feature exists to prevent.
+
+**`strace` is the observer because nono is not.** On the session that died of the denied locale archive, `nono run --diagnostics-json` reported `"denials": []`, `"ipc_denials": []` and `"violations": []`, offering only two `severity: info` diagnostics — `command_failed_likely_sandbox`, whose remediation is `run_discovery`, and `command_failed_application`. There is no `--discover`, `--learn`, `--permissive` or `--trace` flag on `nono run` and no `discover` subcommand, so that remediation names something that does not exist. A check trusting nono's own denial reporting would pass over exactly the failure it was written to catch.
+
+### Method notes, each one a bug that cost time
+
+- `nix build --no-link --print-out-paths nixpkgs#bash` prints **two** paths, `-man` first, silently corrupting a variable that expects one. Use `nixpkgs#bash^out`.
+- `nono why --profile <path>` hung past 120 s once, so wrap every nono invocation in `timeout`.
+- nono grants **stdout's file** `readwrite`. Redirecting `profile show` into a file puts that file in the manifest being compared; command substitution does not.
+- The `/proc/<pid>` and `/proc/<pid>/fd` grants carry the resolving process's own pid, so two invocations of the same description differ and the pid must be normalised away.
+- `.filesystem.deny[]` elements are objects, not strings.
+
+The scratch harness lived under `.tmp/m3c/`, which is gitignored, and has been removed; every finding above is either in `plan.md` as a decision or in `tasks.md` as a criterion.
