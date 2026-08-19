@@ -8,7 +8,7 @@
 
 Today this repository keeps *its own tools* inside the project. It does nothing to keep an *agent* inside the project. An agent entered from here reads the whole home directory, inherits every host secret in its environment, and writes session state that the next project will see.
 
-This feature makes agent confinement the product. A project points at this repository and gets four coding agents — `codex`, `claude-code`, `opencode`, `pi` — confined by the operating system: they read and write inside the checkout and nowhere else, they inherit no host secret, their state stays in the checkout, and no credential material reachable from inside the boundary authenticates from outside it.
+This feature makes agent confinement the product. A project points at this repository and gets three coding agents — `claude-code`, `opencode`, `pi` — confined by the operating system: they read and write inside the checkout and nowhere else, they inherit no host secret, their state stays in the checkout, and no credential material reachable from inside the boundary authenticates from outside it.
 
 It also removes the container. The repository currently reaches confinement — badly — by generating a devcontainer that bind-mounts four host agent directories read-write, sharing credentials and session state with every other consumer of that home. Host-level confinement removes both the container and the leak.
 
@@ -100,11 +100,14 @@ The strongest observable in this file, and the reason confinement is worth havin
 
 ### Journey 5 — Authenticate once, use everywhere (P2)
 
-**Independently verifiable by**: starting a session in a second checkout and asserting the agent reports an authenticated state.
+"Everywhere" is two axes, and both matter. Across projects, because authenticating per checkout would make the environment worse than the host setup it replaces. Across agents, because the three ship together and are used interchangeably, so a credential obtained by one serves all three.
 
-1. **Given** the user has authenticated for one project
+**Independently verifiable by**: starting a session in a second checkout and asserting each agent reports an authenticated state.
+
+1. **Given** the user has authenticated for one project, with one agent
    **When** they start a confined session in a second, unrelated project
-   **Then** the agent is authenticated with no further login.
+   **Then** that agent is authenticated with no further login
+   **And** the other agents are authenticated too, without a login of their own.
 
 ### Journey 6 — The toolchain still works (P2)
 
@@ -181,6 +184,13 @@ The exchange is one that needs no credential. Nothing here supplies the version-
    **Then** no part of that host-global configuration is readable from inside the session
    **And** the session starts and works regardless, rather than depending on it or failing on its absence.
 
+1. **R10 — A host tool configuration does not direct the session.**
+   R9's counterpart for the ordinary toolchain, and the sharper case: an agent's host configuration merely widens what the agent knows, whereas the version-control toolchain's host configuration can name a program to run and have the tool run it.
+   **Given** a machine whose home directory configures the version-control toolchain with a directive that runs a program
+   **When** a confined session runs that toolchain
+   **Then** the toolchain reads no configuration file from outside the project directory
+   **And** its effective configuration is one this environment wrote, so the host directive does not run.
+
 ### Repetition scenarios
 
 1. **Rep1 — Entering twice changes nothing.**
@@ -211,13 +221,13 @@ The exchange is one that needs no credential. Nothing here supplies the version-
 
 ## Requirements
 
-- **FR-1** The environment MUST provide confined sessions for `codex`, `claude-code`, `opencode` and `pi`. All four are required. `codex` is the reference case, because its configuration root relocates wholly through one documented variable and that relocation is the best attested of the four.
+- **FR-1** The environment MUST provide confined sessions for `claude-code`, `opencode` and `pi`. All three are required, and `claude-code` is the reference case — not because it is the easiest, but because the other two obtain their credential from it, so nothing about FR-6 or FR-7 can be demonstrated until it works. That ordering front-loads the risk rather than deferring it: `claude-code` is also the agent whose configuration root is least certain to relocate, and building the credential story on an agent whose state is still escaping would be building twice.
 - **FR-2** A confined session's granted filesystem reach MUST be the project directory plus leak-registry entries, and nothing else.
 - **FR-3** The leak registry MUST be a single file. Every entry states why the path is granted and why a narrower grant does not work. It carries no expiry mechanism. An entry is admissible only where the tool structurally cannot be directed elsewhere; convenience is never a justification.
 - **FR-4** Agent state MUST be written inside the project directory. Where an agent cannot be directed to do so, its state path MUST be a registry entry under FR-3.
 - **FR-5** A confined session MUST NOT inherit host environment variables carrying provider credentials.
 - **FR-6** No credential material readable from inside a confined session MUST authenticate from outside the boundary. This constrains the outcome, not the mechanism: an agent that authenticates by token flow and an agent that authenticates by key in its environment may satisfy it differently.
-- **FR-7** Authenticating once on a machine MUST serve every project on that machine.
+- **FR-7** Authenticating once on a machine MUST serve every project on that machine, and every agent shipped. One agent performs the login; the other two obtain what they need from it without a login of their own. How is the plan's business, but FR-6 and FR-3 together already exclude the obvious shortcut: letting the other agents read the authenticating agent's credential store would put a credential that works outside the boundary inside it, and a grant for that store would rest on convenience rather than on the tool being structurally impossible to redirect.
 - **FR-8** Concurrent confined sessions in different project directories MUST share no agent state and MUST NOT reach each other's project directory.
 - **FR-9** Modifying the confinement description from inside a confined session MUST alter neither that session's boundary nor any later session's boundary until a human re-enters the environment.
 - **FR-10** Before an agent starts, a pre-flight check MUST establish that confinement can be enforced on this host. If it cannot, nothing starts, the message names the missing primitive, and the exit status is `77`. The literal is pinned because a caller branches on it. No flag, variable or configuration makes the confined entry point proceed unconfined. Running an agent without confinement stays possible only by not invoking the confined entry point at all — a deliberate and visible act, which the usage document describes rather than conceals.
@@ -233,6 +243,7 @@ The exchange is one that needs no credential. Nothing here supplies the version-
 - **FR-20** The confinement description MUST be authored so that both supported platforms enforce the same effective reach, expressed in the semantics of the more restrictive one. A platform whose enforcement is weaker is described under FR-11; weakness is never licence for a wider reach.
 - **FR-21** A pre-existing host-global agent configuration MUST neither reach a confined session nor prevent one from working. A consumer who already configures these agents for their whole machine adopts this environment for one project without changing the rest, and the usage document states that path.
 - **FR-22** Where an agent extends itself by fetching code at run time, that extension MUST be provisioned before the session rather than fetched from inside it.
+- **FR-23** A confined session's version-control toolchain MUST be directed at configuration this environment wrote, rather than left to search the home directory for it. Withholding the grant would already stop the host file being read, but it would leave the outcome dependent on what the host happens to contain, and it would leave the session without a commit identity. Directing the toolchain instead makes the effective configuration the same on every machine, which is what the repetition scenarios ask for, and gives that identity somewhere to live. The author's name and address are copied out of the host once, at setup: they are not credential material, the copy is visible in the file it produces, and a consumer may supply their own values in place of the host's.
 
 **Non-functional.**
 The change honours [docs/CONSTITUTION.md](../../docs/CONSTITUTION.md), and the plan's Constitution Check records how.
@@ -259,7 +270,7 @@ The change honours [docs/CONSTITUTION.md](../../docs/CONSTITUTION.md), and the p
 - **No container.** The prompt's premise is accepted: the devcontainer is removed, not kept alongside.
 - **Supported platforms are `x86_64-linux` and `aarch64-darwin`**, both verified on clean machines. "Experimental" applies to the *enforcement guarantee* on macOS, not to whether macOS is verified.
 - **Agent state lives in the checkout**, accepting that wiping untracked files destroys history.
-- **Credential substitution is in scope**, rather than deferred behind a simpler credential grant, and the intended mechanism is uniform across all four agents. An agent for which it proves unreachable ships with the weaker guarantee documented, rather than being dropped.
+- **Credential substitution is in scope**, rather than deferred behind a simpler credential grant, and the intended mechanism is uniform across all three agents. An agent for which it proves unreachable ships with the weaker guarantee documented, rather than being dropped.
 - **Confinement has no override.** When it cannot be enforced, nothing starts. The unconfined agent stays reachable only by declining to use the confined entry point.
 - **The leak registry records justifications only** — no expiry, no issue ID, reviewed in the diff.
 
@@ -269,16 +280,19 @@ The change honours [docs/CONSTITUTION.md](../../docs/CONSTITUTION.md), and the p
 - Operating-system-level confinement is available on current Linux and on macOS; no container runtime is required.
 - Grants and injected environment values can be bound to the current project directory without generating anything per project, so per-project variance needs no code generation.
 - Which host environment variables reach a confined session is controllable. FR-5 rests on this.
-- Configuration roots relocate through a documented variable for `codex` fully, for `claude-code` with known fallback cases, for `opencode` at directory granularity, and — verified against the agent itself, the two research rounds having disagreed — for `pi` fully as well. FR-4 admits registry entries because some agent may yet resist relocation, not because a particular one is known to.
-- Usable confinement descriptions for the named agents ship compiled into the mechanism, alongside a locally authored tier and a network registry tier. Nothing need be fetched from the registry, so P8's ban on unpinned run-time fetching costs no capability, and the descriptions are versioned with the pinned mechanism rather than drifting under it.
+- Configuration roots relocate through a documented variable for `opencode` at directory granularity, and — verified against the agent itself, the two research rounds having disagreed — for `pi` fully. `claude-code` exposes many such variables rather than one, and whether they cover everything it writes is the one relocation question still open below. FR-4 admits registry entries because some agent may yet resist relocation, not because a particular one is known to.
+- The mechanism ships no confinement description for any named agent — only descriptions for language runtimes — so this environment authors its own, in the locally authored tier, alongside the network registry tier it declines to use. Nothing need be fetched from the registry, so P8's ban on unpinned run-time fetching costs no capability. A locally authored description is versioned with this repository rather than with the mechanism, which is the stronger position: it cannot drift under a mechanism upgrade, and it cannot inherit a grant the mechanism's own packaged description chooses to make.
+- A description inherits the mechanism's floor whether or not it names a parent, so it declares every grant it wants and names no parent. The floor is the same either way, and naming one would suggest an inheritance that is not what is happening.
 - The mechanism anchors its own supervisory state at a fixed path beneath the home directory, which cannot be relocated, and refuses to start if a grant overlaps it. That path is therefore the registry's first entry, and the home directory is never granted broadly.
 - The mechanism refuses to start, fatally, when a grant would expose its own supervisory state, rather than starting open. This is a fail-closed behaviour the pre-flight check can rely on.
-- Interception of encrypted traffic is a documented cause of ordinary tools rejecting certificates, and trust can be propagated into the runtimes inside the boundary. FR-17 rests on this.
+- Interception of encrypted traffic is a documented cause of ordinary tools rejecting certificates, and trust in the inspecting authority does reach the runtimes inside the boundary — observed, not merely documented, as a set of standard trust-bundle variables naming an authority minted for that one session. FR-17 rests on this.
+- Interception is per-destination and is off unless a destination asks for it. That bounds FR-17: the obligation to propagate trust attaches wherever inspection is switched on, and a session that inspects nothing has nothing to propagate. It also means a check that merely observes an ordinary tool succeeding proves nothing, because a tool talking to an uninspected destination succeeds by validating the real authority. Only the difference between trusting and not trusting is evidence.
 
 **Assumptions the plan must confirm before building on them** — each is a feasibility question with a decided fallback, not an open decision.
 
-- That every agent can be pointed at a substituted credential endpoint. The intent is settled and uniform; an agent for which it proves unreachable ships with the weaker guarantee, said plainly.
-- That `pi`'s configuration root genuinely relocates. The finding reversed once between research rounds, so it is verified before FR-4 leans on it.
+Two that were on this list have been confirmed and moved above: that every agent can be pointed at a substituted credential endpoint — which turned out not to be what FR-6 depends on at all, since inspection reaches the real destination and endpoint substitution is only a fallback — and that `pi`'s configuration root genuinely relocates, which it does. Two remain.
+
+- That `claude-code`'s configuration root relocates far enough. It offers many overrides rather than one, and whether they cover everything it writes is unverified. It is now the reference case and the source of the other two agents' credential, so FR-4 and FR-7 both rest on this and it is the first thing to establish. *Fallback*: whatever it still writes beneath the home directory becomes a registry entry under FR-3, admissible only if the override genuinely does not exist.
 - That the token-flow agent's credential is reachable at rest on both platforms. One platform may hold it in a system credential store the mechanism denies by default, which would make Journey 4's strongest observable platform-specific.
 
 **Constraints the repository imposes**
@@ -295,14 +309,16 @@ The change honours [docs/CONSTITUTION.md](../../docs/CONSTITUTION.md), and the p
 - **Authenticating the version-control toolchain.** Every host store it would read is denied and stays denied. Writing to a remote is work done outside the confined session. A consumer who wants it inside declares a substitution route of their own, which the mechanism already supports; shipping one would name a particular forge and demand a credential no requirement here asks for.
 - **Resource limits.** Memory and process caps.
 - **A second confinement backend**, and any abstraction anticipating one.
-- **Agents beyond the four named.** SC-1 exists so a fifth does not reopen the checks.
+- **Agents beyond the three named**, `codex` among them. It was named in the first draft of this spec and is deliberately deferred to a feature of its own: it authenticates by its own token flow rather than deriving from `claude-code`, so it shares nothing with FR-7's arrangement and would be a second credential story carried alongside the first. What research established about it is kept, so the follow-up starts with that in hand. SC-1 exists so that adding it does not reopen the checks.
 - **The home-manager module currently in the repository.** Its knowledge is absorbed and the module itself leaves; it continues to live in its author's own configuration, serving projects that have not adopted this environment. That coexistence is a requirement (FR-21), not a dependency.
 - **The drafts' option surface.** `projectName`, backend selection and per-agent enable flags are proposals, not requirements; nothing here depends on them.
 - **The third-party name collision.** Another project publishes under a very similar name. Worth knowing; not this feature's problem.
 
 ## Risks & Open Questions
 
-1. **Credential substitution may not reach every agent.** The intent is settled and uniform, and so is the fallback: an agent it cannot reach ships with the weaker guarantee, said plainly. What is unverified is the route. Rewriting a token-endpoint response cannot apply to an agent that never performs that exchange, so those agents depend instead on proxy-side injection, which requires the agent to accept a substituted endpoint address. **Whether each agent's provider endpoint is configurable is what FR-6 actually turns on — not the credential's file format — and it is the first thing the plan should establish.** *Fallback*: the plugin approach already present in this repository, routing one agent's authentication through another's; failing that, a narrowly scoped short-lived key with egress filtering, recorded as the weaker tier.
+1. **Credential substitution may not reach every agent.** *Resolved, and the question it rested on was the wrong one.* This risk claimed FR-6 turns on whether each agent's provider endpoint is configurable, because an agent that performs no token exchange has no exchange to rewrite. It does not: inspection reaches the real destination, so the credential is supplied on the way past it and no endpoint needs substituting. Endpoint substitution exists as a documented fallback, and every agent shipped does expose it. Both routes keep the real secret outside the boundary, so neither is a degraded tier and FR-6 holds uniformly.
+
+   What remains is narrower and sits under FR-7: the two derived agents obtain their credential from the reference agent, and that arrangement is unproven. Note that the fallback this risk originally named — routing one agent's authentication through another's by granting its credential store — is now *excluded* rather than held in reserve, because FR-6 forbids a credential inside the boundary that works outside it and FR-3 forbids a grant resting on convenience. *Fallback*: each agent authenticates for itself, once per machine. That costs FR-7's across-agents axis, which is a usability loss stated plainly, and costs nothing under FR-6.
 
 1. **`git` has no credential inside the boundary.** Journey 6 originally asserted that a push over HTTPS still works, but a host credential helper, a stored credentials file and a system keychain all sit outside the boundary, and the default deny groups cover them. *Resolved by taking the stated fallback*: none of the three is reachable, and no requirement here supplies a credential in their place, so Journey 6 narrows to an exchange that needs no credential and the version-control toolchain gets no registry entry. Authenticating it is Out of scope; `research.md` records what each of the three does under confinement.
 
@@ -339,7 +355,7 @@ The change honours [docs/CONSTITUTION.md](../../docs/CONSTITUTION.md), and the p
 ## Review checklist
 
 - [x] Every scenario has exactly one `When`, and a `Then` that is observable
-- [x] At least one refusal scenario is present, and it is a real denial rather than an error message — nine are present, including a fail-closed platform refusal, an untrusted-repository refusal and a host-global-configuration refusal
+- [x] At least one refusal scenario is present, and it is a real denial rather than an error message — ten are present, including a fail-closed platform refusal, an untrusted-repository refusal, a host-global-configuration refusal and a host-tool-configuration refusal
 - [x] A repetition scenario is present, or the feature provably changes no state — three are present
 - [x] Every requirement FR-1..n is covered by at least one scenario, with three stated exceptions rather than silent gaps: FR-14 and FR-19 are documentation obligations verified in review, and FR-22 constrains how the environment is built rather than how a session behaves, so it is verified as the absence of run-time fetching that P8 already requires
 - [ ] No implementation detail appears anywhere in this file — **not fully clean, deliberately.** The confinement mechanism is named because the prompt names it, and the exit status `77` is pinned because a caller branches on it. Both are confined to Constraints and to FR-10, and no scenario depends on the mechanism's identity. Flagged for the reviewer rather than hidden

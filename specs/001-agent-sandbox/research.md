@@ -94,11 +94,27 @@ No group grants a git credential. `git_config` grants **read** on `$HOME/.gitcon
 
 One trap worth recording: the `codex_macos` group grants `$HOME/Library/Keychains/login.keychain-db` read **and write**. Including it would undo `deny_keychains_macos`, so `M8` must not take it.
 
-### Trust in the inspecting authority does reach `git`
+### Trust in the inspecting authority does reach `git` — but only where something is inspected
 
-Separate question, and the one Journey 6 actually exists to answer. nono's child environment carries a contiguous run of CA-bundle variables — `CURL_CA_BUNDLE`, `NODE_EXTRA_CA_CERTS`, `REQUESTS_CA_BUNDLE`, `GIT_SSL_CAINFO` — alongside the `tool-sandbox` launch machinery, and the profile guide describes `network.tls_intercept.ca_env_vars` as adding client-specific names beyond these: "nono still sets the standard CA variables".
+Separate question, and the one Journey 6 actually exists to answer. This was first answered wrongly, and the correction is the more useful record.
 
-`GIT_SSL_CAINFO` is the load-bearing one. It is what makes an ordinary `git` HTTPS exchange survive interception, and it is what FR-17 asks for.
+**The wrong answer.** The binary carries a contiguous run of CA-bundle variable names — `CURL_CA_BUNDLE`, `NODE_EXTRA_CA_CERTS`, `REQUESTS_CA_BUNDLE`, `GIT_SSL_CAINFO` — beside the tool-sandbox launch machinery, and the profile guide says of `network.tls_intercept.ca_env_vars` that "nono still sets the standard CA variables". Read together those looked like a guarantee that every session gets them. Inferred, never observed.
+
+**Falsified.** A plain `nono run -- env` passes 233 variables to the child and **not one of them is a CA variable**. The strings are the names nono *would* set, sitting in code that does not always run.
+
+**The right answer.** `network.tls_intercept` has no `enabled` switch — its properties are only `ca_lifecycle`, `ca_validity`, `leaf_validity` and `ca_env_vars` — because interception is not a session-wide mode. The guide, line 361, gives two forms of `allow_domain` entry: a plain string is a CONNECT tunnel, an object with `endpoints` is inspected. Line 375: "the proxy performs TLS interception to enforce method+path restrictions (default-deny). This is useful for restricting access to specific API endpoints **without credential injection**." So inspection is per-destination, switched on by a credential route or by an object-form entry.
+
+Switch it on and the variables appear. Observed, with `--allow-domain 'https://github.com/**'`:
+
+```text
+SSL_CERT_FILE=~/.local/state/nono/sessions/intercept-80452-522455426/intercept-ca.pem
+REQUESTS_CA_BUNDLE=…/intercept-ca.pem   NODE_EXTRA_CA_CERTS=…/intercept-ca.pem
+CURL_CA_BUNDLE=…/intercept-ca.pem       GIT_SSL_CAINFO=…/intercept-ca.pem
+```
+
+Five variables, one authority, minted per session — matching `ca_lifecycle: session`, "a per-run CA exposed through trust-bundle env vars". `GIT_SSL_CAINFO` is the load-bearing one for FR-17.
+
+**The consequence for `check_j6_1`, which is the whole point of recording this.** `plan.md` first specified it as "assert exit 0, which holds only if the interception CA reached `git`". That claim is false in both directions. `git` exits 0 when trust propagated, and it also exits 0 when nothing was inspected at all, because `/etc/ssl` and `/etc/pki` are in the bare floor and the real certificate validates fine. One observable, two opposite states of the feature, so the check would have passed with the feature deleted. **Trust propagation is only observable as a difference**, so the check must carry both sides — see `plan.md`'s entry for it.
 
 ### Decision
 
@@ -110,9 +126,34 @@ Separate question, and the one Journey 6 actually exists to answer. nono's child
 
 `spec.md` is corrected in place: Journey 6's When and Then, its *Independently verifiable by*, a new Out of scope entry, and Risk 2 marked resolved by its own stated fallback.
 
-### Verification gap
+### The host git configuration runs inside the boundary, and this changes a grant
 
-`nono run` could not be executed from this session — the outer sandbox denies `$HOME`, and nono fails to create `~/.local/state/nono/audit/…`. So the CA-variable finding is read out of the binary and the guide rather than observed in a live child environment. `check_j6_1` observes it for real at the integration layer.
+Found by accident, while confirming the CA variables. The same session was given `--allow-file ~/.gitconfig`, and `git` did this:
+
+```text
+fatal: unable to create directories for '…/agent-sandbox/.cache/git/credential': Permission denied
+fatal: cache daemon did not start:
+```
+
+`git` had read `credential.helper = cache` out of the host's `~/.gitconfig` and tried to **start a daemon**. It failed only because that session's workdir happened to be read-only. In the shipped arrangement the workdir is read-write, so it would have succeeded: a host configuration file starting a long-lived process inside the boundary and writing into the project.
+
+This is the same class of hazard `plan.md` already cited when declining to grant `$XDG_CONFIG_HOME/git` — a readable git config lets `core.hooksPath` fire host code later — but observed, through a different key, on the file that had looked harmless enough to grant. nono's `git_config` group is what grants it, read-only, and read-only is no protection: the danger is in the directives, not in writing to them.
+
+The host configuration can be neutralised entirely. Verified on git 2.55.0:
+
+```sh
+git config --show-origin --get credential.helper
+# file:/home/pallon/.gitconfig	cache
+
+GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null git config --get credential.helper
+# exit 1 — the directive is gone
+```
+
+**Decision.** Do not include nono's `git_config` group, grant no host git configuration file, and set `GIT_CONFIG_GLOBAL` to a project-owned file plus `GIT_CONFIG_SYSTEM=/dev/null` through `environment.set_vars`. Withholding the grant alone would already stop the read, but directing the toolchain instead makes the effective configuration identical on every machine — which is what the repetition scenarios ask for — and gives the commit identity somewhere to live. The author's name and address are copied out of the host once, at setup, and a consumer may override them; they are not credential material and the copy is visible in the file it produces. This is `spec.md`'s new **R10** and **FR-23**.
+
+### Verification gap — closed, with one constraint standing
+
+`nono run` cannot be executed from inside this session: the outer sandbox denies `$HOME`, and nono fails to create `~/.local/state/nono/audit/…`. Everything above that needed a live session was therefore run outside it and reported back. The constraint stands for later work — anything requiring a live confined session is run by the human, or by the checks on a machine where `$HOME` is writable.
 
 ## M1d — pi's configuration root
 
@@ -307,6 +348,37 @@ D4's merge claims — `set_vars` merging as a map with the child winning, `allow
 The schema describes the fields, not how `extends` combines two of them.
 `check_component_merge` in `M3` observes that, and until it does, D4 remains an assertion.
 
+### A description names no parent, and the floor is the same either way
+
+Three descriptions were written by hand under a redirected `XDG_CONFIG_HOME`, `XDG_STATE_HOME` and `HOME`, and their resolved manifests compared. One with no `extends` key and one with `extends: ["default"]` resolve **byte-identically** — `grants=33 deny=48 netmode=unrestricted blocked=46`, the only difference being the pid in the `/proc/<pid>` grants of whichever process asked. `default` is the floor every description sits on, not something a description opts into by naming it. **So descriptions name no parent and declare what they want**; naming one would imply an inheritance that is not what happens.
+
+Three shape facts, each learned from the error it produces:
+
+- `meta.name` is required — omitting it gives `Profile parse error: missing field \`name\` on line 2 column 11\`, exit 1.
+- `groups` is `{"include": […], "exclude": […]}`, not a map of booleans: `{"nix_runtime": true}` gives `unknown field \`nix_runtime\`, expected \`include\` or \`exclude\`\`.
+- `network.mode` is derived and cannot be set. The default is `unrestricted`; `{"block": true, "allow_domain": ["api.anthropic.com"]}` resolves to `{"allow_domains": […], "dns": true, "mode": "blocked"}`.
+
+The floor grants read on `/bin /usr/bin /lib /lib64 /etc/pki /etc/ssl /etc/resolv.conf`, readwrite on the `/dev` character devices, read on six `/proc` files, write on `/tmp` and `$TMPDIR`, a handful of individual store files for hosts, nsswitch, services, os-release, locale and terminfo — plus the workdir. Its 48 denies come from the required credential, keychain and shell-history groups, rooted at whatever `$HOME` resolves to. `process.blocked_commands` holds 46 entries, `git` not among them.
+
+**`/nix/store` is not in the floor**, which is why a bare session cannot run anything from the store — the first attempt exited 127. The lever is `"groups": {"include": ["nix_runtime"]}`, which adds exactly four grants, all **read**: `/nix/store`, `/nix/var/nix/profiles`, `/etc/profiles/per-user` and the system-path closure. Reaching for `--allow /nix/store` instead grants read **and write** to the store, which is wrong and should never appear in a description here.
+
+### What leaks into a session as things stand
+
+A plain `nono run -- env` passes **233 variables**. `HOME` is unchanged. `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, `XDG_STATE_HOME` and `XDG_BIN_HOME` still name host paths — denied on the filesystem, so a tool honouring them *fails* rather than relocating, which is the worst of both. `XDG_RUNTIME_DIR` is `/run/user/1000`. `NONO_AUTO_MIGRATE=1` is set by the prior-art home-manager module, which is the registry-fetch switch P8 wants off. Nix exports the whole devShell hook body as a variable and nono passes it through verbatim, loose `mkdir -p` fragments and all. `JAVA_HOME` and an `XDG_DATA_DIRS` full of openjdk, postgresql, zellij and nodejs store paths confirm the Kafka drift by observation rather than by reading `flake.nix`. `XDG_CACHE_HOME` and `TMPDIR` were correctly project-rooted, and nono auto-grants `write $TMPDIR`.
+
+Two decisions this leaves to `M3`: whether the cut is an `environment.allow_vars` allowlist or a `deny_vars` denylist — P1 argues allowlist, since a new host variable should arrive excluded — and whether `HOME` itself is set into the project. Setting it would relocate most agents for free, which is also the argument against it: a relocation failure is better seen failing loudly than masked.
+
+### `nono why` reports its verdict in the body, not the exit status
+
+| Query | `.status` / `.reason` | exit |
+| --- | --- | --- |
+| `--path ~/.ssh/id_ed25519 --op read` | `denied` / `filesystem_deny` | 0 |
+| `--allow $PWD --path $PWD/flake.nix --op read` | `allowed` / `granted_path` | 0 |
+| `--path /etc/shadow --op read` | `denied` / `path_not_granted` | 0 |
+| `--command rm`, no `--profile` | `denied` / **`command_policy_unavailable`** | 0 |
+
+The last row is the trap: a query nono **could not answer** still says `denied`. Every refusal check must therefore assert on `.reason` as well as `.status`, and treat any `*_unavailable` reason as an error rather than as a refusal — otherwise a malformed query passes as a successful refusal with the boundary switched off. `nono profile validate` is the opposite and does carry its verdict in the exit status.
+
 ## M1f — Agent packages in the pinned nixpkgs
 
 The pinned input is `github:NixOS/nixpkgs/0954f7ee2f6bb3dc7d4e3d0d8bcb8fd4bde4cfc5`, read from `flake.lock` rather than from the `nixpkgs#` registry alias, which on this machine resolves to a different and newer revision.
@@ -377,3 +449,29 @@ Every version in the table above was read at `3589c005…`, so the lock must pin
 
 Availability was established by evaluation, not by building.
 `codex` was built during `M1b` and substituted without compiling; the other four were not built on either platform, and nothing here was built for `aarch64-darwin`, which no check in this repository can reach.
+
+## M1g — claude-code's configuration root (pending)
+
+The one relocation question `M1` left open, and it moved from peripheral to load-bearing when `claude-code` became both the reference case and the credential source for the other two agents. `M1d` did this work for `pi`; nothing equivalent was ever done here. `spec.md` only ever claimed relocation "with known fallback cases", on the strength of documentation rather than observation.
+
+A first look at the payload, by `strings` occurrence count, says it relocates through many variables rather than one:
+
+| Variable | Occurrences | Why it matters |
+| --- | --- | --- |
+| `CLAUDE_CONFIG_DIR` | 51 | the likely primary root |
+| `CLAUDE_JOB_DIR` | 38 | |
+| `CLAUDE_CODE_TMPDIR` | 28 | |
+| `XDG_CONFIG_HOME` | 26 | honoured too, so the XDG redirection may already do part of the work |
+| `CLAUDE_PROJECT_DIR` | 26 | |
+| `CLAUDE_SECURESTORAGE_CONFIG_DIR` | 13 | where the credential is likely to land, which FR-7 depends on |
+| `CLAUDE_CODE_REMOTE_MEMORY_DIR` | 11 | |
+| `CLAUDE_CODE_PLUGIN_CACHE_DIR` | 7 | |
+| `CLAUDE_CODE_ADDITIONAL_DIR` | 7 | |
+| `CLAUDE_SKILL_DIR` | 6 | |
+| `CLAUDE_TMPDIR` | 5 | |
+| `CLAUDE_CODE_PLUGIN_SEED_DIR` | 5 | |
+| `CLAUDE_CODE_DEBUG_LOGS_DIR` | 5 | |
+
+Enough to expect success; nowhere near enough for FR-4 to lean on. A count of strings says a variable is read somewhere, not that it governs what it appears to govern — the `pi` case proved that in the other direction, where a variable the shipped documentation described did not exist in the binary at all.
+
+`M1g` mirrors `M1d` exactly: set the candidates, run the agent, observe whether anything is written beneath the home directory, and — the part `M1d` did not need — establish where the credential comes to rest, since FR-7's arrangement reads it from there. Same evidentiary standard: a control run without the overrides, so the default is fixed and the override is shown to be what moved it.
