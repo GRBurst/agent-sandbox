@@ -608,16 +608,40 @@ The integration layer is `6 checks passed`, run as `nix develop -c bash scripts/
 
 The integration layer is `7 checks passed`, run as `nix develop -c bash scripts/validate.sh --layer integration`, and the whole suite is `1 of 14 checks failed`, that one being the progress bar: `check_sc3`'s missing-scenario set went from 18 to 17, `r4` leaving and nothing else moving.
 
-### M5e — An untrusted repository cannot grant itself paths (Status: PENDING)
+### M5e — An untrusted repository cannot grant itself paths (Status: IMPLEMENTED)
 
 **Scenario**: R5
 
 **RED**: `check_r5` places an agent config file in the checkout requesting `$HOME`.
 
-- [ ] Check written and seen to FAIL
-- [ ] **Control**: the same file is read for a benign setting, so a file nothing reads cannot pass as a request refused
-- [ ] FR-15's override path is exercised too: widening works from the invocation, and only from there
-- [ ] Violation planted (the wrapper reads the in-checkout config when composing the description), seen to FAIL, reverted, recorded in plan.md
+- [x] Check written and seen to FAIL — at the unit layer as RED, and at its own layer under the plant. As with `M5a` to `M5d`, the property already held as shipped, so the plant is the only route to watching this check fail
+- [x] **Control**: not the benign-setting probe the criterion asked for, but a stronger one, and the substitution is the finding — the same file, in the same place, resolved **by name**, granting the very path under test and observed reading a canary out of it. A benign setting would only prove the file was parsed; this proves the request was refused rather than unread
+- [x] FR-15's override path is exercised too: a fourth arm adds `NONO_ALLOW` at the invocation and the granted reach differs from the clean run by **exactly** that one grant, asserted in both directions. "And only from there" is not asserted, because it is not a property nono has — see below
+- [x] Violation planted (`--profile ${profile}` → `--profile ${name}`), seen to FAIL, reverted, recorded in plan.md. It took `check_r4` and `check_j1_1` down with it, and it exposed a registry fetch nobody had looked for
+
+**Measured before starting**, in [`research.md § M5e`](research.md#m5e--an-untrusted-repository-cannot-grant-itself-paths). Eight arms established that R5 holds and why; a further six closed the three surfaces the first pass left owed.
+
+| Surface | Verdict |
+| --- | --- |
+| a nono user profile inside the project | denied when the wrapper names a store path, honoured the moment anything resolves it by name |
+| `NONO_PROFILE`, `NONO_ALLOW`, `--extends` | all widen, all arrive at the invocation, none from a file in the project |
+| `config.toml` inside the project | read, and cannot widen — `[extensions]` and `[overrides]` are not keys it validates — but it can make the entry point exit `77`. [D19](plan.md#d19) |
+| `--bypass-protection` | refuses to start without a grant, adds nothing to one that has it, and is the one widening flag with no environment variable |
+| a project-level `trust-policy.json` | selects which files are verified against which keys, never which paths are granted. Outside R5 |
+
+The measurement that changed the check's shape is that **nono prints its whole capability set to stderr before the program runs**, with no ANSI escapes when stderr is not a terminal. That makes the real entry point the instrument: `claude --version` exits in about a second and its banner is the session's granted reach, as a set that two runs can be compared on.
+
+**Implementation.** `check_r5` joins `scripts/checks/integration.sh` with two new helpers and four arms.
+
+- **The subject is the real entry point, not a composed `nono run`.** Every other check in the suite supplies `--profile` itself, so a wrapper that resolved its description from the checkout would leave their readings untouched — which is exactly why `check_r4` had to assert on the wrapper's *text*. Driving `.#claude` instead puts the plant in the path of the observable, and the plant firing on `check_r5`'s subject rather than on a control is what confirms it.
+- **The assertion is set equality between a hostile checkout and a clean one**, not the absence of the hostile path. Both are asserted — the path is absent, and the whole set is `diff`-identical — because a session that lost an unrelated grant would satisfy the first and still be a change in reach.
+- **`granted_reach` and `reach_grants` are the two helpers**, and both are property-shaped rather than literal. The first extracts the banner by its grammar — first field one of `r`, `w`, `x`, `r+w`, `net`, `+` — and swallows grep's non-match so an empty set is an answer the caller asserts about rather than a crash. The second matches mode and path **by field** with `awk`, so a grant is found regardless of the banner's column alignment.
+- **The checkout's configuration is a scratch config root, not the developer's `.config`.** The check exports `XDG_CONFIG_HOME` at a directory under `$REPO_ROOT/.tmp`, which is what a checkout controls under [C1](plan.md#c1) without the check writing into a root a human is using. That decision is load-bearing rather than tidy: the plant, run before it, pulled a third-party pack into the real `.config/nono/packages`.
+- **FR-15's second half is not asserted, and the task says why rather than quietly dropping it.** "Widening works from the invocation, and only from there" — the first half is arm 4. The second is not a property nono holds: a checkout's own `.envrc` is part of the calling environment once a human has run `direnv allow`, so the distinction FR-15 draws is a human one and belongs in the handbook. Recorded in the plan's coverage gap.
+- **The plant was sharper than the plan predicted, in a way that corrects `D10`.** With the wrapper naming `claude-code` instead of a store path and an *empty* config root, nono did not refuse: it pulled `nolabs-ai/claude` from `https://registry.nono.sh` and applied a description granting `$HOME/.claude` read-write. So the by-name wrapper lands on the checkout's file when a checkout ships one and on a registry pack when it does not, and both are the leak this feature removes. `nono profile list` shows nine language runtimes and `nono profile show claude-code` says `Profile not found`, so `M1e` measured honestly with the instruments it had; the resolver `nono run` uses is a different one. A store path never pulls, which is a reason for FR-9's pinning the plan had not stated.
+- **The plant also wrote executable hooks and a skill into the project**, by way of that pull, which is FR-26's category arriving through a channel no check watches. The residue was removed and `.config/` is gitignored, so nothing reached the index, but it is recorded because it is a gap rather than an anecdote.
+
+The integration layer is `8 checks passed`, run as `direnv exec . bash scripts/validate.sh --layer integration` in 49 s. Under the plant it was `3 of 8 checks failed` — `check_r5` on its subject, `check_r4` on its wrapper text, `check_j1_1` on its reach comparison. `check_sc3`'s missing-scenario set went from 17 to 16, `r5` leaving and nothing else moving.
 
 **Measured before starting** ([`research.md`](research.md#m5e--an-untrusted-repository-cannot-grant-itself-paths)). Eight arms against the shipped description, with the checkout's agent configuration modelled as a nono user profile *inside the project* — which is where `XDG_CONFIG_HOME` already points nono's user profile directory, so the file needs no contrivance to be found.
 

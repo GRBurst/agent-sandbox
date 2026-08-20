@@ -1129,11 +1129,74 @@ So FR-15's "widening works from the invocation" needs no new mechanism. Its "and
 
 `$XDG_CONFIG_HOME/nono/` carries `profiles/`, `profile-drafts/`, `config.toml` and `trust-policy.json`; `nono profile promote` applies a draft from `profile-drafts/`. There is also a project-level `trust-policy.json` looked for in the current directory, and nono ships a claude integration of its own that writes `.claude/settings.json` and `.claude/hooks/nono-hook.sh`.
 
-**Unmeasured, and worth measuring before the M5 group closes:** what keys `config.toml` accepts and whether any of them widens; what a project-level `trust-policy.json` can do; and `--bypass-protection <PATH>`, documented as overriding a deny rule, which is the one flag that might reach the paths `M5a` found the required deny groups do not actually protect.
+### The three surfaces that were owed, measured
 
-### Method note
+Same harness, same fake `$HOME`, the config root inside the project. `config.toml` at `$XDG_CONFIG_HOME/nono/config.toml` is a file a checkout can ship, because `XDG_CONFIG_HOME` is `$PWD/.config` under [C1](plan.md#c1).
+
+| Arm | Observed |
+| --- | --- |
+| `[extensions] extra_flags = ["--allow", <dir>]` | denied — no widening |
+| `[extensions] extra_env_vars = { NONO_ALLOW = <dir> }` | denied — no widening |
+| `[overrides] paths = [<dir>]` | denied — no widening |
+| `[extensions] extra_flags = 42`, a type error | **starts anyway** — so the section is not validated, and therefore not a key nono 0.74.0 knows |
+| `[ui] detach_sequence = "x"`, a known key with an invalid value | **refuses to start**: `Configuration parse error: Failed to parse user config: … detach sequence must contain at least two key presses` |
+| malformed TOML | **refuses to start**: `Configuration parse error: Failed to parse user config: TOML parse error at line 1, column 6` |
+
+The last two rows are what make the first three evidence. A silently ignored file and a file that widens nothing look identical from outside, and `[extensions]`'s accepted type error says that `extra_flags`, `extra_headers` and `extra_env_vars` — which do appear in the binary's serde field names — belong to some other structure and not to `config.toml`. What `config.toml` is read for is the `[ui]`, `[updates]`, `[redaction]`, `[trusted_keys]` and rollback-limit keys; the binary's own text says `user config for rollback limits`.
+
+So `config.toml` cannot widen. It can, however, **stop every session on the machine from starting**, from inside a checkout — and through the entry point that refusal arrives as exit `77`, which is `R6`'s status for a host that cannot enforce confinement. A file in the project thereby produces the diagnosis "this host cannot confine". That is a misdiagnosis rather than a leak, so `R5` is unaffected, and it is recorded as [D19](plan.md#d19).
+
+`--bypass-protection <PATH>` does not widen on its own: with no accompanying grant it refuses to start with `bypass_protection '<path>' has no matching grant. Add a filesystem allow (--allow, --read, --write, or profile filesystem) for this path.` And it adds nothing to a grant that has one — `--read <home>/.ssh` alone reads the key out, with or without it, which is the same hole `M5a` found and further evidence the required deny groups are not a backstop. It is also the one widening flag with **no environment variable of its own**: `--allow` carries `[env: NONO_ALLOW=]` and `--read` and `--write` carry none at all, so all three can only arrive on the command line the wrapper writes.
+
+A project-level `trust-policy.json` is created by `nono trust init` in the current directory and carries `predicate`, `includes`, `publishers`, `blocklist` and `enforcement`. Every field selects *which files are verified and against which keys*; none of them names a path to grant. It is a channel for making a checkout's own files pass trust verification, not for widening reach, so it is outside `R5` and belongs to whatever eventually covers trust enforcement.
+
+### The entry point is the instrument, and its capability banner is the observable
+
+`nono` prints its whole capability set to stderr at startup, one line per grant — `r <store path> (dir)`, `r+w <project> (dir)`, `+ 34 system/group paths (-v to show)`, `net outbound allowed` — with no ANSI escapes when stderr is not a terminal. Extracting the lines whose first field is one of `r`, `w`, `x`, `r+w`, `net` or `+` and sorting them gives a granted-reach **set** that can be compared between two runs.
+
+That turns the real entry point into the probe, rather than a hand-rolled `nono run`:
+
+| Arm, `.#claude` run as `claude --version` | Observed |
+| --- | --- |
+| in-project `evil` profile and `config.toml` present, neither named | exit 0 in about a second, 131 capability lines, the hostile path absent |
+| the same, config root clean | the **same 131 lines** |
+| `NONO_ALLOW=<dir>` at the invocation | 132 lines — the set differs by exactly `r+w <dir> (dir)` |
+| `NONO_PROFILE=evil` in the environment | the same 131 lines — the command-line argument wins |
+| malformed in-project `config.toml` | exit 77, no banner |
+
+`claude --version` exits in about a second and the banner is printed before the program runs, so the reach of a real session is observable without a shell inside it. This matters for the plant: every session in `check_r4` is driven by a `--profile` the check itself supplies, so a wrapper that resolved its description from the checkout would leave that check's readings untouched and had to be caught by reading the wrapper's text. Driving the real entry point instead means the plant moves the observable directly.
+
+### Naming a description by name fetches one off the network, and this falsifies part of `D10`
+
+Found by planting `M5e`'s violation — the wrapper writing `--profile claude-code` instead of the store path — and watching what a session did with an **empty** config root, where the plant was supposed to have nothing to resolve.
+
+It resolved anyway, from the network:
+
+```text
+⬇ pulling nolabs-ai/claude
+   assets/logo.png  733.92 KB ✓   bin/nono-hook.sh  2.62 KB ✓   hooks/hooks.json  486 B ✓
+   profiles/claude.json ✓        skills/nono-sandbox/SKILL.md  4.65 KB ✓   … 13 artifact(s)
+✓ nolabs-ai/claude 0.1.0
+   Installed at  <XDG_CONFIG_HOME>/nono/packages/nolabs-ai/claude
+Verified 1 pack(s)
+```
+
+`packages/lockfile.json` names the source: `"registry": "https://registry.nono.sh"`, the pack `nolabs-ai/claude` at `0.1.0`, `"pinned": false`, with sigstore provenance naming `github.com/nolabs-ai/nono-packs`. The description it installed and applied, `profiles/claude.json`, extends `default` and grants `$HOME/.claude` read-write, `$HOME/.claude.json` and `$HOME/.claude.json.lock` as files, `/tmp/claude-$UID`, and `$NONO_CONFIG/profile-drafts` read-write; it includes the `git_config` group that [D11](plan.md#d11) refuses, sets `network.block: false`, and carries a `bypass_protection` entry on the macOS keychain.
+
+Four separate things follow, and only the last was anticipated.
+
+- **`D10`'s "the mechanism ships no agent preset" is half wrong, and the half that is wrong is the important one.** `nono profile list` with a clean config root really does report nine built-in profiles, all language runtimes, and `nono profile show claude-code` answers `Profile not found: claude-code` — so `M1e` measured correctly with the instruments it used. But `nono run --profile claude-code` is served by a *different resolver*, which reaches a registry the introspection subcommands know nothing about. An agent preset exists; it is merely not local until something asks for it. `D10`'s other clause survives intact and is now corroborated from the horse's mouth: the packaged description grants the agent's whole credential directory read-write, which is the leak this feature removes.
+- **The name is the fetch.** `--profile totally-bogus-name-xyz` exits 1 with `Profile not found`, so a name is not silently ignored; `claude-code` resolves because the registry has it. The difference between a session confined by this repository and a session confined by a third party is one token in the wrapper.
+- **A store path never pulls.** With `--profile <store path>` and a clean config root, `pulling` appears nowhere and the root ends up holding `profiles/` and `profile-drafts/` and no `packages/` at all. So `FR-9`'s pinning buys more than reproducibility: it is also what keeps a network fetch out of session startup. That was not among the reasons the plan gave for it.
+- **The plant demonstrated the leak by committing it.** The suite run under the plant pulled the pack into this repository's own `.config/nono/packages` — 1.1 MiB, `installed_at` matching the run to the second — because the devShell points `XDG_CONFIG_HOME` at the project. So a by-name wrapper writes third-party policy *and two executable hook scripts and a skill* into the project directory, which is `FR-26`'s category arriving through a channel nothing was watching. The residue was removed afterwards; `.config/` is gitignored, so it never reached the index.
+
+`check_r5` does not assert against this. Its arms all drive the real entry point, which names a store path, and the by-name arm it does use resolves a file the check itself planted in the config root, so it never reaches the registry. What the check does assert is the property that makes all of the above unreachable: the reach of a session started in a hostile checkout equals the reach of one started in a clean one. The pull is recorded here as the sharpest available account of what the plant is protecting against, and as a correction owed to `D10`.
+
+### Method notes
 
 `env VAR=VAL … cmd --flag` stops treating arguments as assignments at the first one that is not `VAR=VAL`, so flags handed to `env` before the command become `env: '--profile': No such file or directory`. Every flag goes after the command name.
+
+`XDG_STATE_HOME` must be outside the workdir. Pointed inside it, nono refuses with `Refusing to grant '<project>' (source: user) because it overlaps protected nono state root '<project>/…/nono'`, which is the same protected-state-root refusal `M5b` met from the other side.
 
 ## M8e — Where each agent reads its declarative extensions from
 
