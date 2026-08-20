@@ -322,7 +322,7 @@ The floor is derived by stripping the description under test down to `{meta}` wi
 
 **The planting found a defect in the check itself.** With `$HOME/.ssh` granted, `jq` reported `Cannot index string with string ("path")` beside the expected failure: in `$p | startswith(.path + "/")` the pipe rebinds `.` to `$p`, so `.path` indexed a string. The exact-match disjunct short-circuited for `/nix/store` and hid it. The entry is now bound with `. as $e` before the pipe. Known gap: with one registered path granted exactly, the prefix branch is not exercised by any current data, and a defect there would make the check too strict rather than too lax.
 
-### M3d — the merge is what the plan claims (Status: IMPLEMENTED)
+### M3d — the merge is what the plan claims (Status: DONE)
 
 [D4](plan.md#d4) is a boundary contract, and P7 requires a boundary's merge behaviour be written down — and here, asserted. The schema does not settle it: it describes what fields exist, not how they combine.
 
@@ -365,18 +365,34 @@ ______________________________________________________________________
 
 The MVP slice. After this group `claude-code` is confined and could be handed to a consumer even if nothing else lands. It is the reference case not because it is the easiest — `M1g` exists precisely because it is not — but because `opencode` and `pi` obtain their credential from the session it authenticates, so nothing about FR-6 or FR-7 can be shown until it works.
 
-### M4a — The pre-flight refuses an unenforceable host (Status: PENDING)
+### M4a — The pre-flight refuses an unenforceable host (Status: IMPLEMENTED)
 
 **Scenario**: R6
 
 **RED**: write `check_r6`, which runs the canary unconfined and asserts exit `77` and a message naming the missing primitive.
 
-- [ ] Check written and seen to FAIL with: no `77` and no message
-- [ ] `preflight_or_die` written with **three** assertions, so "nono failed to start" cannot pass as "the child was denied" (P9)
-- [ ] The positive control is that the same pre-flight exits 0 on the machine running the suite, so a pre-flight that refuses every host cannot pass this check ([D9](plan.md#d9))
-- [ ] `bash scripts/validate.sh --layer integration` passes
-- [ ] Violation planted, seen to FAIL, reverted, recorded in plan.md
-- [ ] `shellcheck` clean; the task is under ~50 lines of shell
+- [x] Check written and seen to FAIL with: no `77` and no message
+- [x] `preflight_or_die` written with **four** assertions, so neither "nono failed to start" nor "the canary was already unwritable" can pass as "the child was denied" (P9)
+- [x] The canary sits at a path the pre-flight has **observed to be writable unconfined**, so the denial it later sees is attributable to the confinement and not to whatever else may be in the way ([D5](plan.md#d5))
+- [x] The positive control is that the same pre-flight exits 0 on the machine running the suite, so a pre-flight that refuses every host cannot pass this check ([D9](plan.md#d9))
+- [x] `bash scripts/validate.sh --layer integration` passes
+- [x] Violation planted, seen to FAIL, reverted, recorded in plan.md
+- [x] `shellcheck` clean; the task is under ~50 lines of shell
+
+The criterion naming **three** assertions was corrected in place to four, and the canary criterion added, because the sketch in [plan.md](plan.md#d5) could conclude "confinement is enforced" from a write that never had a chance of succeeding. Its canary was `$HOME/.agent-sandbox-preflight.$$`, and on any host where `$HOME` is not writable by the user — this repository's own development sandbox among them — the confined write fails for a reason that has nothing to do with nono, assertion 3 finds no file, and the guard passes having proven nothing. That is the silent false pass **P9** forbids, in shipped code rather than in a check, and it is [D9](plan.md#d9)'s positive-control rule applied one level down: a guard whose observable is a *failure* has to show the same operation succeeding first.
+
+**Implementation.** `lib/preflight.sh` holds `die` and `preflight_or_die`, 27 lines of code. `scripts/checks/integration.sh` is new, and this is the first task whose observable is a real kernel-enforced session rather than a resolved policy.
+
+RED was `FAIL check_r6` / `lib/preflight.sh: no such file`, which is "no `77` and no message" as the criterion words it. GREEN came on the first run after writing the file.
+
+- **The pre-flight has no profile of its own, and the plan's `preflightProfile` parameter is gone.** It asserts a property of the *host*, so the description it tests under may as well be the one the agent is about to run under. A second description whose only consumer is the pre-flight is another artefact to keep true and an option nothing else exercises. `plan.md`'s `mkConfinedAgent` sketch was corrected in place, and the pre-flight became a file rather than the sketch's inlined `preflightSh` string, because `check_r6` sources it and `shellcheck` reads it — neither of which can be done to a string interpolated into a derivation.
+- **The plant is a passthrough `nono`, not a no-op.** A no-op never runs the child at all, so assertion 1 would fire and the check would see `77` for the wrong reason. The stub consumes `--profile` and `--workdir`, breaks on `--` and `exec`s the rest, which is the honest shape of "nono is present and enforcing nothing".
+- **Attribution was verified rather than assumed.** All four assertions exit `77`, so the exit status alone cannot say which one fired, and a stub that happened to break assertion 1 would pass the check while proving nothing. Both arms were run by hand: the plant arm printed `confinement is not enforced: a confined process wrote outside the project.` — assertion 3, the one the plant exists to trip — and the control arm printed nothing at exit 0.
+- **A third arm was added that the task did not ask for.** Arms one and two both leave assertion 2 untested, because `$XDG_RUNTIME_DIR` is writable on this machine, so deleting the positive control would have gone unnoticed by the check that exists to protect it. The third arm points both `$XDG_RUNTIME_DIR` and `$HOME` at a `chmod 500` directory and requires `77` with `cannot verify confinement`. Deleting assertion 2 is the second recorded planting, and it is the defect that prompted this task's correction, observed in the artefact rather than argued from the sketch.
+- **`session_env` establishes `research.md`'s four conditions once, before the layer's first session**, and exports them as an array rather than a string because every value is a path. Condition 3 — the audit ledger existing beforehand — is load-bearing for the whole layer and not merely for running by hand: the migration that fails runs *after* the child exits and replaces its exit status with `1`, so a refusal that should report `77` would report `1` and every exit status this layer asserts would be the supervisor's cleanup.
+- The pre-flight passes no `--allow-cwd`; `workdir.access = "readwrite"` in the generated description already covers the project, and the pre-flight writes nothing there. `die` spells the Landlock version constraint `>=` rather than `≥`, so the message a user reads survives a terminal without the glyph.
+
+`check_sc3`'s set shrank from 21 to 20, `r6` leaving and nothing else moving. The suite is `1 of 8 checks failed`, that one being the progress bar.
 
 ### M4b — A confined `claude` starts (Status: PENDING)
 

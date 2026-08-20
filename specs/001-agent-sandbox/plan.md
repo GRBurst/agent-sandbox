@@ -93,6 +93,8 @@ Complexity tracking is empty: the gate passed cleanly.
 <a id="d5"></a>
 
 - <a id="d5"></a>**D5 — The pre-flight is functional, not introspective.** It asserts *enforcement* by observing a denial, rather than probing kernel interfaces (`/sys/kernel/security/lsm`, Landlock ABI, cgroup v2). Introspection lost because the probe list is bubblewrap-shaped: nono uses Landlock and needs neither user namespaces nor cgroups v2, so a passing probe would prove the wrong thing, and a functional probe cannot pass for the wrong reason. Cost: two extra `nono` launches per agent start. Accepted unmeasured; if it hurts, cache per boot under `$XDG_RUNTIME_DIR`, which is a later change.
+  **"A functional probe cannot pass for the wrong reason" was false as first sketched, and `M4a` corrected it.** The sketch put the canary at `$HOME/.agent-sandbox-preflight.$$` and read a failed write as proof of confinement. A write can fail because it was denied, or because it was never going to succeed — and on a host where `$HOME` is not writable by the user the two are indistinguishable from the outside. This repository's own development sandbox is such a host, which is how the defect was found, but it is not a property of it: the guard would report enforcement on any such machine having observed nothing. So the pre-flight now carries its own positive control, which is [D9](#d9)'s rule applied to shipped code rather than to a check. It **first writes the canary unconfined and requires that to succeed**, and only then reads the confined write's failure as a denial. Where no such path exists the pre-flight refuses with `77` rather than guessing, because "enforcement cannot be demonstrated" and "enforcement is absent" get the same fail-closed answer.
+  The canary is therefore chosen by observation rather than fixed: a path outside the project that the pre-flight has just proven it can write, preferring `$XDG_RUNTIME_DIR` over `$HOME` because it is writable on a host whose home is not and is granted by no group. `M4a` measured both here — `$HOME` refuses the unconfined write, `$XDG_RUNTIME_DIR` takes it and a confined child writing there gets exit 1 with no file.
 
 <a id="d6"></a>
 
@@ -345,14 +347,15 @@ Note the Landlock constraint: granting `$WORKDIR` recursively is safe only becau
 
 ```nix
 # mkConfinedAgent ∷ name → writeShellApplication, /bin/${a.binary}
-{ pkgs, agents, confinement, preflightProfile }:
+{ pkgs, agents, confinement }:
 name:
 let a = agents.${name}; in
 pkgs.writeShellApplication {
   name = a.binary;                              # D3: shadows the agent name
   runtimeInputs = [ pkgs.nono (a.package pkgs) ];
   text = ''
-    ${preflightSh}
+    PREFLIGHT_PROFILE=${confinement name}
+    ${builtins.readFile ../lib/preflight.sh}
     preflight_or_die
     exec nono run \
       --profile ${confinement name} \
@@ -363,22 +366,36 @@ pkgs.writeShellApplication {
 }
 ```
 
-### The pre-flight (`preflightSh`)
+There is no `preflightProfile` parameter. `M4a` found that the pre-flight asserts a property of the *host*, so the profile it tests under may as well be the one the agent is about to run under: a second description whose only consumer is the pre-flight would be another artefact to keep true, and P4 wants no option nothing else exercises. The wrapper therefore sets `PREFLIGHT_PROFILE` to the same store path it passes to `exec`.
+
+### The pre-flight (`lib/preflight.sh`)
+
+It is a file rather than a nix string, because `M4a`'s `check_r6` sources it directly and a string interpolated into a derivation cannot be sourced by a check. `shellcheck` reads it for the same reason.
+
+Assertion 2 is the one the first draft lacked, and [D5](#d5) records why it is not optional. The canary prefers `$XDG_RUNTIME_DIR` because it is writable on a host whose `$HOME` is not, and no group grants it, so a confined write there is denied for the reason the pre-flight is claiming.
 
 ```bash
-# FR-10 / R6. Functional, not introspective (D5). Three assertions, because
-# P9 forbids letting "nono could not start" look like "the child was denied".
+# FR-10 / R6. Functional, not introspective (D5). Four assertions, because P9
+# forbids letting "nono could not start" or "the canary was never writable"
+# look like "the child was denied".
 preflight_or_die() {
   local canary rc
-  canary="$HOME/.agent-sandbox-preflight.$$"
+  canary="${XDG_RUNTIME_DIR:-$HOME}/.agent-sandbox-preflight.$$"
 
   # 1. A confined process can start at all.
   if ! nono run --profile "$PREFLIGHT_PROFILE" --workdir "$PWD" -- true >/dev/null 2>&1; then
     die 77 "cannot start a confined process. nono failed to initialise."
   fi
 
-  # 2. A confined process cannot write outside the project. On success nothing
-  #    is written; only the failure path leaves a file, which we then remove.
+  # 2. The positive control (D5, D9). Unconfined, this write must succeed, or
+  #    its later failure says nothing about confinement. Fail closed: a canary
+  #    we cannot write is a pre-flight we cannot run.
+  if ! : >"$canary" 2>/dev/null; then
+    die 77 "cannot verify confinement: no writable path outside the project to test against."
+  fi
+  rm -f "$canary"
+
+  # 3. Confined, the same write must be denied.
   nono run --profile "$PREFLIGHT_PROFILE" --workdir "$PWD" \
     -- sh -c ": > \"$canary\"" >/dev/null 2>&1 && rc=0 || rc=$?
   if [ "$rc" -eq 0 ]; then
@@ -386,7 +403,7 @@ preflight_or_die() {
     die 77 "confinement is not enforced: a confined process wrote outside the project."
   fi
 
-  # 3. And it genuinely did not write it.
+  # 4. And it genuinely did not write it.
   if [ -e "$canary" ]; then
     rm -f "$canary"
     die 77 "confinement is not enforced: the denial was reported but the write landed."
@@ -518,7 +535,7 @@ Every row was audited against one question, after `check_j6_1` was twice written
 | R3 | `check_r3` — export `ANTHROPIC_API_KEY=<random canary>`, print the environment from inside, assert the canary is absent. **Control**: `TERM` is present, so an empty environment dump cannot pass | integration |
 | R4 | `check_r4` — from inside a session, rewrite `lib/leak-registry.nix` to grant `$HOME`; assert reach unchanged now and on the next start before re-entry. **Control**: the edit is confirmed to have landed on disk, so "reach unchanged" is not satisfied by a write that never happened | integration |
 | R5 | `check_r5` — place a project-level agent configuration requesting `$HOME`; assert reach unchanged. **Control**: the same session is shown to *read* that file for a benign setting, so the check proves the request was refused rather than the file ignored | integration |
-| R6 | `check_r6` — plant the violation the pre-flight exists to catch (run the canary unconfined); assert exit `77` and that the message names the primitive. **Control**: unplanted, the pre-flight exits 0 on the same machine, so `77` is attributable to the plant and not to a missing mechanism | integration |
+| R6 | `check_r6` — three arms. Plant the violation the pre-flight exists to catch, by putting a passthrough `nono` on `PATH` so the canary runs unconfined; assert exit `77` and that the message names the primitive. A second plant points both `$XDG_RUNTIME_DIR` and `$HOME` at an unwritable directory, so assertion 2 is exercised on a machine where the canary location happens to be writable. **Control**: unplanted, the pre-flight exits 0 on the same machine, so `77` is attributable to the plant and not to a missing mechanism | integration |
 | R7 | `check_r7` — grep the evaluated devShell for every Kafka artefact by name; assert none. **Control**: assert a package that *should* be there is found, so an evaluation returning nothing cannot pass | unit |
 | R8 | `check_r8` — invalidate the stored substitute, make a request, assert the message is an authentication failure and **differs from** a denial message. The difference is the assertion; a single failure string proves nothing | integration |
 | R9 | `check_r9` — populate the fake `$HOME` with a host-global agent config; assert unreadable from inside **and** that the session still starts and works. The second clause is the control | integration |
@@ -603,7 +620,8 @@ Mandatory per P2. Tick `Verified` only after seeing red, **and only after confir
 | `check_j7_1` | Run only the cheapest layer in the workflow | the suite reports success without having covered every layer | [ ] |
 | `check_rep1` | Have the wrapper write a timestamped file into the checkout on entry | the second entry differs from the first | [ ] |
 | `check_rep3` | Have authentication record the session it ran in | the two resulting states are distinguishable | [ ] |
-| `check_r6` | Run the canary directly instead of under `nono` | exit `77`, `confinement is not enforced` | [ ] |
+| `check_r6` | Delete the `die` from assertion 3, so a confined process that wrote outside the project is not refused | `an unenforceable host was not refused with 77: exit 0`, and `the refusal does not name the missing primitive` | [x] |
+| `check_r6` | Delete assertion 2, the pre-flight's own positive control | `a host with nowhere to write the canary was not refused with 77: exit 0`, and `the refusal does not say the canary was unwritable`. This is the defect [D5](#d5) was rewritten for, observed: without the control the pre-flight reports enforcement is fine on a host where the canary was never writable | [x] |
 | `check_r1` | Add `$HOME/.ssh` to the registry for `claude-code` | the read succeeds, so the check's assertion of failure fails | [ ] |
 | `check_r2` | Set `filesystem.allow = ["$HOME"]` | the file exists afterwards | [ ] |
 | `check_r3` | Remove `environment.allow_vars` | the canary value appears in the confined environment | [ ] |
