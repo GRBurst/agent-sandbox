@@ -622,3 +622,165 @@ check_r2() {
 
 	[ "$found" -eq 0 ]
 }
+
+# R3. A provider API key in the host environment does not reach a session.
+#
+# The session command is `env -0`, which is the scenario's "prints its own
+# environment" with nothing in between: no probe script, no shell, nothing that
+# could filter what it saw. `-0` because one of the variables the host carries
+# is the devShell's entire `shellHook` body, newlines and all, and a newline
+# separator would split it into entries that parse as variables of their own.
+# The output goes to a file rather than a command substitution because bash
+# drops NUL bytes from `$(...)`, which would run the whole environment together
+# into a single unsplittable line.
+#
+# Two assertions, and the second is the one that generalises:
+#
+#   1. The canary value does not appear anywhere in the output. It is the
+#      scenario as written, and it is asserted against the *value*: the name
+#      `ANTHROPIC_API_KEY` may well be set inside a session later, by the
+#      credential routing, and this check must not be what breaks when it is.
+#   2. Every name that crossed is sanctioned by the description itself — matched
+#      by an `environment.allow_vars` pattern, or a key of `environment.set_vars`,
+#      or one of the three variables nono injects. Both lists are read out of the
+#      built description, so adding a variable there moves the expected set with
+#      it, and no list is written down twice.
+#
+# The three nono injects are named here because they are the only names in the
+# session that no part of this repository asked for. A fourth appearing is a
+# change in nono's behaviour and worth failing over rather than tolerating.
+#
+# Controls, because "the secret is absent" is a claim about an absence (D9):
+#
+#   1. `TERM` is passed in with a canary value of its own and must arrive with
+#      that value. An empty environment, or a session that never started, cannot
+#      pass. That it arrives *with the host's value* is the point: it says the
+#      allow-list passes things through rather than merely declaring them.
+#   2. A standing second arm adds `ANTHROPIC_API_KEY` to `allow_vars`, where the
+#      same canary must arrive intact. Without it, an `env` that printed nothing
+#      of the host's would satisfy the shipped arm.
+check_r3() {
+	local agent=claude-code
+	local outside home scratch secret term arm description rc out err
+	local entry name pattern matched control found=0 env_pkg
+	local FIXTURE_PROFILE FIXTURE_SUBSTRATE FIXTURE_BASH
+	local -a SESSION_ENV crossed allowed declared unsanctioned leaked
+	# What nono sets in every session, whatever the description says: the
+	# rewritten PATH, the browser shim it interposes, and the path to the
+	# capability file it hands the child.
+	local -a injected=(PATH BROWSER NONO_CAP_FILE)
+
+	session_fixture "$agent" || return 1
+
+	env_pkg=$(substrate_member "$FIXTURE_SUBSTRATE" env) || {
+		fail "the substrate for $agent provides no env, so the session cannot print its environment"
+		return 1
+	}
+
+	outside=$(mktemp -d -p "${XDG_RUNTIME_DIR:-/tmp}" agent-sandbox-r3.XXXXXX)
+	scratch="$REPO_ROOT/.tmp/r3"
+	rm -rf "$scratch"
+	mkdir -p "$scratch"
+	# shellcheck disable=SC2064
+	trap "rm -rf '$outside' '$scratch'" RETURN
+
+	# Outside the project, for the reason recorded on check_r1: 48 of the deny
+	# rules are $HOME-relative, and a $HOME under the workdir makes them overlap
+	# a granted parent, which nono refuses to start with.
+	home="$outside/home"
+	mkdir -p "$home"
+
+	# Per run, so the check asserts that no host secret crosses rather than that
+	# one particular string does not, and so a value left in a stale file by an
+	# earlier run cannot satisfy either assertion.
+	secret="HOST-SECRET-$RANDOM$RANDOM"
+	term="term-canary-$RANDOM$RANDOM"
+
+	session_env "$outside/state"
+
+	jq '.environment.allow_vars += ["ANTHROPIC_API_KEY"]' \
+		"$FIXTURE_PROFILE" >"$scratch/granted.json"
+
+	for arm in shipped granted; do
+		description=$FIXTURE_PROFILE
+		[ "$arm" = shipped ] || description="$scratch/granted.json"
+		out="$scratch/env-$arm.bin"
+		err="$scratch/err-$arm.txt"
+
+		env "${SESSION_ENV[@]}" "HOME=$home" "TERM=$term" "ANTHROPIC_API_KEY=$secret" \
+			"$(pinned_bin nono)/nono" run \
+			--profile "$description" --workdir "$REPO_ROOT" --allow-cwd -- \
+			"$env_pkg/bin/env" -0 >"$out" 2>"$err" && rc=0 || rc=$?
+
+		mapfile -d '' -t crossed <"$out"
+
+		# Control 1, in both arms: an allowed variable arrived with the value the
+		# host gave it.
+		control=0
+		for entry in "${crossed[@]}"; do
+			[ "$entry" = "TERM=$term" ] && control=1
+		done
+		if [ "$control" -eq 0 ]; then
+			found=1
+			fail "$(printf 'the %s arm never saw TERM=%s, so it observed no session (exit %s):\n%s' \
+				"$arm" "$term" "$rc" "$(cat "$err")")"
+			continue
+		fi
+
+		mapfile -t allowed < <(jq -r '.environment.allow_vars[]' "$description")
+		mapfile -t declared < <(jq -r '.environment.set_vars | keys[]' "$description")
+
+		unsanctioned=()
+		for entry in "${crossed[@]}"; do
+			name=${entry%%=*}
+			matched=0
+			for pattern in "${allowed[@]}" "${declared[@]}" "${injected[@]}"; do
+				# Unquoted on purpose: allow_vars carries globs, LC_* among them.
+				# shellcheck disable=SC2053
+				if [[ $name == $pattern ]]; then
+					matched=1
+					break
+				fi
+			done
+			[ "$matched" -eq 1 ] || unsanctioned+=("$name")
+		done
+		# Reported once, with a count: an unfiltered session carries upwards of
+		# two hundred variables, and one failure per name buries every other
+		# assertion in the suite under it.
+		if [ "${#unsanctioned[@]}" -gt 0 ]; then
+			found=1
+			fail "$(printf '%s variable(s) crossed into the %s session that no rule in the description sanctions: %s' \
+				"${#unsanctioned[@]}" "$arm" "${unsanctioned[*]}")"
+		fi
+
+		if [ "$arm" = granted ]; then
+			# Control 2. The probe can see such a value when the boundary lets
+			# it through, so the shipped arm's absence is the boundary's doing.
+			if ! grep -qaFx "ANTHROPIC_API_KEY=$secret" <(printf '%s\n' "${crossed[@]}"); then
+				found=1
+				fail "$(printf 'the session cannot see ANTHROPIC_API_KEY even when the boundary allows it (exit %s):\n%s' \
+					"$rc" "$(cat "$err")")"
+			fi
+			continue
+		fi
+
+		# The scenario. Anywhere in the output the session produced: any entry
+		# whose name or value carries the canary, or anything on stderr. The
+		# entries are named rather than printed, because printing them would put
+		# the secret and the whole environment in the suite's own output.
+		leaked=()
+		for entry in "${crossed[@]}"; do
+			[[ $entry == *"$secret"* ]] && leaked+=("${entry%%=*}")
+		done
+		if [ "${#leaked[@]}" -gt 0 ]; then
+			found=1
+			fail "$(printf 'the host secret crossed into the session, carried by: %s' "${leaked[*]}")"
+		fi
+		if grep -qF "$secret" "$err"; then
+			found=1
+			fail 'the host secret appears in what the session wrote to stderr'
+		fi
+	done
+
+	[ "$found" -eq 0 ]
+}

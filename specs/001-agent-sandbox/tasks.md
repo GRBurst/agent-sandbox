@@ -542,19 +542,39 @@ The second row is the one that changed the task. nono protects a state root **ca
 
 The integration layer is `5 checks passed`, run as `nix develop -c bash scripts/validate.sh --layer integration`, and the whole suite is `1 of 12 checks failed`, that one being the progress bar: `check_sc3`'s missing-scenario set went from 20 to 19, `r2` leaving and nothing else moving.
 
-### M5c — No host secret crosses (Status: PENDING)
+### M5c — No host secret crosses (Status: IMPLEMENTED)
 
 **Scenario**: R3
 
 **RED**: `check_r3` exports a random canary as `ANTHROPIC_API_KEY` and prints the confined environment.
 
-- [ ] Check written and seen to FAIL with the canary present
-- [ ] `environment.allow_vars` written explicitly, default-deny ([D6](plan.md#d6)) — the mechanism FR-5 rests on
-- [ ] The canary is generated per run, so the check asserts a property rather than a value
-- [ ] **Control**: a variable the session is meant to inherit — `TERM` — is present in the same output, so an empty environment cannot pass
-- [ ] Violation planted (remove `allow_vars`), seen to FAIL, reverted, recorded in plan.md
+- [x] Check written and seen to FAIL with the canary present — under the planted violation, `the host secret crossed into the session, carried by: ANTHROPIC_API_KEY`
+- [x] `environment.allow_vars` written explicitly, default-deny ([D6](plan.md#d6)) — the mechanism FR-5 rests on. It was already written; what this task adds is the measurement that it is what does the work, and a check that fails if it stops
+- [x] The canary is generated per run, so the check asserts a property rather than a value. So is the `TERM` the control looks for
+- [x] **Control**: a variable the session is meant to inherit — `TERM` — is present in the same output, so an empty environment cannot pass. It is asserted with the host's value, which says the list passes variables through rather than merely naming them
+- [x] Violation planted (remove `allow_vars`), seen to FAIL, reverted, recorded in plan.md
 
 The measured starting point is 233 variables crossing into a child, `HOME` and every `XDG_*` among them, and the devShell's whole `shellHook` body exported verbatim as a variable of its own. `HOME` and `XDG_STATE_HOME` stay as they are, deliberately and for different reasons ([D13](plan.md#d13)).
+
+**Measured before starting.** Against the shipped description, with `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `TERM` and `LC_TESTVAR` canaries in the host environment ([research](research.md#m5c--no-host-secret-crosses)):
+
+| Arm | Variables crossing | Secret canary |
+| --- | --- | --- |
+| shipped | 20 | absent, both of them |
+| `del(.environment.allow_vars)` | 221 | present, both of them |
+| `allow_vars += ["ANTHROPIC_API_KEY"]` | 21 | present |
+
+So nono's default without the key is pass-everything, and the 221 corroborates the 233 above. Of the 20 that cross under the shipped description, 10 come through `allow_vars` — `LC_TESTVAR` among them, so the `LC_*` glob works — 7 are `set_vars`, and 3 are nono's own: `PATH`, `BROWSER` and `NONO_CAP_FILE`.
+
+**Implementation.**
+
+- The session command is `env -0` out of the substrate, with no probe script between it and the scenario's "prints its own environment". `-0` because the host carries the devShell's entire `shellHook` body as a variable, newlines included, which a newline-separated listing would split into entries that parse as variables of their own. It is captured to a file rather than a command substitution, because bash drops NUL bytes from `$(…)` and would run the whole environment together into one unsplittable line.
+- The assertion the scenario asks for is on the canary's **value**, never on the name `ANTHROPIC_API_KEY` being absent. M7 sets credentials for a session, plausibly under that very name, and this check must not be what breaks when it does.
+- Alongside it, the property the scenario is an instance of: every name that crossed is either matched by an `allow_vars` pattern, or is a key of `set_vars`, or is one of nono's three. Both lists are read out of the built description with `jq`, so adding a variable there moves the expected set with it. The three injects are named in the check because they are the only names in a session that nothing in this repository asked for, and a fourth appearing is a change in nono worth failing over.
+- Both aggregate failures report once, with a count. The first draft failed once per unsanctioned name, and under the plant that was 200 lines that buried every other assertion in the suite. The secret's carriers are named rather than printed, so the suite's own output does not become the leak.
+- The plant — deleting `allow_vars` from `lib/confinement.nix` — was confirmed absent from the built description before its FAIL was trusted, and it also fails `check_substrate_denials`, because the host's `LOCALE_ARCHIVE` then crosses and points at a `glibc-locales` store path that is not in the narrowed substrate. Under the plant the *granted* arm fails its control rather than its assertion: `allow_vars += [...]` on a missing key yields a one-element list, which is stricter than the shipped description, and `TERM` stops crossing.
+
+The integration layer is `6 checks passed`, run as `nix develop -c bash scripts/validate.sh --layer integration`, and the whole suite is `1 of 13 checks failed`, that one being the progress bar: `check_sc3`'s missing-scenario set went from 19 to 18, `r3` leaving and nothing else moving.
 
 ### M5d — An agent cannot widen its own confinement (Status: PENDING)
 

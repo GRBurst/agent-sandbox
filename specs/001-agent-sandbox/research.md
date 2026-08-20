@@ -1016,6 +1016,51 @@ The failure may be unrelated to sandbox restrictions.
 A `Landlock`-refused `open` for writing does not reach whatever nono counts as a path denial.
 A check that read nono's report would conclude the refusal was unrelated to confinement, so `check_r2` asserts on the shell's `Permission denied` and on the file's absence on the host instead.
 
+## M5c — No host secret crosses
+
+Measured on x86_64-linux with nono 0.74.0, against the shipped `.#confinement-claude-code`, with `HOME` and `XDG_STATE_HOME` in a `mktemp -d -p "$XDG_RUNTIME_DIR"` and `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `TERM` and `LC_TESTVAR` canaries in the host environment.
+
+### The substrate's bash cannot list its own environment
+
+The first probe used `for name in $(compgen -e)`, and every arm printed `compgen: command not found`.
+The substrate's `bash-5.3p15` is nixpkgs' non-interactive build, without programmable completion, so `compgen` is not there to be called.
+`export -p` is available but quotes what it prints — `declare -x TERM="…"` — so an assertion looking for `NAME=value` does not match it.
+
+The probe is therefore `env -0` out of the same substrate, run as the session command with no script between it and the scenario.
+`-0` matters: the host carries the devShell's entire `shellHook` body as a variable of its own, newlines included, and a newline-separated listing splits it into entries that parse as further variables.
+It is captured to a file, because bash drops NUL bytes from `$(…)` and would run the whole environment into one unsplittable line.
+
+### `allow_vars` is what does the work, and its absence means pass-everything
+
+| Arm | Variables crossing | `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` canaries |
+| --- | --- | --- |
+| shipped description | 20 | absent |
+| `del(.environment.allow_vars)` | 221 | present |
+| `allow_vars += ["ANTHROPIC_API_KEY"]` | 21 | present |
+
+The default without the key is pass-everything rather than deny-everything, which is what makes removing it a plant that bites.
+The 221 corroborates the 233 that [`M1e`](#what-leaks-into-a-session-as-things-stand) measured from a plain child process, on a host whose environment has since moved; what has not changed is that a session with no `allow_vars` sees the lot.
+
+What the 221-variable arm carried, beyond the 20 below: the `shellHook` body, `DIRENV_DIFF`, `DIRENV_WATCHES`, `XDG_CONFIG_HOME`, `STARSHIP_CONFIG`, `SSH_AUTH_SOCK=/run/user/1000/gnupg/S.gpg-agent.ssh`, the whole nix-shell build environment, and `OPENCODE=1`.
+
+### The 20 that cross, and what sanctions each
+
+- **Ten through `allow_vars`** — `HOME`, `USER`, `LOGNAME`, `TERM`, `LANG`, `PWD`, `SHELL`, `COLORTERM`, and `LC_ALL` and `LC_TESTVAR` through the `LC_*` pattern, **so the glob works**.
+  `TZ` was unset on the host, so an allowed name with no host value does not appear.
+- **Seven through `set_vars`** — `CLAUDE_CONFIG_DIR`, `CLAUDE_CODE_TMPDIR`, `CLAUDE_CODE_REMOTE_MEMORY_DIR`, `DISABLE_AUTOUPDATER`, `GIT_CONFIG_GLOBAL`, `GIT_CONFIG_SYSTEM`, `LOCALE_ARCHIVE`.
+- **Three from nono, which nothing in this repository asked for** — `PATH`, `BROWSER` (pointing at `$TMPDIR/nono-browser-XXXXXX/nono-browser`) and `NONO_CAP_FILE` (pointing at `$TMPDIR/.nono-<hex>.json`).
+
+`HOME` crosses with the host's value, deliberately, per [D13](plan.md#d13).
+The `PATH` nono writes is rewritten but still ends with the whole host `PATH`, `/run/current-system/sw/bin` included — the same fact behind the pre-flight's bare-name exec, recorded in the coverage gap.
+
+### Two things that make a variable check fail for the wrong reason
+
+`jq '.environment.allow_vars += […]'` against a description that has no `allow_vars` yields a one-element list, which is *stricter* than the shipped description rather than looser.
+A positive-control arm built that way stops seeing `TERM` and fails its own control, so a check must not read a passing granted arm as evidence that the shipped arm's list is the reason for anything.
+
+Removing `allow_vars` also fails `check_substrate_denials`: the host's own `LOCALE_ARCHIVE` then crosses, naming a `glibc-locales` store path that is not in the narrowed substrate, and the narrow arm denies something the whole-store arm does not.
+The environment is part of what makes the substrate sufficient.
+
 ## M8e — Where each agent reads its declarative extensions from
 
 **Partial.** `opencode` is measured; `claude-code` and `pi` are not.
