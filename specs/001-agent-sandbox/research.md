@@ -1307,6 +1307,52 @@ The second row reconstructs the incident `D11` was written from: `credential.hel
 - **`git config --file <listing>` parses a listing.** Control 2 first read the effective configuration back with `git config --file effective.txt --list`, falling back to `sed` on failure. git parsed the `--show-origin --show-scope` listing as though it were a configuration file and exited 0, so the fallback never ran and the control failed against a file that plainly carried the setting. The fix strips the two tab-separated prefix fields with `sed` and matches with `grep -qxF`.
 - **git lowercases section and key names in `--list` output.** `core.hooksPath` reads back as `core.hookspath`, so the one directive whose hook was observed *running* was the one directive the check did not report. It was the only assertion of the six that could not have failed. Matching is now case-insensitive. Both bugs argue the same thing: a check that has only ever passed has not been checked.
 
+## M5h — Every refusal check has a control
+
+Measured on x86_64-linux with nono 0.74.0, from inside the devShell, over the suite as it stood at eight refusal checks.
+
+### The enumeration is not vacuous, and it is not uniform either
+
+`refusal_check_bodies` finds exactly eight `check_r*` functions — `check_r6`, `check_r1`, `check_r2`, `check_r3`, `check_r4`, `check_r5`, `check_r10` in `scripts/checks/integration.sh`, and `check_r7` in `scripts/checks/unit.sh` — and all eight already carry an in-body control marker. So the check passes as shipped and could only be seen to fail under a plant.
+
+There is no mechanical marker on a control assertion anywhere in the suite, and inventing one would have meant rewriting eight checks to satisfy a ninth. What exists is a comment convention, and it appears in two places: a paragraph in the header comment above the function, and a `# Control …` line inside the body. **The marker is looked for inside the body only**, and the reason is the plant below: `check_r2`'s header paragraph, "Two controls, because the observable is a failure (D9)", survived the deletion of both controls untouched. A check that read the header would have been satisfied by prose describing arms that were no longer there.
+
+### Plant 1 — a refusal check with its controls deleted goes on passing
+
+The plant removes `check_r2`'s two control arms the way a careless hand would leave them, comments and code together, and leaves the check otherwise able to run: the unconfined write that proves the target was writable, and the granted arm that proves the probe can write outside the project when the boundary allows it.
+
+| Layer | Result |
+| --- | --- |
+| unit | `2 of 5 checks failed` — `refusal check asserts no permitted action: check_r2 (integration.sh)`, plus the standing `check_sc3` progress bar |
+| integration | **`10 checks passed`, `check_r2` among them** |
+
+The second row is the whole argument for the check. With both controls gone `check_r2` still reports a refusal it can no longer distinguish from a session that never started, and nothing but `check_controls` says so.
+
+### Plant 2 — the suite-wide lever is the workdir grant, and `"none"` is accepted
+
+Every refusal check drives its sessions from the built description, so the description is the one lever that reaches all of them at once. `lib/confinement.nix` carries `workdir.access = "readwrite"`; nono 0.74.0 accepts `"none"` in its place and does withhold the project.
+
+| Check | Outcome under the plant |
+| --- | --- |
+| `check_r6` | **PASS** — starts no session at all, so the description cannot reach it |
+| `check_j1_1` | FAIL — the reach diff, the project line gone |
+| `check_substrate_denials` | FAIL — `the narrow arm did not start (exit 1)` |
+| `check_r1` | FAIL — `the shipped arm never read the file inside the project, so it observed no session (exit 126)`, and the same for the granted arm |
+| `check_r2` | FAIL — `the shipped arm never wrote inside the project, so it observed no session (exit 126)`, and the same again |
+| `check_r3` | **PASS** — its subject is the environment, which the workdir grant does not touch |
+| `check_r4` | FAIL |
+| `check_r5` | FAIL — `the file the checkout planted did not make the path outside the project readable when it was resolved (exit 126), so it is inert and arm 1 proves nothing` |
+| `check_j8_2` | FAIL |
+| `check_r10` | FAIL |
+
+`8 of 10 checks failed`, and three of them failed in the control's own words rather than on the refusal they exist to assert. That is D9 holding across the suite rather than check by check.
+
+**Both survivors are principled, and saying which is the point of running the plant.** `check_r6` asserts the pre-flight refuses an unenforceable host, which happens before any session exists; a description it never reaches cannot invalidate it. `check_r3` asserts a secret does not cross in the environment, and its session genuinely ran — a denied workdir does not stop a program that reads its substrate and prints its own environment. Neither is an uncontrolled check that got away with it.
+
+### A denied workdir surfaces as exit 126, and nono's own summary misreports it
+
+Exec'ing the substrate's `bash` under `workdir.access = "none"` gives **exit 126**, with nono's note `The file may not have execute permission, or the sandbox may be blocking execution of binaries in that directory`. Its end-of-session summary still prints `No path denials were observed during this session. The failure may be unrelated to sandbox restrictions.` — the same unreliable self-report `M5b` recorded for a refused write, now for a refused exec, and a second reason no check reads that summary as evidence.
+
 ## M8e — Where each agent reads its declarative extensions from
 
 **Partial.** `opencode` is measured; `claude-code` and `pi` are not.

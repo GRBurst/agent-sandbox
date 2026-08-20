@@ -740,18 +740,34 @@ A `core.hooksPath` hook in a granted directory does run, measured unconfined, so
 - **Plant 2 reconstructs the incident the decision was written from**, and is the one that matters: `credential.helper = cache` in the effective configuration, `commit.gpgsign` producing `gpg failed to sign the data`, and a program named by the host configuration **executing inside the session** and leaving its marker.
 - **Two bugs in the check were found by planting, not by writing it.** `git config --file` happily parses a `--show-origin` listing and exits 0, so the control's fallback never ran; and git lowercases keys in `--list`, so `core.hooksPath` read back as `core.hookspath` and the one directive observed *running* was the one directive not reported. It was the only assertion of the six that could not have failed. Both say the same thing: a check that has only ever passed has not been checked.
 
-### M5h — Every refusal check has a control (Status: PENDING)
+### M5h — Every refusal check has a control (Status: IMPLEMENTED)
 
 **Scenario**: none directly — this enforces [D9](plan.md#d9) over the suite, which is why it comes last in this group, when there are refusal checks to enforce it over.
 
 **RED**: write `check_controls`, which reads the suite's own text and asserts that every `check_r*` invokes a control.
 
-- [ ] Check written and seen to FAIL against a refusal check with its control removed
-- [ ] Suite-wide violation planted — point the wrapper at a description that denies the workdir, so every refusal check fails **on its control** rather than on its subject — seen to FAIL, reverted, recorded in plan.md
+- [x] Check written and seen to FAIL against a refusal check with its control removed — `refusal check asserts no permitted action: check_r2 (integration.sh)`, verbatim what the plan predicted
+- [x] Suite-wide violation planted, seen to FAIL, reverted, recorded in plan.md. **Not the wrapper**: the lever that reaches every refusal check is the built description they all drive their sessions from, and `workdir.access = "none"` in `lib/confinement.nix` withholds the project from all of them at once. `8 of 10 checks failed`, three of them in the control's own words
 
 This is a proxy and is written down as one: it establishes that a control is *called*, not that the control is apt. The failure mode it exists for is forgetting one entirely, which is what happened to `check_j6_1` twice, and a proxy catches that. The suite-wide plant is what raises it above bookkeeping: it demonstrates the controls bite together, not merely that they are present.
 
-**Checkpoint**: every refusal in the spec except R7 and R8 is executable, and each one is known to fail for the reason it claims.
+**Measured before starting**, recorded under [`M5h`](research.md#m5h--every-refusal-check-has-a-control).
+
+There are eight refusal checks — `check_r1` through `check_r6` and `check_r10` in the integration layer, `check_r7` in the unit layer — and **all eight already carry a control**, so the check passes as shipped and the only FAIL available is a planted one.
+
+There is no mechanical marker on a control assertion anywhere in the suite, and inventing one would have meant rewriting eight checks to satisfy a ninth. What exists is a comment convention in two places: a paragraph in the header comment above a function, and a `# Control …` line inside its body. `workdir.access = "none"` is accepted by nono 0.74.0, which is what makes a suite-wide plant possible at all.
+
+**Implementation.** `refusal_check_bodies` and `check_controls` join `scripts/checks/unit.sh`, beside `check_sc3`, which is the check they most resemble: both read the suite's own text and assert a property over it.
+
+- **The marker is looked for inside the body, never in the header comment above it**, and the plant is what settled that. `check_r2`'s header paragraph — "Two controls, because the observable is a failure (D9)" — survived the deletion of both controls untouched, so a check that read the header would have been satisfied by prose describing arms that were no longer there.
+- **Plant 1 is the argument for the check existing.** With both control arms deleted, comments and code together, the integration layer still reported `10 checks passed` — `check_r2` among them, asserting a refusal it could no longer tell from a session that never started. `check_controls` was the only thing that said so.
+- **The proxy's limit is stated in the check's own header comment**, not left to be discovered: a control whose code was deleted while its comment stayed would pass. The check is worth having anyway, because the failure mode it guards against is forgetting one outright.
+- **Plant 2's two survivors are the reason to run it rather than assume it.** `check_r6` passed because it starts no session at all — the pre-flight refuses before one exists, so the description cannot reach it. `check_r3` passed because its subject is the environment, and a denied workdir does not stop a program that reads its substrate and prints its own variables. Neither is an uncontrolled check that got away with it, and both are now written down as principled rather than left looking like gaps.
+- **A denied workdir surfaces as exit 126**, with nono's summary still printing `No path denials were observed during this session` — the same unreliable self-report `M5b` found for a refused write, now for a refused exec.
+
+The unit layer is `1 of 5 checks failed`, that one being the progress bar, and the whole suite is `1 of 18 checks failed`. `check_controls` is deliberately outside `check_sc3`'s scenario↔check bijection: it answers to a decision rather than to a scenario, and its name carries no scenario id.
+
+**Checkpoint**: met. Every refusal in the spec except R7 and R8 is executable, and each one is known to fail for the reason it claims — R1 through R6 and R10 by their own planted violations, and all of them together by `M5h`'s suite-wide plant.
 
 ______________________________________________________________________
 

@@ -272,6 +272,62 @@ check_registry() {
 	[ "$found" -eq 0 ]
 }
 
+# Every refusal check, and whether its own body carries a control marker.
+# Emits "<check>\t<file>\t<0|1>", one row per check_r* found in any layer.
+#
+# The marker is looked for inside the body and not in the header comment above
+# it, because a header paragraph explaining the controls survives the deletion
+# of the controls themselves, and the deletion is what this is here to catch.
+refusal_check_bodies() {
+	awk '
+		FNR == 1 { name = "" }
+		/^check_r[0-9]+\(\) \{$/ {
+			name = substr($1, 1, index($1, "(") - 1)
+			marked = 0
+			next
+		}
+		name != "" && /^\}$/ {
+			printf "%s\t%s\t%s\n", name, FILENAME, marked
+			name = ""
+			next
+		}
+		name != "" && /^[[:space:]]*#.*[Cc]ontrol/ { marked = 1 }
+	' "$SCRIPT_DIR"/checks/*.sh
+}
+
+# D9 over the whole suite: every refusal check invokes a positive control, so
+# that a session which never started cannot pass for a boundary that held.
+#
+# This is a proxy, and the limit is exact: it establishes that a control is
+# named, not that it is apt, and a control whose code was deleted while its
+# comment stayed would pass. It is worth having anyway, because the failure
+# mode it guards is forgetting one outright, which is what happened to
+# check_j6_1 twice. What raises it above bookkeeping is the suite-wide planted
+# violation the plan records against it — pointing the wrapper at a description
+# that denies the workdir, so every refusal check fails on its control rather
+# than on its subject. That plant is what shows the controls bite together.
+check_controls() {
+	local rows name file marked found=0
+
+	rows=$(refusal_check_bodies)
+
+	# Anti-vacuity: no refusal checks means the naming convention moved, and
+	# the loop below would report OK having examined nothing.
+	if [ -z "$rows" ]; then
+		fail "found no refusal checks under $SCRIPT_DIR/checks; the naming convention and this check have drifted"
+		return 1
+	fi
+
+	while IFS=$'\t' read -r name file marked; do
+		if [ "$marked" -eq 0 ]; then
+			printf 'refusal check asserts no permitted action: %s (%s)\n' "$name" "${file##*/}"
+			found=1
+		fi
+	done <<<"$rows"
+
+	[ "$found" -eq 0 ]
+}
+
 # SC-3. Every scenario maps to exactly one check, and every check back to a
 # scenario. Both sides are derived from their source rather than restated.
 check_sc3() {
