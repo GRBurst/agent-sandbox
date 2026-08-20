@@ -470,15 +470,17 @@ The key's label names `niks3.numtide.com`, not the substituter's host; key names
 **This environment declares the same substituter and key itself, in its own `nixConfig`, and passes both explicitly in CI.**
 A `nixConfig` on an input is not inherited: nix applies it only for the flake being evaluated directly, and only for a trusted user — so a consumer of *this* repository would otherwise get no substituter at all and build five agents from source, one of which is a 440 MB Rust binary.
 Declaring it here is what makes the cache actually reachable both by a human entering the environment and by the checks, which is the difference between a first-run cost and a first-run failure on a runner with a time limit.
-An untrusted user still gets a prompt rather than the cache; that residue is handbook material, since no check can assert against the consumer's own trust settings.
+
+**The last sentence of that paragraph used to say an untrusted user "gets a prompt rather than the cache". That is wrong, and `M4b` observed it.** Non-interactively there is no prompt: nix prints `warning: ignoring untrusted flake configuration setting 'extra-substituters'` — once per setting — and carries on without the cache. So a `nixConfig` block is a record and a hint for a trusted user, not a mechanism, and the operative form is passing `--extra-substituters` and `--extra-trusted-public-keys` on the command line. See [M4b](#m4b--the-pinned-toolchain-and-two-preconditions-the-plan-did-not-name).
 
 Two further facts from the same block, for `M4b`:
 
 1. `allow-import-from-derivation = false` — the input asserts its own purity, which **P8** wants and which nothing here needs to relax.
 1. It pins its own `nixpkgs` (`b47ad65d…`, unstable). Whether it is given `inputs.nixpkgs.follows` — one revision in the closure, at the risk of breaking a package built against another — or left independent, is `M4b`'s decision and is not settled here.
 
-Upstream `HEAD` moved to `c4c6673c4c1ceb69d845fa665a714e1273d0acac` while `M1` was in flight.
+Upstream `HEAD` moved to `c4c6673c4c1ceb69d845fa665a714e1273d0acac` while `M1` was in flight, and to `5aad5f64e621fc35fed0fddcc2b6e17ab662cf78` before `M4b` began.
 Every version in the table above was read at `3589c005…`, so the lock must pin a revision explicitly rather than track the branch, or the numbers recorded here stop describing what is built.
+Three observed moves in one feature is the evidence for that, not one.
 
 ### Verification gap
 
@@ -644,3 +646,67 @@ Scale on the developing machine: 61,799 store paths in total; 211 of them `-sour
 - `.filesystem.deny[]` elements are objects, not strings.
 
 The scratch harness lived under `.tmp/m3c/`, which is gitignored, and has been removed; every finding above is either in `plan.md` as a decision or in `tasks.md` as a criterion.
+
+## M4b — The pinned toolchain, and two preconditions the plan did not name
+
+Done before `M4b` rather than during it, because adding the flake input changes the substrate under every check `M1`–`M4a` established, and because two of these findings would otherwise have surfaced as inexplicable failures.
+
+Pinned at `github:numtide/llm-agents.nix/5aad5f64e621fc35fed0fddcc2b6e17ab662cf78`, `lastModified` 1787216589. Root inputs are `bun2nix`, `flake-parts`, `nixpkgs`, `systems`, `treefmt-nix` — five, where `M1f` recorded only `nixpkgs`. The `inputs.nixpkgs.follows` decision is against that closure, not against a single input.
+
+### Availability at the revision that will be locked
+
+Evaluated as `packages.<system>.<attr>`, both systems, at `5aad5f64…`. `M1f`'s table was read at `3589c005…` and its numbers have all moved.
+
+| Attribute | Version | `license.free` | `license.fullName` |
+| --- | --- | --- | --- |
+| `claude-code` | 2.1.237 | `true` | **`Unfree`** |
+| `codex` | 0.148.0 | `true` | Apache License 2.0 |
+| `nono` | **0.74.0** | `true` | Apache License 2.0 |
+| `opencode` | 1.18.18 | `true` | MIT License |
+| `pi` | 0.84.2 | `true` | MIT License |
+
+Identical on `x86_64-linux` and `aarch64-darwin`, as `M1f` found. **`M1f`'s `allowUnfree` reasoning is still live**: `claude-code` carries `fullName = "Unfree"` beside `free = true`, so the gate never fires at this revision either, and setting `allowUnfree` explicitly remains the thing that keeps the environment honest rather than lucky.
+
+### Precondition 1 — `XDG_DATA_HOME` is set nowhere, and nix needs it
+
+Any `nix eval` or `nix build` against a flake that declares `nixConfig` fails outright:
+
+```text
+error: opening file "/home/pallon/.local/share/nix/trusted-settings.json": Permission denied
+```
+
+nix reads that file to decide whether the flake's `nixConfig` may be honoured. **`--no-accept-flake-config` does not avoid the read** — the decision is recorded there either way. Pointing `XDG_DATA_HOME` inside the project fixes it, and nothing is written: the file was never created, so nix only reads it and its absence is fine.
+
+`grep -c XDG_DATA_HOME flake.nix .envrc` returns `0` and `0`. **This is a live P1 gap in the repository as it stands**, not a property of the input: the environment claims to keep every tool inside the project, and nix's own data root currently resolves to the host `$HOME/.local/share`. Under the development sandbox that fails closed rather than leaking, which is the arrangement AGENTS.md §3 calls the feature — but it means the input cannot be added until the variable is set. Placing the export above `use flake` in `.envrc` brings it under `check_bootstrap_mirror` automatically, because that check derives its variable list from the exports in that region rather than from a list.
+
+### Precondition 2 — `nixConfig` is ignored, so the cache must be passed
+
+The substituter and key `M1f` recorded are correct and reachable from here. Building `nono` from the input with them passed explicitly copied `nono-0.74.0` from `https://cache.numtide.com`, 45.3 MiB unpacked, nothing compiled.
+
+In the same run nix printed, once per setting:
+
+```text
+warning: ignoring untrusted flake configuration setting 'extra-substituters'.
+Pass '--accept-flake-config' to trust it
+```
+
+and the same for `extra-trusted-public-keys` and `allow-import-from-derivation`. So for a non-trusted user a `nixConfig` block does nothing at all — no prompt, no cache, just a warning. `M1f`'s claim that an untrusted user "gets a prompt" is corrected in place above. Declaring the substituter in `flake.nix` stays worth doing as the record of where the binaries come from, but what actually reaches the cache is `--extra-substituters` and `--extra-trusted-public-keys` on the command line, and the handbook must say that rather than implying the declaration suffices.
+
+### The substrate change is safe, and this is the experiment that shows it
+
+Every check from `M1` to `M4a` ran against the host `nono 0.73.0`, resolving from `/etc/profiles/per-user/pallon/bin/nono` — **a user profile, which AGENTS.md §3 says is not available at all**. `M4b` replaces it with the pinned `0.74.0`, changing the binary under every component and integration assertion in the middle of the feature, and every finding in `M1b`, `M1c`, `M1e` and `M1g` was observed against the old one.
+
+Run with the pinned binary first on `PATH`, unchanged otherwise:
+
+```text
+== component
+PASS  check_confinement_validates
+PASS  check_sc1
+PASS  check_component_merge
+== integration
+PASS  check_r6
+```
+
+All four pass against `0.74.0` with no edit to any check. That is the dividend of AGENTS.md §4's rule about deriving expected values from the system under test: the floor is computed by stripping the description under test rather than listed, the `set_vars` expectation is applied from the agent table rather than restated, and the store grant comes from the registry rather than a literal — so a version bump moves the baseline instead of breaking the suite.
+
+The consequence for `M4b` is a criterion, not a note: the checks must invoke the **pinned** nono, or the suite keeps testing a binary a stranger does not have while reporting green.

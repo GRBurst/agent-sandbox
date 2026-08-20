@@ -404,12 +404,20 @@ RED was `FAIL check_r6` / `lib/preflight.sh: no such file`, which is "no `77` an
 - [ ] `lib/confined-agent.nix` written; the wrapper shadows the agent name and the raw binary is not on `PATH` ([D3](plan.md#d3))
 - [ ] `flake.nix` exports `devShells.<system>.default` for **both** systems via `lib.genAttrs` ([D7](plan.md#d7))
 - [ ] `numtide/llm-agents.nix` added as the sole source of `nono`, `claude-code`, `opencode` and `pi`, pinned to a revision rather than a branch, with `allowUnfree` scoped to the `pkgs` instantiated for `claude-code` ([M1f](#m1f--spike-which-agent-packages-exist-and-where-status-done))
-- [ ] `nixConfig` declares `https://cache.numtide.com` and the key `niks3.numtide.com-1:DTx8wZduET09hRmMtKdQDxNNthLQETkc/yaX7M4qK0g=`, because an input's own `nixConfig` is not inherited by a consumer and a clean machine would otherwise build every agent from source
+- [ ] `XDG_DATA_HOME` points inside the project, in **both** `.envrc` and `flake.nix` per **P1**, above `use flake` so `check_bootstrap_mirror` picks it up without being edited
+- [ ] `nixConfig` declares `https://cache.numtide.com` and the key `niks3.numtide.com-1:DTx8wZduET09hRmMtKdQDxNNthLQETkc/yaX7M4qK0g=` as the **record** of where the binaries come from, and `docs/HANDBOOK.md` says what actually reaches the cache, because nix ignores the block for a non-trusted user
 - [ ] The `inputs.nixpkgs.follows` question decided either way, with the reason written down rather than left to the default
+- [ ] Every check invokes the **pinned** nono, not whatever `nono` `PATH` resolves to
 - [ ] Violation planted (the unconfined binary on `PATH` under the agent's own name), seen to FAIL, reverted, recorded in plan.md
 - [ ] `bash scripts/validate.sh --layer integration` passes
 
 The wrapper creates `$XDG_CONFIG_HOME` before invoking nono. `M1e` observed that nono **silently falls back to the host's `$HOME/.config`** when that directory does not exist, warning rather than failing — so the redirection is undone by exactly the condition a fresh checkout is in.
+
+**Three criteria above were added after the task was drafted, from preconditions verified before it started** ([research.md § M4b](research.md#m4b--the-pinned-toolchain-and-two-preconditions-the-plan-did-not-name)). Each was measured, not anticipated.
+
+- **`XDG_DATA_HOME` is set in neither file today, and nix needs it.** Any evaluation of a flake carrying `nixConfig` reads `$XDG_DATA_HOME/nix/trusted-settings.json` to decide whether to honour the block, and `--no-accept-flake-config` does not avoid the read. So adding the input fails outright until the variable is set — which is a **P1** gap that exists now, before this task, and is only invisible because nothing here declared `nixConfig` yet.
+- **`nixConfig` is not a mechanism.** For a non-trusted user nix prints `warning: ignoring untrusted flake configuration setting 'extra-substituters'` and proceeds without the cache. There is no prompt. The criterion is therefore split: declare it as the record, and put the operative `--extra-substituters` / `--extra-trusted-public-keys` invocation in the handbook. `M1f`'s claim that an untrusted user gets a prompt is corrected in `research.md` in place.
+- **The checks must name the pinned binary.** Every assertion from `M1` to `M4a` was observed against a host `nono 0.73.0` resolving out of a user profile, which AGENTS.md §3 says is not available at all. The pinned revision carries `0.74.0`, and all four existing component and integration checks were run against it and **pass unmodified** — so the substrate change is safe, but a check still reading `PATH` would keep testing a binary a stranger does not have while reporting green.
 
 ### M4c — The execution substrate is the session's own closure (Status: PENDING)
 
