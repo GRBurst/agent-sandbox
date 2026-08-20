@@ -587,8 +587,11 @@ ______________________________________________________________________
 
 - [ ] Check written and seen to FAIL with a non-empty `$HOME` diff
 - [ ] `stateVars` wired into `environment.set_vars`; the property `∀ (k,v) ∈ set_vars. v ⊑ "$WORKDIR"` is asserted over the agent table, not per variable
+- [ ] Every root the agent will write to is covered, not only the ones the devShell happens to redirect. `opencode debug paths` reports `home data bin log repos cache config state tmp`, and `state` was measured resolving to `$HOME/.local/state/opencode` inside the environment, because [D13](plan.md#d13) leaves `XDG_STATE_HOME` on the host on purpose. Inside a session that path is denied, so the agent **fails instead of relocating** — the case `M1f` named as the worst of both
+- [ ] The state root is redirected in the session's `set_vars` rather than in the shell hook, which is what makes it safe: the supervisor resolves its own protected state root from the ambient value before the child's environment applies, so the child can be moved without making `$WORKDIR` ungrantable ([D13](plan.md#d13)). Asserted by observation, not by assuming the two resolutions are independent
 - [ ] **Control**: the writes are found where they were redirected to, under `$WORKDIR`, so an agent that wrote nothing at all cannot pass as state landing in the project ([D9](plan.md#d9))
 - [ ] Violation planted (drop the state variable), seen to FAIL, reverted, recorded in plan.md
+- [ ] Violation planted (redirect every root **except** `state`), seen to FAIL, reverted, recorded in plan.md — a per-root check is the only kind that bites here, since a single blanket variable leaves exactly this hole
 
 ### M6b — Two concurrent projects share nothing (Status: PENDING)
 
@@ -725,8 +728,11 @@ A refactor, and therefore its own task per P6. No behaviour changes.
 **Scenario**: Journey 2.1 for `opencode`.
 
 - [ ] Its own variables used, never a blanket `XDG_DATA_HOME` (P1)
+- [ ] `opencode debug paths` is the observable, and **every** root it reports lands under `$WORKDIR`. Run inside the environment it already reports `state` under `$HOME`, which `M6a` fixes for the agent table; this task is where the claim is checked for `opencode` specifically, against the agent's own answer rather than against a list of variables
 - [ ] It takes its credential from the mediated route, and no grant on `claude-code`'s state is added to make it work ([D14](plan.md#d14))
 - [ ] Seen to FAIL before the fix
+
+Two roots were measured to relocate cleanly and one not. `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, `XDG_CACHE_HOME` and `TMPDIR` are all honoured, and credentials are already separated from settings by directory: `auth.json` and `mcp-auth.json` sit under the data root with `opencode.db`, `storage` and `log`, while the config root holds only settings and extensions. `XDG_STATE_HOME` is honoured too — a probe pointing it at a scratch directory moved `state` there — which is why [D13](plan.md#d13)'s deliberate host value is a hole rather than a non-issue. Reading the binary for variable names yielded nothing, the bundle being compiled; occurrence has now failed to predict this agent's behaviour as often as it failed for `claude-code`.
 
 `opencode`'s base URL is a config key rather than a variable — `provider.<id>.options.baseURL`, with config winning over the environment — so pointing it at the mediated route is a file this environment writes, not a variable it exports.
 
