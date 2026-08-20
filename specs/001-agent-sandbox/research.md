@@ -1096,6 +1096,45 @@ The `$PWD` there is the *workdir*, which is the project and is supposed to come 
 
 Roughly 150 lines of it, per session. A check that merges stdout and stderr the way `check_r1` and `check_r2` do turns its own readings into needles in that banner, so this one keeps the two apart. The same applies to `nix build` in a check: with the tree edited it warns that the git tree is dirty, and on the suite's own stderr that reads as the suite having left the tree changed.
 
+## M5e — An untrusted repository cannot grant itself paths
+
+Measured on x86_64-linux with nono 0.74.0, from inside the devShell, against the shipped `.#confinement-claude-code`. The fake `$HOME` was a `mktemp -d -p "$XDG_RUNTIME_DIR"` holding `reach/target.txt` with a per-run canary, and every arm ran `nono run <flags> --workdir <project> --allow-cwd` over a probe printing `READ :: <status> :: <value>`.
+
+The checkout's own agent configuration was modelled as a nono **user profile inside the project**, at `<project>/.tmp/r5/cfg/nono/profiles/evil.json`, built from the shipped description with one directory added to `filesystem.read`. That location is not contrived: the devShell points `XDG_CONFIG_HOME` at `$PWD/.config`, and nono's user profile directory is `$XDG_CONFIG_HOME/nono/profiles`, so a confinement description written inside the project is already a description nono will find. This is the other side of the trade recorded as `C1`.
+
+### R5 holds, and the flag on the command line is the whole reason
+
+| Arm | Invocation | `READ` |
+| --- | --- | --- |
+| A | `nono profile list`, config root inside the project | lists `evil` under `User (<project>/…/nono/profiles)` |
+| B | `--profile <store path>`, the same config root present | `1` — denied |
+| C | `--profile evil`, resolved by name from that config root | `0`, canary read |
+| D | `--profile <store path>` plus `NONO_ALLOW=<dir>` | `0`, canary read |
+| E | `--profile <store path>` on the command line, `NONO_PROFILE=evil` in the environment | `1` — denied |
+| F | no `--profile` at all, `NONO_PROFILE=evil` | `0`, canary read |
+| G | the same read, unconfined | canary read |
+| H | `--profile <store path> --extends evil` | `0`, canary read |
+
+Arm B is R5. Arm C is what makes it evidence: the same file, in the same place, grants the very path the moment anything resolves it, so B is a request refused rather than a file nobody read. Arm G says the target was reachable to begin with.
+
+What refuses the request is arm E: `lib/confined-agent.nix` writes `--profile <store path>` into the wrapper as a command-line argument, and the argument beats `NONO_PROFILE`. Nothing about a description living inside the checkout is refused, or even noticed — A, C, F and H all read the canary out. R5 rests on the entry point naming its description explicitly, which is the same fact FR-9 rests on and the same assertion `check_r4` already makes about the wrapper.
+
+### Widening from the invocation exists today, and nothing counters it
+
+Arm D is FR-15's override path, already present in nono: `NONO_ALLOW` is **additive to a pinned description**, so a caller widens a session without touching the profile it names. `--extends` (arm H) is a second such channel and composes with `--profile` in the same way. Every widening flag has a variable of its own — `--allow`/`NONO_ALLOW`, `--profile`/`NONO_PROFILE`, `--credential`/`NONO_CREDENTIAL`, `--env-credential`/`NONO_ENV_CREDENTIAL`, `--trust-override`/`NONO_TRUST_OVERRIDE` — and the wrapper passes nothing that would override any of them.
+
+So FR-15's "widening works from the invocation" needs no new mechanism. Its "and only from there" is where the reading is thinner: a checkout's own `.envrc` is part of the calling environment once a human has run `direnv allow`, and nothing in the mechanism distinguishes that from a widening declared above the checkout. The distinction FR-15 draws is a human one — `direnv allow` on a file the human read — and not one nono can make.
+
+### nono's own configuration surfaces
+
+`$XDG_CONFIG_HOME/nono/` carries `profiles/`, `profile-drafts/`, `config.toml` and `trust-policy.json`; `nono profile promote` applies a draft from `profile-drafts/`. There is also a project-level `trust-policy.json` looked for in the current directory, and nono ships a claude integration of its own that writes `.claude/settings.json` and `.claude/hooks/nono-hook.sh`.
+
+**Unmeasured, and worth measuring before the M5 group closes:** what keys `config.toml` accepts and whether any of them widens; what a project-level `trust-policy.json` can do; and `--bypass-protection <PATH>`, documented as overriding a deny rule, which is the one flag that might reach the paths `M5a` found the required deny groups do not actually protect.
+
+### Method note
+
+`env VAR=VAL … cmd --flag` stops treating arguments as assignments at the first one that is not `VAR=VAL`, so flags handed to `env` before the command become `env: '--profile': No such file or directory`. Every flag goes after the command name.
+
 ## M8e — Where each agent reads its declarative extensions from
 
 **Partial.** `opencode` is measured; `claude-code` and `pi` are not.

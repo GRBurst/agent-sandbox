@@ -619,6 +619,24 @@ The integration layer is `7 checks passed`, run as `nix develop -c bash scripts/
 - [ ] FR-15's override path is exercised too: widening works from the invocation, and only from there
 - [ ] Violation planted (the wrapper reads the in-checkout config when composing the description), seen to FAIL, reverted, recorded in plan.md
 
+**Measured before starting** ([`research.md`](research.md#m5e--an-untrusted-repository-cannot-grant-itself-paths)). Eight arms against the shipped description, with the checkout's agent configuration modelled as a nono user profile *inside the project* — which is where `XDG_CONFIG_HOME` already points nono's user profile directory, so the file needs no contrivance to be found.
+
+| Arm | Observed |
+| --- | --- |
+| `--profile <store path>`, a widened description sitting in the project's config root | denied — R5 holds as shipped |
+| `--profile evil`, that same file resolved by name | the canary is read — the file is live, not inert |
+| `--profile <store path>` with `NONO_PROFILE=evil` in the environment | denied — the command-line argument beats the variable |
+| `--profile <store path>` with `NONO_ALLOW=<dir>` | the canary is read — an invocation widens a pinned description |
+| `--profile <store path> --extends evil` | the canary is read |
+
+What that settles before the check is written:
+
+- R5 holds for one reason: the wrapper writes `--profile <store path>` as a command-line argument, and the argument beats `NONO_PROFILE`. A description inside the checkout is not refused or even noticed. The assertion is about the entry point naming its description, which is the same property `check_r4` already asserts on the wrapper.
+- The control criterion asks for "the same file read for a benign setting". The by-name arm is stronger and is what to use: the same file, in the same place, granting the very path under test. A benign-setting probe would only show the file was parsed.
+- FR-15's "widening works from the invocation" needs no new mechanism — `NONO_ALLOW` is additive to a pinned description today, and `--extends` is a second channel. "And only from there" is not something nono enforces: a checkout's own `.envrc` is part of the calling environment once a human has run `direnv allow`. The check can assert the first half; the second is a human decision and belongs in the handbook rather than in an assertion.
+- The plant the criterion names is the wrapper resolving `--profile evil`, or dropping `--profile` so `NONO_PROFILE` decides. Both were measured reading the canary out, so either bites.
+- Still unmeasured, and owed before this task can claim to have covered the surface: what keys `nono/config.toml` accepts, what a project-level `trust-policy.json` can do, and `--bypass-protection <PATH>`, which is documented as overriding a deny rule.
+
 ### M5f — A host-global configuration does not reach an undeclared session (Status: PENDING)
 
 **Scenario**: Journey 8.2

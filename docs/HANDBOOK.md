@@ -149,19 +149,25 @@ Run it with `bash`, not `zsh` — `${!v}` is bash's indirect expansion.
 ## Verifying the repository
 
 ```sh
-bash scripts/validate.sh             # the single entry point; every check, every layer
-bash scripts/validate.sh --list      # name the checks without running them
-bash scripts/validate.sh --layer unit  # one layer only
-nix flake check                      # evaluates the devShell for this system
-nix flake check --all-systems        # and for the other one, which needs a remote builder to go further
-nixfmt flake.nix lib/*.nix           # format the nix
-mdformat AGENTS.md docs specs        # format the markdown
+nix develop -c bash scripts/validate.sh   # the single entry point; every check, every layer
+bash scripts/validate.sh --list           # name the checks without running them
+bash scripts/validate.sh --layer unit     # one layer only; unit and component need no devShell
+nix flake check                           # evaluates the devShell for this system
+nix flake check --all-systems             # and for the other one, which needs a remote builder to go further
+nixfmt flake.nix lib/*.nix                # format the nix
+mdformat AGENTS.md docs specs             # format the markdown
 shellcheck scripts/validate.sh scripts/checks/*.sh   # lint the shell
 ```
 
 `scripts/validate.sh` is what [AGENTS.md](../AGENTS.md#4-verify-every-change) names as the single entry point.
+
+**The integration layer has to run inside the devShell**, which is why the first line says `nix develop -c`.
+`lib/preflight.sh` execs its probe by bare name, so on a host that carries its own `true` outside the granted substrate the probe is denied and `check_r6` fails for a reason that has nothing to do with the check.
+The unit and component layers have no such dependency.
+
 It **exits non-zero today, by design**: `check_sc3` asserts a scenario-to-check bijection and is the feature's progress bar, so it fails until the last scenario in the spec has a check.
 A task is judged by whether its own check passes and whether the set `check_sc3` names shrinks by exactly the scenarios that task covers.
+Today's baseline is `1 of 14 checks failed`, that one being `check_sc3`, and the set it names is 17 scenarios long.
 
 ## Known drift
 
@@ -175,9 +181,11 @@ It is the natural input to the first spec.
 
 **Isolation.**
 
-- Confinement is now observed rather than asserted: `check_r6` proves the pre-flight refuses a host that cannot enforce it, and `check_j1_1` compares a real session's granted reach against the project, the execution substrate and the leak registry. The remaining claims — credentials, history, cross-project state — have no check yet.
-- A session is granted the closure of what it runs, 128 store paths rather than the 67,000 the store holds, and the leak registry is now **empty**. What is not yet checked is the refusal side: no check yet reads a host key from inside a session and watches it fail.
-- **A grant on an exact path beats a `deny` the mechanism carries for it.** The five `required` deny groups, `deny_credentials` among them, are not a backstop behind the leak registry — a registry entry naming `$HOME/.ssh` would read the key, with the deny sitting beside the grant in the resolved manifest. Only a grant on an *ancestor* of denied paths is refused, and then the session does not start at all. So the registry's strictness is the whole of the guarantee.
+- Confinement is now observed rather than asserted, on both sides. `check_r6` proves the pre-flight refuses a host that cannot enforce it and `check_j1_1` compares a real session's granted reach against the project, the execution substrate and the leak registry; the refusal side is now checked too — `check_r1` reads a planted SSH key from inside a session and watches it fail, `check_r2` writes outside the project and watches the file not appear, `check_r3` puts an API-key canary in the host environment and proves it does not cross, and `check_r4` has a session rewrite the source of its own confinement and proves nothing widens until a human re-enters. Each of the four reads or writes something it *is* allowed in the same session, so a session that failed to start cannot pass.
+- A session is granted the closure of what it runs, 128 store paths rather than the 67,000 the store holds, and the leak registry is now **empty**. What still has no check: history, cross-project state, and credentials beyond the environment channel `check_r3` covers.
+- **A grant on an exact path beats a `deny` the mechanism carries for it.** The five `required` deny groups, `deny_credentials` among them, are not a backstop behind the leak registry — a registry entry naming `$HOME/.ssh` would read the key, with the deny sitting beside the grant in the resolved manifest. A grant on an *ancestor* of denied paths is refused and the session does not start, but do not expect the message to say so: granting `$HOME` is refused first for overlapping nono's own protected state root, at a path that need not even exist, and the deny rules are never mentioned. So the registry's strictness is the whole of the guarantee.
+- **A confinement description written inside the project is one the mechanism will find, and what refuses it is a single command-line argument.** The blanket `XDG_CONFIG_HOME` puts nono's user profile directory inside the checkout, so a profile committed to a repository is listed by `nono profile list` and grants what it asks for the moment anything resolves it by name. The entry point passes `--profile <store path>` as an argument, and an argument beats `NONO_PROFILE`, which is why an untrusted checkout cannot grant itself paths. Nothing refuses the file itself.
+- **The calling environment can widen a session, and that is deliberate.** `NONO_ALLOW` adds to a description the entry point pinned, and `--extends` adds a whole profile. That is the intended route for a consumer to lend a session something of their own. It is worth knowing that the mechanism cannot tell a variable exported above your checkouts from one exported by a checkout's own `.envrc`, so the trust boundary there is your `direnv allow`, not an enforcement.
 - The denial-set comparison behind the narrowing uses `strace`, which is Linux-only, so on macOS `check_substrate_denials` reports `SKIP` rather than passing. What macOS keeps is the component-layer equality, which reads the description rather than the kernel.
 - A confined session inherits `PATH` **whole**, host user profile included, and nono offers no way to narrow it: `set_vars.PATH` is rejected as reserved and `deny_vars` has no effect on it. Now that the store is no longer granted wholesale, this is literal: a tool the session can still *name* from the host profile is a tool it can no longer *run*.
 
