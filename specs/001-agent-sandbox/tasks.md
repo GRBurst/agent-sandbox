@@ -477,17 +477,17 @@ Refusals come immediately after the first working session, because they are what
 
 Every task in this group is subject to [D9](plan.md#d9): a check whose observable is a failure carries a positive control in the same session, because a session that never started, a binary that is missing and a boundary that works all produce the same failure. The control is named in each task below and is not optional.
 
-### M5a — A key outside the project is unreadable (Status: PENDING)
+### M5a — A key outside the project is unreadable (Status: IMPLEMENTED)
 
 **Scenario**: R1
 
 **RED**: `check_r1` plants an SSH key in the fake `$HOME` and reads it from inside.
 
-- [ ] Check written and seen to FAIL
-- [ ] Assertion covers both halves: the read fails **and** no key material appears in the output
-- [ ] **Control**: a file inside the project is read successfully in the same session, so a session that failed to start cannot pass
-- [ ] The fake `$HOME` lies **outside** the project, and the check says why rather than leaving it to look arbitrary
-- [ ] Violation planted (`$HOME/.ssh` in the registry), seen to FAIL, reverted, recorded in plan.md
+- [x] Check written and seen to FAIL — but not by the route the criterion assumed, and the difference is recorded below rather than glossed: the property already held as shipped, so the only RED available is the planted one
+- [x] Assertion covers both halves: the read fails **and** no key material appears in the output. A third assertion joins them — the failure must say `Permission denied` — because a key that had never been planted would exit non-zero and show no material just as convincingly
+- [x] **Control**: a file inside the project is read successfully in the same session, so a session that failed to start cannot pass. Asserted in **both** arms, and first, so every other assertion is reached only once the session is known to have run
+- [x] The fake `$HOME` lies **outside** the project, and the check says why rather than leaving it to look arbitrary — the 48 `$HOME`-relative denies and the startup refusal they cause, in the comment above the check
+- [x] Violation planted (`$HOME/.ssh` in the registry), seen to FAIL, reverted, recorded in plan.md — all three shipped-arm assertions fired at once, and the plant took `check_j1_1` with it for an unrelated reason worth keeping
 
 **Measured before starting, in `research.md` § `M5a`.** Four things the check can be written against rather than discovered by:
 
@@ -498,6 +498,18 @@ The fake `$HOME` **must** be outside the project. The resolved description carri
 The planted violation does bite, and it bites harder than expected. Granting exactly `$HOME/.ssh` reads the key material out, even though `deny_credentials` — a `required` group whose whole purpose is keeping credentials out — denies that path. So the required deny groups are **not** a backstop behind the leak registry, and this task is the only thing asserting `R1` at the kernel. [D4](plan.md#d4) is corrected accordingly.
 
 Granting an **ancestor** of a denied path refuses to start instead of narrowing quietly. A plant must therefore name the exact path, or it will fail for the wrong reason and prove nothing.
+
+**Implementation.** `check_r1` joins `scripts/checks/integration.sh`. Three arms, one session each: the shipped description, the shipped description with the key's directory added to `filesystem.read`, and an unconfined read of the key before either.
+
+- **There was no RED to see at this layer, and saying so is the finding.** The criterion is written as though the check would fail before the code existed, but the code exists: `R1` has held since `M4b`. The RED that is honestly available is the one the unit layer reports — `check_sc3`'s missing-scenario set shrank from 21 to 20, `r1` leaving and nothing else moving — plus the planted violation below, which is the only way to watch this check fail. Every future task in `M5` inherits this: a refusal that already holds cannot be test-driven, only planted against.
+- **The plant bites, and `$HOME` is expanded inside `filesystem.read`.** That was untested before — the registry writes `entry.path` into the description verbatim, and only the `$WORKDIR` substitution was known to work. With `$HOME/.ssh` in the registry, the built description carries it unexpanded, nono resolves it against the ambient `HOME`, and the shipped arm reads the key out: **exit 0, key material in the output, and no `Permission denied`** — all three assertions firing together, which is what says the three are not one assertion written out three times.
+- **The plant also breaks `check_j1_1`, for a reason that has nothing to do with `R1`.** That check takes the registry side of its comparison straight from `nix eval`, unexpanded, while `tracked_paths` is written expanded, so the two cannot match for an entry naming a variable. Its session also gained no tracked path at all, because its fake home has no `.ssh` — a grant on a path that does not exist is silent rather than an error, which is what a typo in an entry will look like. The registry is empty, so this is latent, but the **first real entry naming any variable will fail `check_j1_1` spuriously**. Recorded in [research.md § M5a](research.md#m5a--a-key-outside-the-project-is-unreadable) rather than fixed here: fixing it means deciding where expansion happens, which is a change to `lib/confinement.nix`'s contract and not this task's.
+- **The permanent third arm is the probe's own positive control**, and it is the finding from the preconditions made executable: with the key's directory granted, the same probe must read the key out. It names the directory exactly, never an ancestor, because a grant above a denied path is refused at startup. The arm is not scaffolding to be deleted — without it, a probe that could read nothing at all would pass the shipped arm.
+- **The probe reads with the shell's own redirection rather than by calling `cat`.** `PATH` is inherited whole, host entries included, as `M4c` measured, so a name resolved inside the session can land on a binary the session may not read, and the probe would report a denial of its own. It is also why `bash` comes out of `substrate_member` rather than off `PATH`.
+- **The probe prints the key material it managed to read, on purpose.** An assertion that no key material appears in the output proves nothing against a probe that never shows it, so the successful read in the granted arm and the empty read in the shipped one differ in exactly the string being asserted about.
+- Both canaries are generated per run, so a stale match in a scrollback or a log cannot satisfy either assertion.
+
+The integration layer is `4 checks passed` and the whole suite is `1 of 11 checks failed`, that one being the progress bar. **The integration layer must be run from inside the devShell** — `nix develop -c bash scripts/validate.sh --layer integration` — because the pre-flight `check_r6` exercises execs `true` by bare name, which on a host carrying one outside the store resolves to an ungranted path and turns assertion 1 into a false 77. Recorded in the plan's coverage gap.
 
 ### M5b — A write outside the project is refused (Status: PENDING)
 

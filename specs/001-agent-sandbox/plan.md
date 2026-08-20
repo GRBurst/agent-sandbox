@@ -686,7 +686,7 @@ Mandatory per P2. Tick `Verified` only after seeing red, **and only after confir
 | `check_rep3` | Have authentication record the session it ran in | the two resulting states are distinguishable | [ ] |
 | `check_r6` | Delete the `die` from assertion 3, so a confined process that wrote outside the project is not refused | `an unenforceable host was not refused with 77: exit 0`, and `the refusal does not name the missing primitive` | [x] |
 | `check_r6` | Delete assertion 2, the pre-flight's own positive control | `a host with nowhere to write the canary was not refused with 77: exit 0`, and `the refusal does not say the canary was unwritable`. This is the defect [D5](#d5) was rewritten for, observed: without the control the pre-flight reports enforcement is fine on a host where the canary was never writable | [x] |
-| `check_r1` | Add `$HOME/.ssh` to the registry for `claude-code` | the read succeeds, so the check's assertion of failure fails | [ ] |
+| `check_r1` | Add `$HOME/.ssh` to the registry for `claude-code` | all three of `reading a key outside the project exited 0`, `key material appears in the output of the confined session` and `the read did not fail on permission, so the key may simply not have been there`. The built description was inspected first and did carry `$HOME/.ssh` in `filesystem.read` unexpanded, which is also how `$HOME` was confirmed to expand at the boundary rather than only `$WORKDIR`. It bit `check_j1_1` too, for an unrelated reason kept in `research.md`: that check takes the registry side unexpanded from `nix eval` while `tracked_paths` is written expanded, so the first real entry naming a variable will fail it spuriously | [x] |
 | `check_r2` | Set `filesystem.allow = ["$HOME"]` | the file exists afterwards | [ ] |
 | `check_r3` | Remove `environment.allow_vars` | the canary value appears in the confined environment | [ ] |
 | `check_r4` | Make the wrapper read the profile from `$PWD` rather than the store | reach changes mid-session | [ ] |
@@ -713,12 +713,20 @@ Mandatory per P2. Tick `Verified` only after seeing red, **and only after confir
 Listed here and copied into `docs/HANDBOOK.md` at close-out, so each gap is known rather than discovered.
 
 - **Live provider rejection** (Journey 4, second `Then`). Needs a real account and a real key; the automated half asserts substitute *shape* against mock credentials. Hand-verified.
+
 - **Live OAuth login** (Rep3, and Journey 5's first `Given`). Needs a browser, and possibly MFA. Hand-verified.
+
 - **A host genuinely unable to enforce confinement** (R6). CI runners all have Landlock, so the automated check plants the violation rather than reproducing the condition. Hand-verified on an older kernel, or accepted as unreproducible and stated as such.
+
 - **Streamed responses through the interception proxy** (Risk 14). Exercised by hand with a long completion; not automated because it needs a real provider.
+
 - **Credential eviction after long disuse** (R8 live case). The automated check invalidates the substitute artificially; the retention-driven case takes months. Hand-verified once, then trusted.
+
 - **macOS enforcement *strength*.** SC-8 asserts both platforms grant the same reach; it cannot assert that Seatbelt's guarantee equals Landlock's. The difference is documented under FR-11, not tested.
+
 - **The substrate denial-set equality on macOS** (SC-1's integration half). `strace` is Linux-only, so `check_substrate_denials` reports `SKIP` there rather than passing — the harness has a skip status precisely so this gap is visible in the run instead of being asserted away ([D18](#d18)). What macOS still gets is the component-layer equality in `check_sc1`, which reads the description rather than the kernel. Closing it needs the same differential written against a macOS tracer, which is `M9c`'s to decide once the runner exists.
+
+- **The pre-flight outside the devShell.** `lib/preflight.sh` execs its probe by bare name, so it depends on `PATH` resolving that name inside the granted substrate. On a host carrying `/run/current-system/sw/bin/true`, `M5a` observed nono exiting `127` with `its directory is not readable inside the sandbox`, which the pre-flight then reports as `77` — fail-closed, but naming the wrong cause. The integration layer is therefore run as `nix develop -c bash scripts/validate.sh --layer integration`, and `check_r6` covers the pre-flight only under that `PATH`. A user always enters through the devShell, so this is a gap in the check's reach rather than in the product's, and closing it means resolving the probe from the substrate the way the checks already do.
 
 Writing "none" was never available here: three of these need a human with an account, and one needs a machine we do not have.
 

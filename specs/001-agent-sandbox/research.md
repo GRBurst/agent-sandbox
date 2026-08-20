@@ -933,6 +933,43 @@ Two consequences for the feature.
 And the required deny groups are **not** a backstop behind the leak registry: `FR-3`'s strictness is the only thing between a session and `~/.ssh`.
 That is why `R1` has to be asserted from inside a live session rather than from a resolved description, and why `check_component_merge`'s claim 2 — that a deny survives into the merge — must record that surviving in the manifest is compatible with the path being readable.
 
+### `$HOME` expands at the boundary, and the registry hands it over unexpanded
+
+Measured while planting `M5a`'s violation, because the plant depended on it and nothing had tested it: `lib/confinement.nix` copies `entry.path` into `filesystem.read` verbatim, and only `$WORKDIR` was known to be substituted.
+With `{ path = "$HOME/.ssh"; mode = "read"; }` in the registry, the built description carries the literal string `$HOME/.ssh`, and the session reads the key out — so nono expands `$HOME` against the ambient environment, the same way it resolves the 48 `$HOME`-relative denies.
+
+The plant also failed `check_j1_1`, for a reason unrelated to `R1`:
+
+```text
+the session reaches more or less than the project, its substrate and the leak registry:
+@@ -1,4 +1,3 @@
+-$HOME/.ssh
+ /home/pallon/projects/hivemind/agent-sandbox
+ /nix/store/03ll5c4q8j8dqsx4q822g7h9js51gfyp-nixfmt-1.4.0
+```
+
+Two separate things are visible there.
+The expected side carries the **unexpanded** string, because that check builds it from `nix eval .#leakRegistry`, while `tracked_paths` is written by nono after expansion — so the two can never match for an entry naming a variable.
+And the session side gained **nothing at all**: `check_j1_1`'s fake home has no `.ssh` in it, so the grant named a path that did not exist and no tracked path came of it.
+A grant on a missing path is therefore silent rather than an error, which is worth knowing on its own: it is the failure mode a typo in a registry entry produces.
+
+The registry is empty, so nothing fails today, but **the first entry naming any variable will fail `check_j1_1` spuriously**.
+Fixing it means choosing where expansion happens — in `lib/confinement.nix` when the description is built, or in the check when the comparison is made — which is a change to the description's contract and belongs with whichever task first needs an entry.
+
+### The pre-flight's bare-name exec is `PATH`-dependent
+
+`lib/preflight.sh` runs `nono run … -- true`.
+On this host `true` resolves to `/run/current-system/sw/bin/true`, which the session is not granted, so nono exits `127`:
+
+```text
+The executable 'true' was resolved at: /run/current-system/sw/bin/true
+but its directory is not readable inside the sandbox
+```
+
+The pre-flight reads that as assertion 1 failing and refuses with `77`, naming Landlock — fail-closed, but attributing the refusal to the wrong cause.
+Inside the devShell the store's `coreutils` comes first on `PATH` and the same code passes, which is why `check_r6` fails when the suite is run directly and passes under `nix develop -c`.
+The checks resolve every binary they run through `substrate_member` precisely to avoid this; the shipped pre-flight does not.
+
 ### Method notes
 
 - `nono profile show --format manifest` writes its `WARN` lines to the same stream as the JSON.

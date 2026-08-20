@@ -335,3 +335,146 @@ check_substrate_denials() {
 		return 1
 	}
 }
+
+# R1 — a private key outside the project is unreadable from inside a session.
+#
+# The key lives in a fake $HOME under $XDG_RUNTIME_DIR rather than in the
+# project's own scratch directory, and that is forced rather than tidiness: the
+# resolved description carries 48 $HOME-relative deny rules, so a $HOME under
+# the granted project makes every one of them overlap an allowed parent and
+# nono refuses to start (D15). The check would then observe a refusal to start
+# and call it a refusal to read.
+#
+# Both halves of the scenario are asserted, and the probe prints the key
+# material it managed to read on purpose: an assertion that no key material
+# appears in the output is worth nothing against a probe that never shows it.
+# A non-zero exit is not enough on its own either, so the refusal must say
+# `Permission denied` — a key that had simply never been there would exit
+# non-zero and show no material just as convincingly.
+#
+# Two controls, because the observable is a failure (D9):
+#
+#   1. In the same session, a file inside the project is read successfully. A
+#      session that died at startup, or a probe that could read nothing at all,
+#      cannot pass.
+#   2. The same key is read once from outside the boundary before the session
+#      runs, so the denial is attributable to confinement rather than to a
+#      plant that never landed.
+#
+# The third arm is a standing positive control on the probe itself: with the
+# key's directory added to `filesystem.read`, the same probe must read the key
+# out. It names the exact directory and never an ancestor, because a grant
+# above a denied path is refused at startup rather than widened. This arm is
+# also the finding that makes the check necessary at all — `deny_credentials`
+# is `required` and denies this very path, and the grant still wins, so nothing
+# stands behind the registry's own strictness.
+check_r1() {
+	local agent=claude-code
+	local outside home key inside probe scratch profile substrate bash_pkg
+	local key_canary inside_canary arm description rc out found=0
+	local -a SESSION_ENV
+
+	profile=$(nix build --no-link --print-out-paths "$REPO_ROOT#confinement-$agent") || {
+		fail "the confinement for $agent does not build"
+		return 1
+	}
+	substrate=$(nix build --no-link --print-out-paths "$REPO_ROOT#substrate-$agent") || {
+		fail "the execution substrate for $agent does not build"
+		return 1
+	}
+	bash_pkg=$(substrate_member "$substrate" bash) || {
+		fail "the substrate provides no bash to run the probe"
+		return 1
+	}
+
+	outside=$(mktemp -d -p "${XDG_RUNTIME_DIR:-/tmp}" agent-sandbox-r1.XXXXXX)
+	scratch="$REPO_ROOT/.tmp/r1"
+	rm -rf "$scratch"
+	mkdir -p "$scratch"
+	# shellcheck disable=SC2064
+	trap "rm -rf '$outside' '$scratch'" RETURN
+
+	home="$outside/home"
+	key="$home/.ssh/id_ed25519"
+	mkdir -p "$home/.ssh"
+	# Per run, so a stale match in a log cannot satisfy the assertion.
+	key_canary="PLANTED-KEY-MATERIAL-$RANDOM$RANDOM"
+	inside_canary="PROJECT-FILE-CONTENT-$RANDOM$RANDOM"
+	printf '%s\n' "$key_canary" >"$key"
+	chmod 600 "$key"
+	inside="$scratch/inside.txt"
+	printf '%s\n' "$inside_canary" >"$inside"
+
+	# Control 2. Unconfined, the key reads.
+	if [ "$(cat "$key")" != "$key_canary" ]; then
+		fail "the planted key is not readable outside the boundary, so a denial inside it would prove nothing"
+		return 1
+	fi
+
+	# The probe takes its targets as arguments and lives inside the project, so
+	# nothing here depends on quoting surviving a `-c` string, and it reads with
+	# the shell's own redirection rather than by calling `cat`. PATH is
+	# inherited whole, host entries included, so a name resolved inside the
+	# session can land on a binary the session may not read — which is how the
+	# pre-flight's bare `true` fails on a host carrying one outside the store.
+	# A probe that ran an ungranted binary would report a denial of its own.
+	probe="$scratch/probe.sh"
+	cat >"$probe" <<-'PROBE'
+		key_rc=0
+		key=$(<"$1") || key_rc=$?
+		printf 'KEY :: %s\n' "$key"
+		printf 'INSIDE :: %s\n' "$(<"$2")"
+		exit "$key_rc"
+	PROBE
+
+	session_env "$outside/state"
+
+	jq --arg d "$home/.ssh" '.filesystem.read += [$d]' "$profile" >"$scratch/granted.json"
+
+	for arm in shipped granted; do
+		description=$profile
+		[ "$arm" = shipped ] || description="$scratch/granted.json"
+
+		out=$(env "${SESSION_ENV[@]}" "HOME=$home" \
+			"$(pinned_bin nono)/nono" run \
+			--profile "$description" --workdir "$REPO_ROOT" --allow-cwd -- \
+			"$bash_pkg/bin/bash" "$probe" "$key" "$inside" 2>&1) && rc=0 || rc=$?
+
+		# The in-project read is asserted in both arms: it is what says the
+		# session started and the probe ran, and the granted arm needs that
+		# said as much as the shipped one.
+		if ! printf '%s' "$out" | grep -qF "INSIDE :: $inside_canary"; then
+			found=1
+			fail "$(printf 'the %s arm never read the file inside the project, so it observed no session (exit %s):\n%s' \
+				"$arm" "$rc" "$out")"
+			continue
+		fi
+
+		if [ "$arm" = granted ]; then
+			# Control 3. The probe must be able to read the key when the
+			# boundary allows it, or the shipped arm's refusal is the probe's
+			# and not the sandbox's.
+			if [ "$rc" -ne 0 ] || ! printf '%s' "$out" | grep -qF "KEY :: $key_canary"; then
+				found=1
+				fail "$(printf 'the probe cannot read the key even when the boundary grants it (exit %s):\n%s' \
+					"$rc" "$out")"
+			fi
+			continue
+		fi
+
+		if [ "$rc" -eq 0 ]; then
+			found=1
+			fail "$(printf 'reading a key outside the project exited 0:\n%s' "$out")"
+		fi
+		if printf '%s' "$out" | grep -qF "$key_canary"; then
+			found=1
+			fail "$(printf 'key material appears in the output of the confined session:\n%s' "$out")"
+		fi
+		if ! printf '%s' "$out" | grep -q 'Permission denied'; then
+			found=1
+			fail "$(printf 'the read did not fail on permission, so the key may simply not have been there:\n%s' "$out")"
+		fi
+	done
+
+	[ "$found" -eq 0 ]
+}
