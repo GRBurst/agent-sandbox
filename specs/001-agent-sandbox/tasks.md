@@ -434,7 +434,7 @@ The wrapper creates `$XDG_CONFIG_HOME` before invoking nono. `M1e` observed that
 
 `check_sc3`'s set shrank from 20 to 19, `j1_1` leaving and nothing else moving. The suite is `1 of 9 checks failed`, that one being the progress bar. Both systems evaluate: `packages.<system>.{claude,nono,confinement-claude-code}` and `devShells.<system>.default` all produce a derivation for `x86_64-linux` and `aarch64-darwin`, and `nix flake check` passes for the host system.
 
-### M4c — The execution substrate is the session's own closure (Status: PENDING)
+### M4c — The execution substrate is the session's own closure (Status: IMPLEMENTED)
 
 **Scenario**: SC-1
 
@@ -442,14 +442,14 @@ The wrapper creates `$XDG_CONFIG_HOME` before invoking nono. `M1e` observed that
 
 **RED**: extend `check_sc1`'s expectation to the closure and watch it fail against the whole-store grant.
 
-- [ ] The granted substrate is derived from `closureInfo` over **one** list that is also the devShell's `packages`, so the grants and the `PATH` the session runs with are the same expression and cannot drift apart. Roots are taken as package attributes, never as a restated output: `PATH` carries `jq`'s `bin` output while `jq^out` is a different path, and a root set that names the wrong one denies a tool the session can see
-- [ ] Every tool the devShell puts on `PATH` still works inside the session, and the tools the agent's own Bash tool needs — `git` above all, which the devShell does **not** provide today — are in that list rather than resolved from the host user profile ([P1](../../docs/CONSTITUTION.md), `AGENTS.md` §3)
-- [ ] `LOCALE_ARCHIVE` is set to an archive inside a **granted** store path, because the compiled-in default `/run/current-system/sw/lib/locale/locale-archive` is outside the store and setting the variable without granting what it names only moves the denial. `glibcLocalesUtf8` (2 MiB) rather than `glibcLocales` (222 MiB), and both halves conditional on `stdenv.hostPlatform.isLinux`
-- [ ] `strace -f -e trace=openat` over a real session shows **no `EACCES` or `EPERM` that a whole-store control does not also show**, asserted as an equality between two denial sets rather than as a count or a list of literals
-- [ ] `strace` is in the devshell for Linux only, as `lib.optionals stdenv.hostPlatform.isLinux`, so the check does not depend on a host tool ([P1](../../docs/CONSTITUTION.md)) and `devShells.aarch64-darwin.default` keeps evaluating
-- [ ] The registry's substrate entry is replaced or deleted, and if it survives, its `whyNotNarrower` no longer rests on the closure being unknowable
-- [ ] `bash scripts/validate.sh --layer integration` passes
-- [ ] Violation planted (a path dropped from the closure that the session needs), seen to FAIL, reverted, recorded in plan.md
+- [x] The granted substrate is derived from `closureInfo` over **one** list that is also the devShell's `packages`, so the grants and the `PATH` the session runs with are the same expression and cannot drift apart. Roots are taken as package attributes, never as a restated output: `PATH` carries `jq`'s `bin` output while `jq^out` is a different path, and a root set that names the wrong one denies a tool the session can see — `sessionTools` in `flake.nix`, `substrateFor` over it, and `packages.<system>.substrate-<agent>` so a human and a check read the same answer
+- [x] Every tool the devShell puts on `PATH` still works inside the session, and the tools the agent's own Bash tool needs — `git` above all, which the devShell does **not** provide today — are in that list rather than resolved from the host user profile ([P1](../../docs/CONSTITUTION.md), `AGENTS.md` §3)
+- [x] `LOCALE_ARCHIVE` is set to an archive inside a **granted** store path, because the compiled-in default `/run/current-system/sw/lib/locale/locale-archive` is outside the store and setting the variable without granting what it names only moves the denial. `glibcLocalesUtf8` (2 MiB) rather than `glibcLocales` (222 MiB), and both halves conditional on `stdenv.hostPlatform.isLinux`
+- [x] `strace -f -e trace=openat` over a real session shows **no `EACCES` or `EPERM` that a whole-store control does not also show**, asserted as an equality between two denial sets rather than as a count or a list of literals — `check_substrate_denials`, eleven identical `/sys` denials in both arms
+- [x] `strace` is in the devshell for Linux only, as `lib.optionals stdenv.hostPlatform.isLinux`, so the check does not depend on a host tool ([P1](../../docs/CONSTITUTION.md)) and `devShells.aarch64-darwin.default` keeps evaluating. The check itself reports `SKIP` off Linux, for which the harness gained a skip status distinct from the product's exit 77, and the gap is recorded in the plan's coverage list rather than passed over
+- [x] The registry's substrate entry is replaced or deleted, and if it survives, its `whyNotNarrower` no longer rests on the closure being unknowable — **deleted**, because keeping it as an upper bound narrows nothing: Landlock's allow rule on `/nix/store` subsumes every path beneath, measured as an out-of-closure path opening under the retained prefix and being refused without it. The registry is now empty, which [FR-3](spec.md) and [D18](plan.md#d18) make the healthy state
+- [x] `bash scripts/validate.sh --layer integration` passes
+- [x] Violation planted (a path dropped from the closure that the session needs), seen to FAIL, reverted, recorded in plan.md — dropping the locale archive's store path while `LOCALE_ARCHIVE` still names it bit three checks at three layers, and its trace named glibc's compiled-in fallback as a second denial. Three further plants recorded: the store prefix re-granted beside the enumeration, and the denial equality stripped of its control
 
 **Preconditions**, measured before the task and recorded in [research.md § M4c](research.md#m4c):
 
@@ -464,6 +464,8 @@ One measurement from `M3c`'s spike still bounds the work: a 62-path closure serv
 `strace` is the observer because nono is not. On a session that failed for a denied locale archive, `nono run --diagnostics-json` reported `"denials": []` and `"violations": []`, offering only an `info`-level `command_failed_likely_sandbox` whose remediation names a discovery mode that does not exist — there is no `--discover`, `--learn` or `--permissive` flag and no `discover` subcommand. A check that trusted nono's own denial reporting would pass over exactly the failure this task exists to find.
 
 Deciding this at the integration layer is forced: `nono profile show` proves what nono *would* grant, and only a real session proves what the kernel enforces.
+
+**The task reopened the spec, which is why it took a review gate mid-flight.** Deleting the registry entry left the closure's paths as neither the project directory nor a registry entry, and `FR-2` said the reach was those two things "and nothing else". Retaining the entry as an upper bound was the alternative the criterion above allows, and the measurement killed it. So `FR-2`, `FR-3` and `SC-1` were amended to name the execution substrate as a category of its own, with the reasoning in [D18](plan.md#d18): a registry entry owes a justification a human writes and reviews, and the programs a session runs are derived from the session's definition, so entries for them would be neither reviewable nor stable. The registry did not gain a kind of entry; it lost its only one.
 
 **Checkpoint**: Journey 1 is independently verifiable by `bash scripts/validate.sh --layer integration`.
 

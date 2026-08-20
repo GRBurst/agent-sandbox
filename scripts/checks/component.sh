@@ -108,18 +108,37 @@ check_confinement_validates() {
 		found=1
 	fi
 
-	# D15: the store is absent from the floor, so a session that cannot read it
-	# exits 127 before the agent runs. Independent of check_sc1, which asserts the
-	# registry and the grants agree with each other and so stays green when both
-	# lose the substrate together. The store's own prefix comes from Nix, because
-	# a check that spells it out would pass on a store mounted elsewhere.
+	# The substrate is absent from nono's floor, which grants seven specific store
+	# files and never the store itself, so a session with no substrate exits 127
+	# before the agent runs. Two claims, both about the profile alone: something
+	# under the store is granted, and the store's own prefix is not. The second is
+	# the one M4c turned on: Landlock rules are allow-only, so a grant on the
+	# prefix subsumes every path beneath it and the enumeration becomes
+	# decorative. Measured either way, with an opendir probe on an out-of-closure
+	# path: readable with the prefix granted, denied without it.
+	#
+	# Which paths those are is check_sc1's question, asserted there as an equality
+	# against the substrate this repository builds. Kept apart so that a substrate
+	# that silently empties fails here even though the grants and the derivation
+	# it came from would still agree with each other.
+	#
+	# The prefix comes from Nix, because a check that spells it out would pass on a
+	# store mounted elsewhere.
 	store=$(nix eval --raw --impure --expr 'builtins.storeDir') || {
 		fail "the store prefix does not evaluate"
 		return 1
 	}
-	jq -e --arg s "$store" '[.filesystem.read // []] | flatten | index($s)' "$profile" >/dev/null ||
+	jq -e --arg s "$store" \
+		'[.filesystem.read // []] | flatten | any(.[]; startswith($s + "/"))' \
+		"$profile" >/dev/null ||
 		{
-			printf 'filesystem.read does not carry %s, so the session cannot execute from the store\n' "$store"
+			printf 'filesystem.read carries nothing under %s, so the session cannot execute\n' "$store"
+			found=1
+		}
+	jq -e --arg s "$store" '[.filesystem.read // [], .filesystem.allow // []] | flatten | index($s)' \
+		"$profile" >/dev/null &&
+		{
+			printf 'the store prefix %s is granted whole, and an allow-only rule on it subsumes every path beneath\n' "$store"
 			found=1
 		}
 
@@ -165,8 +184,14 @@ check_confinement_validates() {
 }
 
 # SC-1 / FR-2: the reach a description adds to nono's floor is the project
-# directory plus the leak registry's entries, and nothing else. An equality, so
-# an entry that is registered but not granted fails too.
+# directory, the session's own execution substrate and the leak registry's
+# entries, and nothing else. An equality in every part, so an entry that is
+# registered but not granted fails too, and so does a substrate grant wider than
+# what the session runs even though every path in it is a store path.
+#
+# The substrate is not restated here either. It is read from the derivation this
+# repository builds for it, so the expected set and the granted set come from one
+# list and adding a tool to the session cannot make this check stale.
 #
 # The floor is derived, not listed (D4). The same description with every
 # capability key stripped resolves to exactly what nono supplies whatever the
@@ -178,7 +203,7 @@ check_confinement_validates() {
 # equality already fails if the resolver returns nothing at all.
 check_sc1() {
 	local found=0 agent=claude-code
-	local profile tmp cfg project registry
+	local profile tmp cfg project registry substrate store
 
 	profile=$(confinement_profile "$agent") || {
 		fail "the confinement description for $agent does not build"
@@ -194,6 +219,17 @@ check_sc1() {
 	# written out, so the baseline cannot drift from the profile it is subtracted
 	# from. meta survives because M1e found meta.name is required.
 	jq '{meta}' "$profile" >"$tmp/floor.json"
+
+	substrate=$(nix build --no-link --print-out-paths "$REPO_ROOT#substrate-$agent") || {
+		fail "the execution substrate for $agent does not build"
+		return 1
+	}
+	store=$(nix eval --raw --impure --expr 'builtins.storeDir') || {
+		fail "the store prefix does not evaluate"
+		return 1
+	}
+	sort -u "$substrate/store-paths" >"$tmp/substrate.want"
+	: >"$tmp/substrate.got"
 
 	project=$(cd "$REPO_ROOT" && pwd -P)
 	manifest_grants "$profile" "$cfg" >"$tmp/agent.grants"
@@ -222,15 +258,38 @@ check_sc1() {
 			continue
 			;;
 		"$project"/*) continue ;;
+		# Collected rather than judged one at a time. Which store paths are
+		# granted is an equality against the substrate, asserted below, because
+		# a per-path test can only ask whether a path could belong and every
+		# path in the store can.
+		"$store")
+			printf 'the store prefix is granted whole: %s (%s)\n' "$path" "$agent"
+			found=1
+			continue
+			;;
+		"$store"/*)
+			printf '%s\n' "$path" >>"$tmp/substrate.got"
+			continue
+			;;
 		esac
 		# The entry is bound before the pipe, because `$p |` rebinds `.` to the
 		# path being tested and `.path` would then index a string.
 		jq -e --arg p "$path" \
 			'any(.[]; . as $e | $p == $e.path or ($p | startswith($e.path + "/")))' \
 			<<<"$registry" >/dev/null && continue
-		printf 'granted path outside project and not in registry: %s (%s)\n' "$path" "$agent"
+		printf 'granted path outside project, substrate and registry: %s (%s)\n' "$path" "$agent"
 		found=1
 	done < <(comm -13 "$tmp/floor.grants" "$tmp/agent.grants")
+
+	# The substrate half, as an equality in both directions. A path the session
+	# runs that is not granted denies a tool the session can see by name, and a
+	# granted path the session does not run is reach FR-2 does not allow.
+	sort -u -o "$tmp/substrate.got" "$tmp/substrate.got"
+	diff -u --label expected "$tmp/substrate.want" \
+		--label granted "$tmp/substrate.got" || {
+		printf 'the granted substrate is not the substrate this session runs (%s)\n' "$agent"
+		found=1
+	}
 
 	[ "$seen_project" -eq 1 ] || {
 		printf 'the project directory is not granted at all: %s (%s)\n' "$project" "$agent"

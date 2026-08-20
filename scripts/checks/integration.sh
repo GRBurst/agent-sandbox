@@ -18,8 +18,9 @@
 #      and replaces the child's exit status with 1. A child exiting 0 would
 #      report 1, and a pre-flight refusing with 77 would report 1, so every
 #      exit status asserted below would be the supervisor's cleanup instead.
-#   4. /nix/store granted read, or the child cannot exec at all and exits 127.
-#      The generated profile carries this as the leak registry's one entry.
+#   4. The programs the child execs granted read, or it cannot exec at all and
+#      exits 127. The generated profile carries them as the enumerated
+#      execution substrate, so nothing needs granting here.
 # Sets SESSION_ENV to the assignments `env` needs. An array, because the values
 # hold paths and splitting a string on whitespace would corrupt them.
 session_env() {
@@ -31,6 +32,35 @@ session_env() {
 		"XDG_STATE_HOME=$state"
 		NONO_NO_UPDATE_CHECK=1
 	)
+}
+
+# The substrate member that provides a binary, or nothing.
+#
+# A check that needs to run a program inside a session resolves it this way
+# rather than from PATH or from a store path written down: the answer is a path
+# the session is granted, so the program a check observes cannot be one the
+# session could not have executed.
+substrate_member() {
+	local substrate=$1 binary=$2 path
+	while read -r path; do
+		if [ -x "$path/bin/$binary" ]; then
+			printf '%s\n' "$path"
+			return 0
+		fi
+	done <"$substrate/store-paths"
+	return 1
+}
+
+# The paths an strace log shows refused, one per line, sorted and unique.
+#
+# Only openat, and only EACCES or EPERM: those are the two errors Landlock
+# returns, and a check that swept up ENOENT would call a path the program
+# merely guessed at a denial.
+trace_denials() {
+	local trace=$1
+	awk '/openat\(/ && /EACCES|EPERM/ {
+		if (match($0, /"[^"]*"/)) print substr($0, RSTART + 1, RLENGTH - 2)
+	}' "$trace" | sort -u
 }
 
 # R6 — a host that cannot enforce confinement refuses, naming the primitive.
@@ -144,7 +174,7 @@ check_r6() {
 # even be attempted.
 check_j1_1() {
 	local agent=claude-code binary=claude
-	local outside home state project session registry rc out found=0
+	local outside home state project session registry substrate rc out found=0
 	local -a sessions=()
 
 	# Outside the project, because nono refuses to start when a granted path
@@ -184,21 +214,124 @@ check_j1_1() {
 	project=$(cd "$REPO_ROOT" && pwd -P)
 	registry=$(nix eval --json "$REPO_ROOT#leakRegistry" \
 		--apply "es: builtins.filter (e: builtins.elem \"$agent\" e.agents) es")
+	substrate=$(nix build --no-link --print-out-paths "$REPO_ROOT#substrate-$agent") || {
+		fail "the execution substrate for $agent does not build"
+		return 1
+	}
 
-	# The property, from plan.md: granted ∖ floor = {the project} ∪ the registry.
-	# Derived from the registry rather than restated, so a new entry moves both
-	# sides at once and only a leak nobody wrote down can fail this.
+	# The property, from plan.md: granted ∖ floor = {the project} ∪ the substrate
+	# ∪ the registry. Every term is derived from the artefact this repository
+	# builds rather than restated here, so adding a tool to the session or an
+	# entry to the registry moves both sides at once, and only reach nobody
+	# declared can fail this.
+	#
+	# The substrate term is what M4c turned from a prefix into a set. Until then
+	# the store was granted whole and this comparison could not tell a session
+	# that runs 128 paths from one that can read all 67,000: a single granted
+	# ancestor satisfied a diff either way. Enumerated, the same diff now fails
+	# on one path too many.
 	if ! diff -u \
 		<({
 			printf '%s\n' "$project"
+			cat "$substrate/store-paths"
 			jq -r '.[].path' <<<"$registry"
 		} | sort -u) \
 		<(jq -r '.tracked_paths[]' "${sessions[0]}" | sort -u) \
 		>"$outside/reach.diff" 2>&1; then
 		found=1
-		fail "$(printf 'the session reaches more or less than the project plus the leak registry:\n%s' \
+		fail "$(printf 'the session reaches more or less than the project, its substrate and the leak registry:\n%s' \
 			"$(sed '1,2d' "$outside/reach.diff")")"
 	fi
 
 	[ "$found" -eq 0 ]
+}
+
+# M4c criterion 4 — narrowing the substrate to what the session runs denies
+# the session nothing.
+#
+# The observable is a syscall trace, because nono is not an observer here: on a
+# session that died for a denied locale archive, `nono run --diagnostics-json`
+# reported `"denials": []` and offered only an info-level guess, and no
+# discovery mode exists to ask it what a run wanted.
+#
+# The assertion is an equality between two denial sets, never a count and never
+# a list of paths, because a floor denies things in every arm: eleven /sys and
+# cgroup paths are refused even with the whole store granted, and a check that
+# demanded an empty set would fail on a working session. The two arms differ by
+# exactly one grant, so any path that appears in the narrow arm alone is reach
+# the narrowing took away.
+#
+# Both binaries come out of the substrate itself rather than from PATH or a
+# restated store path, so what the check runs is by construction what the
+# session may run: a substrate missing either one cannot be observed at all.
+check_substrate_denials() {
+	local agent=claude-code
+	local tmp state profile substrate store claude strace arm rc
+	local -a SESSION_ENV
+
+	if [ "$(uname -s)" != Linux ]; then
+		printf 'a syscall trace of a confined session is Linux-only; the substrate\n'
+		printf 'equality is asserted by check_sc1 on every platform\n'
+		return "$SKIP_STATUS"
+	fi
+
+	profile=$(nix build --no-link --print-out-paths "$REPO_ROOT#confinement-$agent") || {
+		fail "the confinement for $agent does not build"
+		return 1
+	}
+	substrate=$(nix build --no-link --print-out-paths "$REPO_ROOT#substrate-$agent") || {
+		fail "the execution substrate for $agent does not build"
+		return 1
+	}
+	store=$(nix eval --raw --impure --expr 'builtins.storeDir')
+
+	claude=$(substrate_member "$substrate" claude) || {
+		fail "the substrate provides no claude to run"
+		return 1
+	}
+	strace=$(substrate_member "$substrate" strace) || {
+		fail "the substrate provides no strace, so the session cannot be observed"
+		return 1
+	}
+
+	# Inside the project, because the project is the only writable place: the
+	# trace is written by the confined child, not by this check.
+	tmp=$REPO_ROOT/.tmp/substrate-denials
+	rm -rf "$tmp"
+	mkdir -p "$tmp"
+	state="${XDG_RUNTIME_DIR:-$tmp}/agent-sandbox-substrate-denials"
+	rm -rf "$state"
+	session_env "$state"
+
+	cp "$profile" "$tmp/narrow.json"
+	jq --arg s "$store" '.filesystem.read += [$s]' "$profile" >"$tmp/whole.json"
+
+	for arm in narrow whole; do
+		rc=0
+		env "${SESSION_ENV[@]}" \
+			"$(pinned_bin nono)/nono" run \
+			--profile "$tmp/$arm.json" --workdir "$REPO_ROOT" --allow-cwd -- \
+			"$strace/bin/strace" -f -e trace=openat -o "$tmp/$arm.trace" \
+			"$claude/bin/claude" --version >"$tmp/$arm.out" 2>&1 || rc=$?
+		[ "$rc" -eq 0 ] || {
+			fail "$(printf 'the %s arm did not start (exit %d):\n%s' "$arm" "$rc" "$(cat "$tmp/$arm.out")")"
+			return 1
+		}
+		trace_denials "$tmp/$arm.trace" >"$tmp/$arm.denials"
+	done
+
+	# The control is the whole-store arm, and it is a positive one (D9): it
+	# proves the probe reaches a session at all, so an equality of two empty
+	# sets cannot pass for a session that never ran.
+	[ -s "$tmp/whole.denials" ] || {
+		fail "the whole-store arm was refused nothing, so the trace observed nothing"
+		return 1
+	}
+
+	diff -u --label "whole store" "$tmp/whole.denials" \
+		--label "substrate only" "$tmp/narrow.denials" >"$tmp/denials.diff" 2>&1 || {
+		fail "$(printf 'narrowing the substrate denied the session something the whole store did not:\n%s' \
+			"$(sed '1,2d' "$tmp/denials.diff")")"
+		return 1
+	}
 }

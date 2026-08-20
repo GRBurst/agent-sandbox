@@ -13,6 +13,8 @@
   pkgs,
   agents,
   registry,
+  substrate,
+  substrateVars,
 }:
 name:
 let
@@ -29,9 +31,15 @@ let
   # has to take effect without anyone remembering to edit this file.
   mine = builtins.filter (e: builtins.elem name e.agents) registry.entries;
   pathsWith = mode: map (e: e.path) (builtins.filter (e: e.mode == mode) mine);
-in
-pkgs.writeText "nono-profile-${name}.json" (
-  builtins.toJSON {
+
+  closure = substrate name;
+
+  # Everything the description says that can be decided by evaluating this file.
+  # The substrate cannot: it is the content of a derivation's output, and reading
+  # that during evaluation would mean building the closure before the flake can
+  # be evaluated at all. So the substrate is merged in by the build below, and
+  # this is the part a reader can reason about without one.
+  declared = {
     "$schema" = "https://nono.sh/schemas/nono-profile.schema.json";
 
     # M1e: omitting meta.name is a parse error rather than a default.
@@ -95,14 +103,39 @@ pkgs.writeText "nono-profile-${name}.json" (
         "COLORTERM"
       ];
 
-      set_vars = (a.stateVars w) // {
-        # FR-23. The toolchain is pointed at configuration this environment
-        # wrote rather than merely denied the host's, so its effective
-        # configuration is the same on every machine instead of depending on
-        # what the developer happens to have in their home directory.
-        GIT_CONFIG_GLOBAL = "${w}/.agents/git/config";
-        GIT_CONFIG_SYSTEM = "/dev/null";
-      };
+      set_vars =
+        (a.stateVars w)
+        // substrateVars
+        // {
+          # FR-23. The toolchain is pointed at configuration this environment
+          # wrote rather than merely denied the host's, so its effective
+          # configuration is the same on every machine instead of depending on
+          # what the developer happens to have in their home directory.
+          GIT_CONFIG_GLOBAL = "${w}/.agents/git/config";
+          GIT_CONFIG_SYSTEM = "/dev/null";
+        };
     };
+  };
+in
+# M4c. The substrate is the closure of what the session executes, so it is read
+# out of a built derivation and merged here rather than named in this file.
+#
+# A `runCommand` rather than `builtins.readFile (closure + "/store-paths")`: the
+# latter is import-from-derivation, which would build the whole closure during
+# evaluation of `nix flake show` and of every check that only wants to read the
+# agent table. This way the closure is built when the description is built, which
+# is when it is needed.
+pkgs.runCommand "nono-profile-${name}.json"
+  {
+    nativeBuildInputs = [ pkgs.jq ];
+    passAsFile = [ "declared" ];
+    declared = builtins.toJSON declared;
+    inherit closure;
   }
-)
+  ''
+    # One path per line, and the file ends with a newline, so the empty trailing
+    # element is dropped rather than granted as "".
+    jq --rawfile substrate "$closure/store-paths" \
+      '.filesystem.read += ($substrate | split("\n") | map(select(length > 0)))' \
+      "$declaredPath" > "$out"
+  ''

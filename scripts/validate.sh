@@ -97,12 +97,29 @@ source_layers() {
 	done
 }
 
+# A check returns 78 to say the observation it makes does not exist on this
+# host: an instrument the layer needs is platform-specific, so there is nothing
+# to run rather than something that passed. Reported as SKIP and, per P2's
+# anti-vacuity rule, deliberately not counted as having run — a suite where
+# every check skipped must not report success.
+#
+# 78 rather than 77, because 77 is a product-level status: the pre-flight's
+# refusal of an unenforceable host, which `check_r6` asserts. A check that
+# refused for that reason would be a failure of this repository's own promise,
+# and must never be reported as a skip.
+readonly SKIP_STATUS=78
+
 run_check() {
 	local name=$1 output rc=0
 	output=$("$name" 2>&1) || rc=$?
 	if [ "$rc" -eq 0 ]; then
 		printf 'PASS  %s\n' "$name"
 		return 0
+	fi
+	if [ "$rc" -eq "$SKIP_STATUS" ]; then
+		printf 'SKIP  %s\n' "$name"
+		[ -z "$output" ] || printf '%s\n' "$output" | sed 's/^/      /'
+		return "$SKIP_STATUS"
 	fi
 	printf 'FAIL  %s\n' "$name" >&2
 	[ -z "$output" ] || printf '%s\n' "$output" | sed 's/^/      /' >&2
@@ -121,22 +138,35 @@ list_checks() {
 }
 
 run_layers() {
-	local layer file name ran=0 failed=0
+	local layer file name rc ran=0 failed=0 skipped=0
 	for layer in "$@"; do
 		file=$(layer_file "$layer")
 		[ -f "$file" ] || continue
 		printf '== %s\n' "$layer"
 		while read -r name; do
-			ran=$((ran + 1))
-			run_check "$name" || failed=$((failed + 1))
+			rc=0
+			run_check "$name" || rc=$?
+			case "$rc" in
+			0) ran=$((ran + 1)) ;;
+			"$SKIP_STATUS") skipped=$((skipped + 1)) ;;
+			*)
+				ran=$((ran + 1))
+				failed=$((failed + 1))
+				;;
+			esac
 		done < <(checks_in "$file")
 	done
 	# P2's anti-vacuity rule: a suite that ran nothing reports success while
-	# testing nothing, which is strictly worse than a red run.
+	# testing nothing, which is strictly worse than a red run. A skipped check
+	# is not a run one, so a host where every check skipped fails here.
 	[ "$ran" -gt 0 ] || die "no checks ran; the suite would report success without testing anything"
 	if [ "$failed" -gt 0 ]; then
 		printf '%d of %d checks failed\n' "$failed" "$ran" >&2
 		return 1
+	fi
+	if [ "$skipped" -gt 0 ]; then
+		printf '%d checks passed, %d skipped\n' "$ran" "$skipped"
+		return 0
 	fi
 	printf '%d checks passed\n' "$ran"
 }

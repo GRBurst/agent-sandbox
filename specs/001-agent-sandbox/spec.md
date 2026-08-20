@@ -48,7 +48,8 @@ Every claim is checked by one command, run unattended on clean machines, on ever
 | **Project directory** | The checkout a confined session is bound to. | the drafts' "project", "projectName" |
 | **Agent state** | What an agent writes to survive a run: configuration root, sessions, conversation history, per-agent caches, logs. | the drafts' "state dir" and "cache dir", treated as two unrelated things |
 | **Confinement description** | The reviewable statement of what one agent may reach. | the drafts' "profile", "profileBuilder" |
-| **Leak registry** | The single file enumerating every path outside the project directory a confined session may reach, each with a written justification. | the drafts' `sharedCredentials`, `extraAllowPaths` |
+| **Execution substrate** | The programs a session runs and everything they need to run: the agent, the shell it spawns, every tool it shells out to, and their libraries and data. Derived from the session's own definition rather than written down, and immutable. | — |
+| **Leak registry** | The single file enumerating every path outside the project directory and outside the execution substrate a confined session may reach, each with a written justification. | the drafts' `sharedCredentials`, `extraAllowPaths` |
 | **Registered exception** | One entry in the leak registry. Constitution P1's "accepted leak", given a home. | — |
 | **Credential material** | Anything an agent can read that is presented to a provider as proof of identity — a file, or a variable in its environment. Deliberately covers both, because one shipped agent has no credential file. | the drafts' `sharedCredentials.claude` |
 | **Substitute credential** | Credential material that authenticates only from inside the boundary and is useless copied out. | — |
@@ -65,12 +66,12 @@ Every claim is checked by one command, run unattended on clean machines, on ever
 
 The entry point. Without this nothing else is reachable, and it is the journey that proves the repository is consumable rather than merely present.
 
-**Independently verifiable by**: entering from the canonical reference on a clean machine and asserting the started session's granted reach against the leak registry.
+**Independently verifiable by**: entering from the canonical reference on a clean machine and asserting the started session's granted reach against the execution substrate and the leak registry.
 
 1. **Given** a machine with none of the author's dotfiles and no prior agent state
    **When** the stranger enters the environment from this repository's canonical published reference and starts an agent
    **Then** the agent starts
-   **And** the session's granted filesystem reach consists only of the project directory and paths in the leak registry.
+   **And** the session's granted filesystem reach consists only of the project directory, the session's own execution substrate, and paths in the leak registry.
 
 ### Journey 2 — Agent state stays in the project (P1)
 
@@ -140,7 +141,7 @@ Signing is the second step's subject, and it is this journey's failure mode rath
    **When** the verification command runs unattended on a clean machine for each supported platform
    **Then** it exits zero
    **And** its exit status alone separates a passing commit from a failing one
-   **And** the expected reach it compares against is derived from the leak registry rather than restated inside the check.
+   **And** the expected reach it compares against is derived from the execution substrate and the leak registry rather than restated inside the check.
 
 ### Journey 8 — The consumer's own extensions come with them (P2)
 
@@ -263,8 +264,8 @@ The distinction it rests on is what the host file *does*. An authoring surface i
 ## Requirements
 
 - **FR-1** The environment MUST provide confined sessions for `claude-code`, `opencode` and `pi`. All three are required, and `claude-code` is the reference case — not because it is the easiest, but because the other two obtain their credential from it, so nothing about FR-6 or FR-7 can be demonstrated until it works. That ordering front-loads the risk rather than deferring it: `claude-code` is also the agent whose configuration root is least certain to relocate, and building the credential story on an agent whose state is still escaping would be building twice.
-- **FR-2** A confined session's granted filesystem reach MUST be the project directory plus leak-registry entries, and nothing else. That is the reach with no override in force, which is what a stranger gets and what the checks assert; FR-15 is the only thing that widens it, and FR-25 the only widening this feature ships.
-- **FR-3** The leak registry MUST be a single file. Every entry states why the path is granted and why a narrower grant does not work. It carries no expiry mechanism. An entry is admissible only where the tool structurally cannot be directed elsewhere; convenience is never a justification.
+- **FR-2** A confined session's granted filesystem reach MUST be the project directory, the session's own execution substrate, and leak-registry entries, and nothing else. The substrate is a category of its own rather than a registry entry because it is not a leak: it is the programs the session runs, derived from the session's own definition, immutable, and reviewable as a single artefact. It MUST be derived rather than written down, so that adding a tool to the session adds it to the substrate and nothing else does, and it MUST NOT be granted by way of any ancestor that would also grant what the session does not run. That is the reach with no override in force, which is what a stranger gets and what the checks assert; FR-15 is the only thing that widens it, and FR-25 the only widening this feature ships.
+- **FR-3** The leak registry MUST be a single file. Every entry states why the path is granted and why a narrower grant does not work. It carries no expiry mechanism. An entry is admissible only where the tool structurally cannot be directed elsewhere; convenience is never a justification. The execution substrate is not admissible as an entry: an entry owes a justification a human writes and reviews, and the substrate is derived from what the session runs, so entries for it would be neither reviewable nor stable. An empty registry is the healthy state, not a sign the file is unused.
 - **FR-4** Agent state MUST be written inside the project directory. Where an agent cannot be directed to do so, its state path MUST be a registry entry under FR-3.
 - **FR-5** A confined session MUST NOT inherit host environment variables carrying provider credentials.
 - **FR-6** No credential material readable from inside a confined session MUST authenticate from outside the boundary. This constrains the outcome, not the mechanism: an agent that authenticates by token flow and an agent that authenticates by key in its environment may satisfy it differently.
@@ -297,7 +298,7 @@ The change honours [docs/CONSTITUTION.md](../../docs/CONSTITUTION.md), and the p
 
 ## Success criteria
 
-- **SC-1** For every agent shipped, with no override in force, every granted filesystem path resolves under the project directory or matches a leak-registry entry. The property holds as agents are added, without editing the check.
+- **SC-1** For every agent shipped, with no override in force, every granted filesystem path resolves under the project directory, belongs to that session's execution substrate, or matches a leak-registry entry. The substrate half is an equality rather than a containment, so a grant wider than what the session runs fails even though every path in it is a substrate path. The property holds as agents are added, without editing the check.
 - **SC-2** The registry is countable in one place, every entry carries a justification, and no entry rests on convenience, so erosion is visible in review rather than discovered later.
 - **SC-3** Every scenario here maps to exactly one executable check, and every check maps back to a scenario.
 - **SC-4** The verification command's exit status is sufficient to accept or reject a commit; no human reads its output to decide.
@@ -382,7 +383,7 @@ Three that were on this list have been confirmed and moved above: that every age
 
 1. **Confinement is unavailable and the failure is quiet.** A user on an old kernel or inside a constrained container could get an open agent while believing otherwise — the worst outcome in this spec. *Mitigation*: FR-10 and R6 make it a hard, named, `77`-exiting failure, checked executably rather than asserted in a comment.
 
-1. **The registry grows until isolation is nominal.** Every unpredicted path is easiest to fix by granting it. *Mitigation*: SC-2 makes the list countable and every entry justified, and FR-3 bounds it by kind rather than by count — a path qualifies only where the tool structurally cannot be directed elsewhere. A count would be arbitrary and would invite spending the budget; the kind test is reviewable on each diff. Today exactly one entry meets it, the mechanism's own supervisory state, and that one is structural.
+1. **The registry grows until isolation is nominal.** Every unpredicted path is easiest to fix by granting it. *Mitigation*: SC-2 makes the list countable and every entry justified, and FR-3 bounds it by kind rather than by count — a path qualifies only where the tool structurally cannot be directed elsewhere. A count would be arbitrary and would invite spending the budget; the kind test is reviewable on each diff. Today no entry meets it: the one candidate the feature found, the execution substrate, turned out not to be a leak at all and became a category of its own under FR-2, and the mechanism's own supervisory state is an accepted leak the registry cannot express because the mechanism refuses to grant it. An empty registry is therefore the expected state, and the risk this records is a path being written into it that a redirection would have handled.
 
 1. **Substitutes are evicted after long disuse.** The substitution store has retention and capacity limits, so a user returning after months sees an authentication failure. *Mitigation*: FR-16 and R8. The store is not ours, so the requirement is that the *outcome* be distinguishable; we cannot demand a particular error shape from upstream.
 

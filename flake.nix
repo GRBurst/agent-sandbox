@@ -54,9 +54,78 @@
         let
           pkgs = import nixpkgs { inherit system; };
           agentPkgs = llm-agents.packages.${system};
+          inherit (pkgs.stdenv.hostPlatform) isLinux;
+
+          # M4c criterion 1. One list, used both as the devShell's packages and
+          # as the closure roots the session is granted, so the PATH a session
+          # runs with and the substrate it may read are the same expression and
+          # cannot drift. Roots are package attributes rather than restated
+          # outputs: PATH carries jq's `bin` output while `jq^out` is a different
+          # store path, and naming the wrong one denies a tool the session can
+          # see.
+          #
+          # strace is here because the integration layer observes denials with
+          # it, and AGENTS.md §3 means a check may not depend on the host having
+          # it. Linux only, so devShells.aarch64-darwin.default keeps evaluating.
+          sessionTools =
+            (with pkgs; [
+              just
+              jq
+              yq-go
+              yamlfmt
+              yamllint
+              mdformat
+              nixfmt
+              bash
+              # AGENTS.md's format-and-lint table names both, and until now they
+              # resolved only from a user profile, which under §3 means the lint
+              # step was not reproducible for anyone else.
+              shellcheck
+              shfmt
+              # The agent's Bash tool reaches for git before anything else, and
+              # until M4c it resolved from the host user profile or not at all.
+              git
+            ])
+            ++ lib.optionals isLinux [ pkgs.strace ];
+
+          # M4c criterion 3. glibc's compiled-in default archive lives at
+          # /run/current-system/sw/lib/locale/locale-archive, outside the store
+          # and outside every grant, and M3c watched a session fail on it after
+          # the closure grant was otherwise complete. Setting the variable
+          # without granting what it names only moves the denial, so the archive
+          # is a closure root as well as a value. glibcLocalesUtf8 (2 MiB) rather
+          # than glibcLocales (222 MiB): the session needs UTF-8, not every
+          # locale on earth.
+          localeRoots = lib.optionals isLinux [ pkgs.glibcLocalesUtf8 ];
+          substrateVars = lib.optionalAttrs isLinux {
+            LOCALE_ARCHIVE = "${pkgs.glibcLocalesUtf8}/lib/locale/locale-archive";
+          };
+
+          # The reach a session needs in order to execute at all, derived rather
+          # than declared. Exposed as its own output so a check reads the closure
+          # from a built path instead of importing a derivation during
+          # evaluation.
+          #
+          # nono is deliberately not a root. The supervisor runs outside the
+          # sandbox it builds, so a session that cannot read it is a session that
+          # cannot re-enter the mechanism, which is R4 reinforced by absence
+          # rather than argued. The entry points are absent for the same reason:
+          # M4c measured a confined agent unable to start a second one.
+          substrateFor =
+            name:
+            pkgs.closureInfo {
+              rootPaths = sessionTools ++ localeRoots ++ [ (agents.${name}.package agentPkgs) ];
+            };
+
           mkConfinement = import ./lib/confinement.nix {
-            inherit lib pkgs agents;
+            inherit
+              lib
+              pkgs
+              agents
+              substrateVars
+              ;
             registry = leakRegistry;
+            substrate = substrateFor;
           };
           mkEntryPoint = import ./lib/confined-agent.nix {
             inherit pkgs agentPkgs agents;
@@ -64,7 +133,13 @@
           };
         in
         {
-          inherit pkgs agentPkgs mkConfinement;
+          inherit
+            pkgs
+            agentPkgs
+            mkConfinement
+            sessionTools
+            substrateFor
+            ;
 
           # Keyed by the derivation's own name, which writeShellApplication took
           # from the agent's `meta.mainProgram`. `nix build .#claude` and the
@@ -98,6 +173,11 @@
         # artefact a human is meant to be able to read: `nix build .#confinement-…`
         # then `jq . result` is the whole review, with no session involved.
         lib.mapAttrs' (name: _: lib.nameValuePair "confinement-${name}" (s.mkConfinement name)) agents
+        # One substrate per agent, for the same reason: `nix build
+        # .#substrate-claude-code` then `cat result/store-paths` is how a human
+        # reads what a session may execute, and how a check reads it without
+        # importing a derivation during evaluation.
+        // lib.mapAttrs' (name: _: lib.nameValuePair "substrate-${name}" (s.substrateFor name)) agents
         # One entry point per agent, under the agent's own command name.
         // s.entryPoints
         # The pinned mechanism, so a check can invoke the nono this environment
@@ -117,21 +197,12 @@
         {
           default = s.pkgs.mkShell {
             packages =
-              (with s.pkgs; [
-                just
-                jq
-                yq-go
-                yamlfmt
-                yamllint
-                mdformat
-                nixfmt
-                bash
-                # AGENTS.md's format-and-lint table names both, and until now they
-                # resolved only from a user profile, which under §3 means the lint step
-                # was not reproducible for anyone else.
-                shellcheck
-                shfmt
-              ])
+              # The same list the substrate is derived from (M4c), so every tool
+              # a session finds on PATH is one the session was granted. Two
+              # things below are on PATH and deliberately not granted: the
+              # mechanism and the entry points. A session that could read either
+              # could try to re-enter the mechanism, and R4 says it must not.
+              s.sessionTools
               # The mechanism, so `nono profile show` in a review reads the same
               # version the entry points enforce with.
               ++ [ s.agentPkgs.nono ]
