@@ -665,7 +665,9 @@ Evaluated as `packages.<system>.<attr>`, both systems, at `5aad5f64…`. `M1f`'s
 | `opencode` | 1.18.18 | `true` | MIT License |
 | `pi` | 0.84.2 | `true` | MIT License |
 
-Identical on `x86_64-linux` and `aarch64-darwin`, as `M1f` found. **`M1f`'s `allowUnfree` reasoning is still live**: `claude-code` carries `fullName = "Unfree"` beside `free = true`, so the gate never fires at this revision either, and setting `allowUnfree` explicitly remains the thing that keeps the environment honest rather than lucky.
+Identical on `x86_64-linux` and `aarch64-darwin`, as `M1f` found.
+
+**`M1f`'s `allowUnfree` reasoning is dead, and implementing `M4b` is what killed it.** `claude-code` carries `fullName = "Unfree"` beside `free = true`, so the unfree gate never fires: `nix build` of it succeeds in pure mode with `allowUnfree` set nowhere. There is no permission to scope, and no way to scope one either — these packages are instantiated by the input against *its* nixpkgs, so setting `config.allowUnfree` would mean importing our own nixpkgs with the input's `shared-nixpkgs` overlay and taking `pkgs.llm-agents.claude-code` instead. That is a different derivation from the one `cache.numtide.com` holds, so the price of the gesture is compiling everything from source. It is the `follows` argument a second time: the honest environment is the one that takes the binary the publisher published.
 
 ### Precondition 1 — `XDG_DATA_HOME` is set nowhere, and nix needs it
 
@@ -710,3 +712,47 @@ PASS  check_r6
 All four pass against `0.74.0` with no edit to any check. That is the dividend of AGENTS.md §4's rule about deriving expected values from the system under test: the floor is computed by stripping the description under test rather than listed, the `set_vars` expectation is applied from the agent table rather than restated, and the store grant comes from the registry rather than a literal — so a version bump moves the baseline instead of breaking the suite.
 
 The consequence for `M4b` is a criterion, not a note: the checks must invoke the **pinned** nono, or the suite keeps testing a binary a stranger does not have while reporting green.
+
+### What a session grants is readable, and it is not the banner
+
+`check_j1_1` needs the *set* of paths a real session reached. Three candidates were compared, and only the third is usable.
+
+| Candidate | Why not |
+| --- | --- |
+| The startup banner on stderr | Collapses the floor to `+ 34 system/group paths (-v to show)`. A summary for a human, not a set. |
+| `nono profile show --format manifest` | Describes the resolution, not the session. It reported the project `readwrite` for a run that reached only `/nix/store` — see below. |
+| `$XDG_STATE_HOME/nono/audit/<session>/session.json` | `.tracked_paths`, written per session beside `.command`, `.exit_code` and `.executable_identity`. |
+
+`tracked_paths` was probed against every way a path can be widened, each arm with a fresh state root:
+
+| Session | `tracked_paths` |
+| --- | --- |
+| `--workdir $PWD`, no `--allow-cwd` | `["/nix/store"]` |
+| `--workdir $PWD --allow-cwd` | `[project, "/nix/store"]` |
+| `.filesystem.read += ["/etc/nixos"]` | `[project, "/etc/nixos", "/nix/store"]` |
+| `.filesystem.allow += ["/etc/nixos"]` | `[project, "/etc/nixos", "/nix/store"]` |
+| `--read /etc/nixos` on the stock description | `[project, "/etc/nixos", "/nix/store"]` |
+
+So it responds to a widening from the description, from the CLI and from the working-directory consent alike, and it excludes the floor. It is `granted ∖ floor` — exactly the left-hand side of the property `plan.md` states for `SC-1`, now observable on a live session rather than only on a resolution. It is unordered, so it has to be sorted before comparison.
+
+### `--allow-cwd` is the consent, `workdir.access` is only the level
+
+`nono run --help`: `--allow-cwd` is "Allow CWD access without prompting (level set by profile, defaults to read-only)". Without it a non-interactive session prints `Skipping CWD prompt (non-interactive). Use --allow-cwd to include working directory.` and **the project is not granted at all** — a confined `: > .tmp/probe` leaves no file. The description's `workdir.access = "readwrite"` decides what the consent is worth, not whether it was given.
+
+The resolved manifest reports `readwrite <project>` either way, so **the manifest cannot detect this**. That is the concrete reason `check_j1_1` reads a session rather than a resolution, and it corrects the reason `M4a` recorded for the pre-flight passing no `--allow-cwd` — the pre-flight is right to omit it because it writes nothing inside the project, not because `workdir.access` already covers it.
+
+### The RED arrived by the wrong route, and the route is the finding
+
+`M4b`'s criterion predicted `claude: command not found`. Instead the first run of `check_j1_1` exited **0** and failed with `expected exactly one confined claude session, found 0`: this host carries `claude` *and* `nono` in `/etc/profiles/per-user/pallon/bin`, and `nix develop` keeps the host `PATH`, so the unconfined host binary answered to the name.
+
+M4b's own planted violation therefore occurred unbidden, before the code that was supposed to prevent it existed. Two consequences, both load-bearing rather than incidental:
+
+- `D3`'s shadowing is not a convenience. On a machine that has the agent installed, the confined wrapper must come first on `PATH` or the environment silently runs the host's copy.
+- The same is true of `nono`, which is why the suite resolves it from the flake. Sabotaging a `nono` on `PATH` (`exit 3`) leaves all five component and integration checks green *with* the pinning, and fails three component checks plus `check_r6` *without* it.
+
+### Method notes
+
+- `mktemp -d TEMPLATE` ignores `TMPDIR` and creates a **relative** directory in the current directory; only `mktemp -d -p DIR TEMPLATE` places it. The relative path then reached nono as `HOME`, which refused it: `Environment variable 'HOME' validation failed: must be an absolute path`.
+- A flake in a dirty tree cannot see an untracked file: `error: Path 'lib/confined-agent.nix' … is not tracked by Git`. `git add -N` is enough.
+- `$XDG_STATE_HOME` must stay outside the project, or nono refuses to start: `Refusing to grant '<project>' … because it overlaps protected nono state root`. The integration layer's four conditions, recorded in `M3c`, all still hold under `0.74.0`.
+- The devShell has to carry `shellcheck` and `shfmt` itself. `AGENTS.md` §4 names both, and until now they resolved only from a user profile — the same class of mistake as the host `nono`.

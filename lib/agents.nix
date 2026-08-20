@@ -9,16 +9,31 @@
 # where the checks that observe them live; adding them now would be asserting
 # nothing about two agents while appearing to support them.
 #
-# Each entry carries only what some check already exercises. `package` and
-# `binary` arrive with M4, which builds the entry point that runs them, and
-# `credential` with M7, which asserts the credential's shape. The alternative is
-# a table whose fields nothing reads, which is how a table starts lying.
+# Each entry carries only what some check already exercises. `credential`
+# arrives with M7, which asserts the credential's shape. The alternative is a
+# table whose fields nothing reads, which is how a table starts lying.
+#
+# There is no `binary` field. plan.md sketched one, but the package already
+# states its command name in `meta.mainProgram` — `claude`, `nono`, `opencode`,
+# `pi` — and a second copy here would be a thing to keep true for no assertion's
+# sake. lib/confined-agent.nix reads it from the package it is about to run, so
+# the name the entry point shadows cannot disagree with the binary it execs.
 { lib }:
 let
   inherit (lib) types mkOption;
 
   entryType = types.submodule {
     options = {
+      package = mkOption {
+        type = types.functionTo types.package;
+        description = ''
+          The agent, as a function of llm-agents.nix's package set for the
+          system being built. A function rather than a value because this table
+          is system-independent and that set is not; taken from that one input
+          because FR-1's agents and the mechanism that confines them come from
+          the same pin, so an upgrade moves them together.
+        '';
+      };
       groups = mkOption {
         type = types.listOf types.str;
         description = ''
@@ -52,6 +67,15 @@ in
 lib.mapAttrs (_: checkAgent) {
 
   claude-code = {
+    # M4b checked the license gate before scoping `allowUnfree` to this package
+    # as planned, and there is no gate: the input's claude-code carries
+    # `meta.license.fullName = "Unfree"` with `free = true`, so `nix build`
+    # succeeds in pure evaluation with allowUnfree set nowhere. Instantiating a
+    # second nixpkgs to grant that permission would grant it for nothing and
+    # lose cache.numtide.com along with it, which is the `follows` argument
+    # again.
+    package = agentPkgs: agentPkgs.claude-code;
+
     # No group at all, per D15. The store is absent from the confinement floor
     # and a session without it cannot execute the agent — M1g observed the child
     # exit 127 with nono reporting the binary readable but unexecutable — but

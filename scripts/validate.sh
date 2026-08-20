@@ -32,6 +32,27 @@ fail() {
 	return 1
 }
 
+# The bin directory of a pinned flake output, for checks that must run the
+# version this repository ships rather than the one PATH happens to offer.
+# AGENTS.md §3: a tool that resolves only because it is in the developer's user
+# profile is not available to a stranger. M4b found the developing host
+# carrying both `nono` and `claude` in a user profile, one of them a different
+# version from the pin, so this is not hypothetical.
+#
+# Resolved on demand, not up front, because the unit layer is defined to need
+# no build. Memoised per check, which is as far as it can reach: run_check
+# evaluates each check in a command substitution, so the cache dies with it.
+declare -A PINNED_BIN=()
+pinned_bin() {
+	local attr=$1 out
+	if [ -z "${PINNED_BIN[$attr]:-}" ]; then
+		out=$(nix build --no-link --print-out-paths "$REPO_ROOT#$attr") ||
+			die "cannot build the pinned $attr"
+		PINNED_BIN[$attr]="$out/bin"
+	fi
+	printf '%s\n' "${PINNED_BIN[$attr]}"
+}
+
 usage() {
 	cat <<'EOF'
 usage: validate.sh [--layer unit|component|integration|e2e] [--list]

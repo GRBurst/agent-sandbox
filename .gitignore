@@ -12,6 +12,14 @@ target/
 /.docker/
 .envrc.local
 
+# XDG_DATA_HOME. nix writes its trusted-settings answer here, and insists on
+# reading the file before it will evaluate any flake declaring nixConfig, so a
+# sandbox that denies $HOME needs this pointed inside the project (M4b).
+/.local/
+
+# nono's own root under XDG_CONFIG_HOME, which holds state rather than config.
+/.config/nono/
+
 # Agent state, one directory per agent, written inside the project so that it
 # belongs to this project and no other.
 /.agents/

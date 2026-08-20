@@ -34,12 +34,57 @@ From a ref rather than a checkout, which is how a consumer will use it:
 nix develop github:HivemindTechnologies/sandbox-examples
 ```
 
-That path is **untested and currently limited to `x86_64-linux`**, because the flake hardcodes a single system.
+That path is **untested**.
+The flake declares `x86_64-linux` and `aarch64-darwin`, which are the two systems for which the agents exist upstream, but only the first has been entered.
 See [Known drift](#known-drift).
 
 There is no devenv path.
 `devenv.nix` and `devenv.yaml` generated a devcontainer whose bind mounts were the leak the first spec exists to remove, and both are deleted.
 Confinement now happens on the host, so the flake is the only way in.
+
+### Where the agents come from
+
+`nono`, `claude-code`, `opencode` and `pi` all come from [numtide/llm-agents.nix](https://github.com/numtide/llm-agents.nix), pinned to a revision.
+Nothing about them is packaged here, and nothing about them is taken from `nixpkgs`.
+
+Those binaries are published to `https://cache.numtide.com`, which `flake.nix` names in a `nixConfig` block.
+**Nix ignores that block unless you are a trusted user**, and prints this on every command instead:
+
+```text
+warning: ignoring untrusted flake configuration setting 'extra-substituters'.
+Pass '--accept-flake-config' to trust it
+```
+
+The warning is not fatal, and it is not cosmetic either.
+Ignored, the substituter is unreachable, so `nono` and the agents are **built from source** rather than copied — minutes of compilation instead of the seven seconds the copy takes.
+The `nixConfig` block is therefore a *record* of where the binaries come from, which travels with the flake and is readable by whoever has to decide whether to trust it.
+Three ways to actually reach the cache, strongest first:
+
+```sh
+# 1. Once per machine, in /etc/nix/nix.conf — then every flake you consume is trusted by you.
+#    trusted-users = root <your-user>
+# 2. Per command, having read the block and decided it is fine.
+nix develop --accept-flake-config
+# 3. Per machine, naming this one substituter rather than trusting the flake wholesale, in /etc/nix/nix.conf.
+#    extra-substituters = https://cache.numtide.com
+#    extra-trusted-public-keys = niks3.numtide.com-1:DTx8wZduET09hRmMtKdQDxNNthLQETkc/yaX7M4qK0g=
+```
+
+A flake that declares `nixConfig` also makes `XDG_DATA_HOME` load-bearing: before evaluating one, nix reads `$XDG_DATA_HOME/nix/trusted-settings.json` to recall what you last answered.
+Where `$HOME` is denied — which is the whole point of the sandbox this repository is developed in — that read fails and **every** `nix` command dies with `Permission denied`.
+That is why `XDG_DATA_HOME` is in the bootstrap and not only in the `shellHook`.
+
+### Starting an agent
+
+Inside the environment, the agent is on `PATH` under its own name and is already confined:
+
+```sh
+claude --version             # runs under nono, confined to this project
+type claude                 # a wrapper in the store, not the upstream binary
+```
+
+The wrapper is the only entry point; the unconfined binary is reachable only by store path.
+If the host cannot enforce confinement the wrapper refuses to start the agent and exits 77, rather than running it unconfined.
 
 ## What the environment guarantees
 
@@ -51,6 +96,8 @@ Every tool that would otherwise write into `$HOME` is pointed inside the checkou
 | `TMPDIR` | `$PWD/.tmp` | `/tmp` |
 | `TMPPREFIX` | `$PWD/.tmp/zsh` | `/tmp/zsh*`, where zsh puts heredoc bodies |
 | `XDG_CACHE_HOME` | `$PWD/.cache` | `~/.cache` |
+| `XDG_DATA_HOME` | `$PWD/.local/share` | `~/.local/share` |
+| `XDG_CONFIG_HOME` | `$PWD/.config` | `~/.config` |
 | `npm_config_cache` | `$PWD/.cache/npm` | `~/.npm` |
 | `NPM_CONFIG_USERCONFIG` | `$PWD/.npmrc` | `~/.npmrc` |
 | `DOCKER_CONFIG` | `$PWD/.docker` | `~/.docker` |
@@ -59,9 +106,12 @@ Every tool that would otherwise write into `$HOME` is pointed inside the checkou
 `TMPPREFIX` is not redundant.
 zsh writes heredoc bodies to `$TMPPREFIX*` rather than to `$TMPDIR`, so a stale value fails every heredoc with `can't create temp file for here document` while `$TMPDIR` still looks correct.
 
+`XDG_CONFIG_HOME` has to **exist**, not merely be set.
+`nono` falls back to the host's `~/.config` when the directory it names is absent, silently, so the `shellHook` and the agent wrapper both create it before anything reads it.
+
 **The bootstrap is the one exception.**
-`.envrc` exports `TMPDIR` and `XDG_CACHE_HOME` *before* `use flake`, because nix needs them to read the flake at all.
-Those two values are duplicated on purpose, and the two files have to resolve them to the same paths.
+`.envrc` exports `TMPDIR`, `XDG_CACHE_HOME` and `XDG_DATA_HOME` *before* `use flake`, because nix needs all three to read the flake at all.
+Those three values are duplicated on purpose, and the two files have to resolve them to the same paths.
 Byte-identical source text is the wrong criterion, because nix's indented strings escape where a shell does not; `check_bootstrap_mirror` evaluates both and compares the resolved values.
 
 **There is one accepted leak.**
@@ -92,7 +142,8 @@ Run it with `bash`, not `zsh` — `${!v}` is bash's indirect expansion.
 bash scripts/validate.sh             # the single entry point; every check, every layer
 bash scripts/validate.sh --list      # name the checks without running them
 bash scripts/validate.sh --layer unit  # one layer only
-nix flake check                      # evaluates the devShell
+nix flake check                      # evaluates the devShell for this system
+nix flake check --all-systems        # and for the other one, which needs a remote builder to go further
 nixfmt flake.nix lib/*.nix           # format the nix
 mdformat AGENTS.md docs specs        # format the markdown
 shellcheck scripts/validate.sh scripts/checks/*.sh   # lint the shell
@@ -109,12 +160,13 @@ It is the natural input to the first spec.
 
 **Portability.**
 
-- `flake.nix` hardcodes `system = "x86_64-linux"`, so consuming it from a ref fails on anything else.
+- `aarch64-darwin` is declared and evaluates, but has never been entered, and macOS confinement is enforced by a different mechanism from Landlock. Nothing here has measured how strong it is.
+- Consuming from a ref is not exercised by any check yet, so the environment is only known to work from a checkout. The e2e layer is empty.
 
 **Isolation.**
 
-- No check enforces any isolation claim, so under Constitution **P2** none of them is yet believable.
-  `check_r7`, `check_bootstrap_mirror` and `check_registry` assert the environment's shape, not its boundary; the first check that observes confinement arrives with the integration layer.
+- Confinement is now observed rather than asserted: `check_r6` proves the pre-flight refuses a host that cannot enforce it, and `check_j1_1` compares a real session's granted reach against the leak registry. The remaining claims — credentials, history, cross-project state — have no check yet.
+- The leak registry still grants all of `/nix/store`. Narrowing it to the closure the agent actually needs is its own task.
 
 **Orphans and small things.**
 

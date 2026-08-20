@@ -12,11 +12,14 @@
 # whatever profiles and packs the developing machine happens to carry, so every
 # nono invocation in this layer runs against a directory this function creates.
 # NONO_NO_UPDATE_CHECK stops the network call M1e found on almost any invocation.
+# The resolver is the pinned one, because a resolution is only evidence about
+# the version this repository ships: the developing host offered 0.73.0 from a
+# user profile against the flake's 0.74.0.
 nono_hermetic() {
 	local cfg=$1
 	shift
 	mkdir -p "$cfg"
-	env NONO_NO_UPDATE_CHECK=1 XDG_CONFIG_HOME="$cfg" nono "$@"
+	env NONO_NO_UPDATE_CHECK=1 XDG_CONFIG_HOME="$cfg" "$(pinned_bin nono)/nono" "$@"
 }
 
 # The profile is a derivation, so it is realised rather than read. Building it is

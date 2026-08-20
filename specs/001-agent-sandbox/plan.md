@@ -350,14 +350,19 @@ Note the Landlock constraint: granting `$WORKDIR` recursively is safe only becau
 ### `lib/confined-agent.nix`
 
 ```nix
-# mkConfinedAgent ∷ name → writeShellApplication, /bin/${a.binary}
-{ pkgs, agents, confinement }:
+# mkConfinedAgent ∷ name → writeShellApplication, /bin/${binary}
+{ pkgs, agentPkgs, agents, confinement }:
 name:
-let a = agents.${name}; in
+let
+  agent = agents.${name}.package agentPkgs;
+  binary = agent.meta.mainProgram;              # D3: shadows the agent name
+in
 pkgs.writeShellApplication {
-  name = a.binary;                              # D3: shadows the agent name
-  runtimeInputs = [ pkgs.nono (a.package pkgs) ];
+  name = binary;
+  runtimeInputs = [ agentPkgs.nono ];
   text = ''
+    mkdir -p "''${XDG_CONFIG_HOME:?…}"          # M1e: absent ⇒ nono falls back to ~/.config
+    export NONO_NO_UPDATE_CHECK=1
     PREFLIGHT_PROFILE=${confinement name}
     ${builtins.readFile ../lib/preflight.sh}
     preflight_or_die
@@ -365,12 +370,16 @@ pkgs.writeShellApplication {
       --profile ${confinement name} \
       --workdir "$PWD" \
       --allow-cwd \
-      -- ${a.package pkgs}/bin/${a.binary} "$@"
+      -- ${agent}/bin/${binary} "$@"
   '';
 }
 ```
 
 There is no `preflightProfile` parameter. `M4a` found that the pre-flight asserts a property of the *host*, so the profile it tests under may as well be the one the agent is about to run under: a second description whose only consumer is the pre-flight would be another artefact to keep true, and P4 wants no option nothing else exercises. The wrapper therefore sets `PREFLIGHT_PROFILE` to the same store path it passes to `exec`.
+
+There is no `binary` field on the agent either, and no `pkgs`-shaped `package`. Both were in this sketch and `M4b` removed them. `meta.mainProgram` already names the command, so reading it off the package about to be run leaves nothing to drift; and the packages come from llm-agents.nix's own set for the system, so `package` is a function of *that* rather than of `pkgs`, which is also what keeps them the derivations the publisher's cache holds.
+
+`--allow-cwd` is not decoration. `M4b` measured that `workdir.access` in the description sets what the working-directory consent is *worth*, while the flag is the consent: without it a non-interactive session is granted no part of the project at all, and — worse for anyone debugging it — the resolved manifest still says `readwrite`.
 
 ### The pre-flight (`lib/preflight.sh`)
 
@@ -490,7 +499,7 @@ check_sc1() {
 - **Consumers affected**: none exist yet. The devcontainer path disappears; `docs/HANDBOOK.md` currently documents it as unverified, so nothing verified is withdrawn.
 - **Inputs added or bumped**: `nixpkgs` re-locked. A pinned `numtide/llm-agents.nix` input is added — `M1f` found `pi` absent from nixpkgs entirely, which was the condition. It is the **sole** source of `nono`, `claude-code`, `opencode` and `pi`, both in the environment a human enters and in every check, so that one pin describes what is verified and what is shipped. Its `nixConfig` is not inherited by a consumer of this flake, so `https://cache.numtide.com` and its key `niks3.numtide.com-1:DTx8wZduET09hRmMtKdQDxNNthLQETkc/yaX7M4qK0g=` are declared here as well and passed explicitly in CI; without that, a clean machine builds every one of them from source.
 - **Tools added to the environment**: `nono` (the mechanism), `shellcheck` + `shfmt` (AGENTS.md names them; added to the devShell in `M3a`, having resolved only from a user profile until then), `jq` (checks parse JSON; P9 requires generated JSON be validated rather than eyeballed).
-- **Docs to update at close-out**: `docs/HANDBOOK.md` — the Known drift entries for the Kafka leftovers, the four devcontainer bind mounts, the orphaned `ai.nix`, the stray `^`, the missing `scripts/validate.sh` and the absent `shellcheck`/`shfmt` were each retired by the task that falsified them, since a drift entry about code that no longer exists is fiction; what remains for close-out is the `x86_64-linux` hardcoding, the missing `README.md`, the isolation entry, and adding the accepted-leak entry for `$XDG_STATE_HOME/nono` and the coverage gap. `README.md` — new. `AGENTS.md` — the "no CD pipeline" sentence gains "non-deploying CI is permitted". `docs/CONSTITUTION.md` — P1's accepted-leak list gains its second entry.
+- **Docs to update at close-out**: `docs/HANDBOOK.md` — the Known drift entries for the Kafka leftovers, the four devcontainer bind mounts, the orphaned `ai.nix`, the stray `^`, the missing `scripts/validate.sh` and the absent `shellcheck`/`shfmt` were each retired by the task that falsified them, since a drift entry about code that no longer exists is fiction; what remains for close-out is the missing `README.md` and adding the accepted-leak entry for `$XDG_STATE_HOME/nono` and the coverage gap. `README.md` — new. `AGENTS.md` — the "no CD pipeline" sentence gains "non-deploying CI is permitted". `docs/CONSTITUTION.md` — P1's accepted-leak list gains its second entry.
 
 ## Test strategy
 
@@ -526,7 +535,7 @@ Every row was audited against one question, after `check_j6_1` was twice written
 
 | Scenario | Check | Layer |
 | --- | --- | --- |
-| Journey 1.1 | `check_j1_1` — enter from the ref into a clean `$HOME`, start `claude`, compare granted reach to registry. Discriminating because the observable is a *set*, not a verdict: with confinement removed there is no manifest to read at all | e2e |
+| Journey 1.1 | `check_j1_1` — enter from the ref into a clean `$HOME`, start `claude`, compare the session's `tracked_paths` to `{project} ∪ registry`. Discriminating because the observable is a *set*, not a verdict: with confinement removed the agent writes no session record, so there is nothing to compare. Read from the session rather than from the resolved manifest, because the manifest reports the project `readwrite` even for a session that was granted none of it | e2e |
 | Journey 2.1 | `check_j2_1` — snapshot `$HOME`, run a session that writes history, diff, subtract registry, assert empty. **Control**: the same session's writes are found under `$WORKDIR/.agents`, so "nothing landed in `$HOME`" cannot be satisfied by a session that wrote nothing anywhere | integration |
 | Journey 3.1 | `check_j3_1` — two checkouts, two **concurrent** sessions, write in one, assert the other unchanged. **Control**: the write is confirmed present in its own checkout | integration |
 | Journey 4.1 | `check_j4_1` — assert every readable credential value matches the substitute form (mock credentials). **Control**: the real value is asserted present in the supervisor's store outside the boundary, so "the agent holds a substitute" is not satisfied by there being no credential at all. Live rejection is a coverage gap | integration |
@@ -617,7 +626,8 @@ Mandatory per P2. Tick `Verified` only after seeing red, **and only after confir
 | `check_sc1` | Drop a path the session needs from the closure the substrate is derived from (`M4c`) | the trace carries an `EACCES` no probe asked for, naming the dropped path | [ ] |
 | `check_r5` | Make the wrapper read the in-checkout agent config when composing the description | the `$HOME` the checkout asked for appears in the resolved reach | [ ] |
 | `check_r8` | Collapse both failure paths onto one message in the wrapper | the two messages no longer differ | [ ] |
-| `check_j1_1` | Put the unconfined binary on `PATH` under the agent's own name | there is no manifest to read, so the reach comparison cannot be made | [ ] |
+| `check_j1_1` | Put the unconfined binary on `PATH` under the agent's own name | `expected exactly one confined claude session, found 0` — the session record the comparison reads does not exist, so the reach cannot be compared | [x] |
+| every check that runs `nono` | Resolve `nono` from `PATH` rather than from the flake, with a sabotaged `nono` (`exit 3`) first on `PATH` | the three component checks and `check_r6` fail, where with the pinning in place the sabotage is invisible to all of them | [x] |
 | `check_j1_1` | Consume the environment from the working tree rather than the pushed ref | the e2e arm passes against local state, so it must fail instead | [ ] |
 | `check_j4_1` | Expose the real credential value to the session instead of the substitute | a readable value does not match the substitute form | [ ] |
 | `check_j5_1` | Remove the `credential_routes` entry for the second agent | the agent that never authenticated is unauthenticated, so FR-7's across-agents axis fails | [ ] |
