@@ -486,7 +486,18 @@ Every task in this group is subject to [D9](plan.md#d9): a check whose observabl
 - [ ] Check written and seen to FAIL
 - [ ] Assertion covers both halves: the read fails **and** no key material appears in the output
 - [ ] **Control**: a file inside the project is read successfully in the same session, so a session that failed to start cannot pass
+- [ ] The fake `$HOME` lies **outside** the project, and the check says why rather than leaving it to look arbitrary
 - [ ] Violation planted (`$HOME/.ssh` in the registry), seen to FAIL, reverted, recorded in plan.md
+
+**Measured before starting, in `research.md` § `M5a`.** Four things the check can be written against rather than discovered by:
+
+The property already holds as shipped — one `bash -c` gave `READ_DENY` on `$HOME/.ssh/id_ed25519` and `READ_OK` on a file in the project, so the refusal, the absence of key material and `D9`'s control all come from a single invocation and need no instrument beyond the shell. `coreutils` is in the substrate, so `cat` is available too.
+
+The fake `$HOME` **must** be outside the project. The resolved description carries 48 `$HOME`-relative deny rules, so a `HOME` under the granted project makes nono refuse to start with `Landlock deny-overlap is not enforceable on Linux`. `mktemp -d -p "$XDG_RUNTIME_DIR"` is the route, as `check_j1_1` already does.
+
+The planted violation does bite, and it bites harder than expected. Granting exactly `$HOME/.ssh` reads the key material out, even though `deny_credentials` — a `required` group whose whole purpose is keeping credentials out — denies that path. So the required deny groups are **not** a backstop behind the leak registry, and this task is the only thing asserting `R1` at the kernel. [D4](plan.md#d4) is corrected accordingly.
+
+Granting an **ancestor** of a denied path refuses to start instead of narrowing quietly. A plant must therefore name the exact path, or it will fail for the wrong reason and prove nothing.
 
 ### M5b — A write outside the project is refused (Status: PENDING)
 
@@ -754,13 +765,15 @@ Shaped by `M1d`: relocation holds through the single variable `PI_CODING_AGENT_D
 
 **Scenario**: none — a spike. It exists because this feature has now been wrong three times about a location by reading rather than measuring, and FR-25 cannot be implemented against a guess.
 
-Only `opencode` is measured. At 1.18.18 it reads skills from six roots — `.opencode/skills`, `~/.config/opencode/skills`, `.claude/skills`, `~/.claude/skills`, `.agents/skills`, `~/.agents/skills` — resolves the project-relative three by walking up to the git worktree root, and dedups by skill name with the `~/.config` copy outranking the `~/.agents` one. `claude-code`'s and `pi`'s layouts are **unmeasured**: the session that went looking was itself confined and got `Permission denied` on `~/.claude`, `~/.config/pi` and `~/.pi`.
+**`opencode` is already measured, in [research.md](research.md) § `M8e`.** That section is a partial answer to this task's question, written when the requirement was drafted, and this spike starts from it rather than re-deriving it: the six skill roots and which are `$HOME`-relative, the two-arm differential that proved the blanket `XDG_CONFIG_HOME` hides the config root while `~/.agents` survives it, the `skills.paths` mechanism and the `OPENCODE_CONFIG_DIR` trap beside it, and the split of `~/.config/opencode` into a surface half and an executable half. What remains is `claude-code` and `pi`, whose layouts are **unmeasured** because the session that went looking was itself confined and got `Permission denied` on `~/.claude`, `~/.config/pi` and `~/.pi`.
+
+Do not trust an agent's own listing command alone for the two unmeasured ones. `opencode debug skill` reports what it *resolved*, so a root that was denied and a root that was empty look identical from outside — which is the mistake this spike exists to stop making.
 
 **Question**: for each of the three agents, which locations does it read declarative extensions from, which of those are `$HOME`-relative rather than XDG-derived, and what is the sanctioned way to name an additional root?
 
 - [ ] Every location enumerated per agent, by observation — the agent's own listing command where it has one, `strace -f -e trace=openat` where it does not
 - [ ] Each location classified: authoring surface (FR-25) or executable extension (FR-26). For `opencode` this splits `~/.config/opencode` rather than granting it, since the same directory holds `plugin/` and `node_modules/`
-- [ ] The redirection interaction recorded per location: which survive the blanket `XDG_CONFIG_HOME` ([C1](plan.md#complexity-tracking)) because they are `$HOME`-relative, since those are the ones that can arrive without being declared
+- [ ] The redirection interaction recorded per location: which survive the blanket `XDG_CONFIG_HOME` ([C1](plan.md#c1)) because they are `$HOME`-relative, since those are the ones that can arrive without being declared
 - [ ] For each agent, the mechanism that names an extra root, and whether it covers the whole surface. `opencode`'s `skills.paths` does for skills; `OPENCODE_CONFIG_DIR` does **not**, because the documented list is agents, commands, modes and plugins with skills absent — a mechanism that covers part of a surface while looking like it covers all of it is the failure mode here
 - [ ] Findings written to `research.md`, and [D17](plan.md#d17) corrected where they contradict it
 

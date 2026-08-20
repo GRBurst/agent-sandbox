@@ -1,10 +1,11 @@
 # Research — 001-agent-sandbox
 
-Findings from the `M1` spikes, and from the one `M3c` needed in order to state its criterion at all.
+Findings from the `M1` spikes, and from every later task that could not state a criterion without measuring something first.
 Each section records what was observed, against which artefact, so a later reader can re-run the observation rather than trust the conclusion.
+A section named after a `PENDING` task is a spike run ahead of it, and says so.
 
-Versions observed: `nono` 0.73.0, `claude-code` 2.1.233, `opencode` 1.18.18, `pi` 0.84.2, `codex` 0.146.0.
-`plan.md`'s Technical context says `nono` 0.71.0; the machine has 0.73.0.
+Versions observed: `nono` 0.73.0 for the `M1` sections and 0.74.0 from `M4b` onward, `claude-code` 2.1.233 then 2.1.237, `opencode` 1.18.18, `pi` 0.84.2, `codex` 0.146.0.
+The pinned toolchain arrived with `M4b`; everything before it was measured against whatever the host offered, which is recorded per section.
 
 ## M1b — Credential substitution per agent
 
@@ -831,3 +832,208 @@ The design this points to: one nix list, used twice — as the devShell's `packa
 - `nixpkgs#strace` prints the `-man` path first; `nixpkgs#strace^out` is required, or `env` reports `No such file or directory` with rc 127. The same trap as `M3c`'s `nixpkgs#bash`.
 - `strace` is Linux-only. `nix eval nixpkgs#legacyPackages.aarch64-darwin.strace.drvPath` refuses: `not available on the requested hostPlatform`. An unconditional `strace` in the devShell would stop `devShells.aarch64-darwin.default` evaluating, which `M4b` verified as working and the handbook now claims, so it must be `lib.optionals stdenv.hostPlatform.isLinux`.
 - The store figures move. `M3c` measured 61,799 paths and 211 `-source` trees; this session measures 67,051 and 251. Nothing should pin either number.
+
+### What the narrowing actually cost, measured after it landed
+
+The preconditions above answered "can the substrate be narrowed".
+These answer "did narrowing it change what the session may reach", and they are the observations `M4c`'s criteria were finally checked against.
+
+| arm | `.filesystem.read` | an out-of-closure `-source` tree |
+| --- | --- | --- |
+| the closure and `builtins.storeDir` together | 129 paths | `OPENDIR_OK` |
+| the closure alone | 128 paths | `OPENDIR_DENIED` |
+
+Landlock rules are allow-only, so an allow on an ancestor subsumes every path beneath it.
+Granting the store *beside* the enumerated closure therefore grants the whole store, and the enumeration is decorative.
+This is why the registry's entry had to be **deleted** rather than kept as an upper bound, which `M4c`'s criterion 6 permitted and this measurement ruled out.
+
+Two method traps cost a wrong conclusion on the way:
+
+- **`ls -d <path>` is not a probe.**
+  It only stats, and Landlock does not mediate `stat` or `lstat`.
+  Both arms reported the path present.
+  A probe must *open*: list a directory's contents, or read a file inside it.
+- **nono's floor does not grant the store.**
+  `nono profile show <floor> --format manifest` grants seven specific store *files* — `share/terminfo`, `hosts`, `etc-nsswitch.conf`, `etc/services`, `etc-os-release`, `locale.conf`, `gai.conf` — and never `/nix/store` itself.
+  Had it granted the store, the whole task would have been pointless, so this had to be ruled out before anything else.
+
+`strace` ptraces normally inside a confined session; nothing in the sandbox blocks it.
+Both arms of the final differential exit 0 printing `2.1.237 (Claude Code)`, record 59 `openat` lines each, and deny the same eleven `/sys` paths.
+So the narrowed substrate takes nothing away, and the assertion has to be an equality between the two arms rather than a count or a path list.
+
+`coreutils-9.11` **is** in the closure and granted, correcting the note above that the agent's own closure carries no `coreutils`: that was true of the 17-path agent closure, not of the 128-path session substrate.
+
+## M5a — A key outside the project is unreadable
+
+Measured on `x86_64-linux`, nono `0.74.0`, against the shipped `.#confinement-claude-code`, with `bash` resolved from the substrate itself.
+Every arm ran with `HOME` and `XDG_STATE_HOME` outside the project, `TMPDIR` inside it, and a pre-touched audit ledger.
+
+### The fake `$HOME` must be outside the project, and the reason generalises
+
+A `HOME` inside the checkout makes nono refuse to start:
+
+```text
+Sandbox initialization failed: Landlock deny-overlap is not enforceable on Linux.
+Refusing to start with conflicting policy.
+48 deny rule(s) cannot apply under an allowed parent directory.
+```
+
+The conflicts name `$HOME/.1password`, `$HOME/.aws`, `$HOME/.azure`, `$HOME/.bash_history`, … each `overlaps allowed parent '<project>' (source: user)`.
+The resolved description carries **48 `$HOME`-relative deny rules**, resolved from the ambient `HOME`, so any `HOME` under the granted project turns all of them into a refusal.
+A check that wants a fake home cannot put it in the project's own scratch directory; `mktemp -d -p "$XDG_RUNTIME_DIR"` is the route, and on this machine `XDG_RUNTIME_DIR` is itself under `$HOME`.
+
+### R1 already holds as shipped, and both halves are observable in one session
+
+One session, `bash -c` with three probes:
+
+| probe | result |
+| --- | --- |
+| `$(<$HOME/.ssh/id_ed25519)` | `READ_DENY`, bash reporting `Permission denied` |
+| `$(<$PROJECT/.tmp/inside.txt)` | `READ_OK :: PROJECT-FILE-CONTENT` |
+| `command -v cat` | `/nix/store/…-coreutils-9.11/bin/cat` |
+
+So `check_r1` needs no instrument beyond the shell: the refusal, the absence of key material in the output, and `D9`'s positive control all come from one invocation.
+
+### A deny the description carries does not outrank a grant of the same path
+
+Two arms differing only by one added entry in `filesystem.read`:
+
+| grant | `$HOME/.ssh/id_ed25519` | `$HOME/plain/secret.txt` |
+| --- | --- | --- |
+| `$HOME/.ssh` | `READ_OK :: PLANTED-KEY-MATERIAL` | `READ_DENY` |
+| `$HOME/plain` | `READ_DENY` | `READ_OK :: PLAIN-HOST-FILE` |
+
+In the granted arm the resolved manifest **still lists** `$HOME/.ssh` under `.filesystem.deny`, and lists it under `.filesystem.grants` as `read` at the same time.
+Both arms carry 48 denies.
+The deny entry has no `source` field, so the manifest cannot say where it came from.
+
+`nono profile groups --json` will not attribute it: each group's `deny` there is a summary object (`{"access": N, "commands": N, "unlink": bool}`), never a path list.
+The **per-group detail** does, and it is the instrument `check_component_merge` already uses — `nono profile groups <name>` prints `… -> /path` lines.
+Five groups are `required: true`, and they apply whether or not a description includes them, which is why a description with `groups = [ ]` still resolves to 48 denies:
+
+| required group | denied paths | denies `$HOME/.ssh` |
+| --- | --- | --- |
+| `deny_browser_data_linux` | 7 | no |
+| `deny_credentials` | 20 | **yes**, and `$HOME/.gnupg` |
+| `deny_keychains_linux` | 4 | no |
+| `deny_shell_configs` | 13 | no |
+| `deny_shell_history` | 4 | no |
+
+So the deny is `deny_credentials`', which is the strongest form the finding could take: the one group whose whole purpose is to keep credentials out, marked `required` so it cannot be omitted, is overridden by a description that names the exact path.
+
+The model this settles:
+
+- A deny is not a subtractive kernel rule.
+  Landlock is allow-only, so a deny is the **absence of a grant**, and the deny list is a record of what nono declines to grant on its own.
+- A grant **equal to** a denied path: nono starts, the grant takes effect, and the deny remains in the manifest as decoration.
+- A grant on an **ancestor** of denied paths: nono refuses to start, which is `D15`'s refusal rather than a quiet narrowing.
+
+Two consequences for the feature.
+`plan.md`'s [D4](plan.md#d4) claimed a group's deny "outranks any grant, which is why `deny_credentials` and the keychain groups are `required: true` and cannot be traded away" — they can be, by naming the exact path, so that sentence is corrected there.
+And the required deny groups are **not** a backstop behind the leak registry: `FR-3`'s strictness is the only thing between a session and `~/.ssh`.
+That is why `R1` has to be asserted from inside a live session rather than from a resolved description, and why `check_component_merge`'s claim 2 — that a deny survives into the merge — must record that surviving in the manifest is compatible with the path being readable.
+
+### Method notes
+
+- `nono profile show --format manifest` writes its `WARN` lines to the same stream as the JSON.
+  `sed -n '/^{/,$p'` before `jq`, or `jq` fails with `Invalid numeric literal at line 1, column 2`.
+- With `HOME` inside the project, nono also warns that it is *skipping* the `system_write_linux` grant on `<project>/.tmp` for the same overlap reason, before going on to refuse.
+
+## M8e — Where each agent reads its declarative extensions from
+
+**Partial.** `opencode` is measured; `claude-code` and `pi` are not.
+The session doing the measuring was itself confined and got `Permission denied` on `~/.claude`, `~/.config/pi` and `~/.pi`, so their layouts are unobserved and `M8e` still owes them.
+`~/.config/claude` and `~/.config/anthropic` returned `ENOENT` rather than a denial, so those two do not exist on this machine.
+
+Measured against `opencode` 1.18.18, and against its own documentation at `opencode.ai/docs/skills` and `/docs/config`.
+
+### The instruments
+
+`opencode debug` answers questions that would otherwise need `strace`:
+
+| subcommand | what it reports |
+| --- | --- |
+| `paths` | the nine roots it resolved: `home data bin log repos cache config state tmp` |
+| `skill` | every skill it can see, as JSON with `name`, `description`, `location`, `content` |
+| `config` | the resolved configuration after every merge |
+| `agent <name>` | one resolved subagent |
+
+`debug skill`'s `location` field is the decisive one: it names the file each skill was read from, so the discovery surface can be enumerated without tracing syscalls.
+
+### The blanket `XDG_CONFIG_HOME` hides the config root, and two roots survive it
+
+Same working directory, one variable changed, `opencode debug skill | jq -r '.[].location' | sort`:
+
+| arm | `XDG_CONFIG_HOME` | skills found | every one from |
+| --- | --- | --- | --- |
+| inside the devShell | `$PWD/.config` | 9 | `~/.agents/skills/*/SKILL.md` |
+| the host's own value | `$HOME/.config` | 10 | `~/.config/opencode/skills/*/SKILL.md` |
+
+Three things follow, each measured rather than argued.
+The blanket is what hides `~/.config/opencode`, which is [C1](plan.md#c1)'s cost made visible.
+`~/.agents/skills` is read **`$HOME`-relative** and therefore survives the blanket entirely — which is why the confined session doing this investigation had skills at all, and why an extension can arrive in a session that declared nothing.
+And skill names **dedup across roots**, with `~/.config/opencode/skills` outranking `~/.agents/skills`: the host arm shows none of the `~/.agents` copies, the devShell arm shows a skill the host arm does not, and neither arm shows both copies of the seven names they share.
+
+### The full discovery surface, from the documentation
+
+Six skill roots, in the order the docs list them:
+
+| root | resolved |
+| --- | --- |
+| `.opencode/skills/<name>/SKILL.md` | project-relative |
+| `~/.config/opencode/skills/<name>/SKILL.md` | config root |
+| `.claude/skills/<name>/SKILL.md` | project-relative |
+| `~/.claude/skills/<name>/SKILL.md` | **`$HOME`-relative** |
+| `.agents/skills/<name>/SKILL.md` | project-relative |
+| `~/.agents/skills/<name>/SKILL.md` | **`$HOME`-relative** |
+
+The project-relative three are found by walking up from the working directory to the git worktree root, so they need **no grant at all** — which is what makes `check_j8_2`'s in-project control cheap.
+Subdirectories accept plural or singular: `agent(s)`, `command(s)`, `skill(s)`, `plugin(s)`, `modes`, `tools`, `themes`.
+
+### The mechanism that names an extra root is `skills.paths`, and it is not the obvious one
+
+- **`skills.paths`** — a configuration key taking absolute roots, scanned recursively for `**/SKILL.md`.
+  This is the one that covers skills.
+- **`OPENCODE_CONFIG_DIR`** — searched like a `.opencode` directory, but the documented list is agents, commands, modes and plugins.
+  **Skills are not in it.**
+  Pointing this at a granted root and assuming skills followed is the failure `M8f`'s planted violation exists to catch.
+- **`OPENCODE_CONFIG`** — one extra configuration *file*, merged between global and project.
+- **`OPENCODE_CONFIG_CONTENT`** — inline JSON, merged last of the local scopes.
+
+Escape hatches that matter under confinement, because a denied scan surfaces as `EACCES` rather than as an empty result: `OPENCODE_DISABLE_EXTERNAL_SKILLS=1` skips the `~/.agents` scan, `OPENCODE_DISABLE_CLAUDE_CODE_SKILLS=1` the `~/.claude` one, plus `OPENCODE_DISABLE_PROJECT_CONFIG`, `OPENCODE_DISABLE_DEFAULT_PLUGINS` and `OPENCODE_PURE`.
+
+### The config root splits cleanly, and the split is what `FR-25` and `FR-26` need
+
+`ls -A ~/.config/opencode` on this machine: `agent`, `agent-backups`, `bun.lock`, `command`, `dcp.jsonc`, `.gitignore`, `node_modules`, `opencode.jsonc`, `package.json`, `package-lock.json`, `plugin`, `plugins`, `prompts`, `skills`.
+`ls -A ~/.agents`: `backups`, `skills`.
+`ls -A ~/.local/share/opencode`: `auth.json`, `bin`, `log`, `mcp-auth.json`, `opencode.db`, `opencode.db-shm`, `opencode.db-wal`, `repos`, `snapshot`, `storage`, `tool-output`, `worktree`.
+
+So `opencode` already separates the two by directory: the config root holds settings and extensions only, while credentials (`auth.json`, `mcp-auth.json`), history and state (`opencode.db`, `storage`, `tool-output`, `log`, `snapshot`) all live under the data root.
+An ancestor grant on `~/.config/opencode` would still be wrong, because it hands over `plugin/` — executable extensions, which `FR-26` refuses — and `node_modules`, `bun.lock` and the two `package*.json` files, which are the build product `FR-22` says must be provisioned rather than fetched.
+`agent-backups` and `~/.agents/backups` are noise.
+Hence [D17](plan.md#d17)'s enumerated, never-ancestor grant.
+
+### Two surfaces the spike must also weigh
+
+`.opencode/plugin(s)/*.ts` is **auto-discovered**, loaded in-process, and gets hooks on `config`, `tool.execute.before`/`after`, `chat.*`, `shell.env` and `permission.ask`.
+That is arbitrary host code with the session's full reach, which is why `FR-26` separates it from the authoring surface rather than collapsing the two.
+
+Configuration supports `{env:VAR}` and `{file:path}` substitution, and `{file:…}` accepts `~/` and absolute paths.
+That is a host-file read channel inside a configuration file, and it is relevant to `FR-5` and `FR-6` independently of any grant.
+
+`opencode`'s provider base URL is a configuration key, `provider.<id>.options.baseURL` (`endpoint` is the Bedrock alias), which is what `M8c` needs for the mediated route.
+
+### The state root, which `D13` left open
+
+`opencode debug paths` inside the devShell reports `state /home/pallon/.local/state/opencode` — the one root of the nine that is **not** redirected, because the shell hook sets no `XDG_STATE_HOME`.
+Pointing the variable at a project path relocates it cleanly and creates the directory, so the agent honours it.
+Inside a confined session the host path is denied instead, so the agent fails rather than relocating.
+`M6a` carries this.
+
+Reading the binary for variable names is not available for this agent: `strings -a` over the resolved `opencode` for `OPENCODE_[A-Z0-9_]+` yields nothing, because it is a compiled bun bundle.
+
+### Method notes
+
+- `opencode debug skill` is the enumeration instrument of choice, but it reports what the agent **resolved**, not every path it tried.
+  A root that is denied and one that is empty look the same.
+  Enumerating the locations an agent *attempts* still needs `strace -f -e trace=openat`, which is how the other two agents must be measured.

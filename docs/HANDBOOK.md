@@ -114,9 +114,19 @@ zsh writes heredoc bodies to `$TMPPREFIX*` rather than to `$TMPDIR`, so a stale 
 Those three values are duplicated on purpose, and the two files have to resolve them to the same paths.
 Byte-identical source text is the wrong criterion, because nix's indented strings escape where a shell does not; `check_bootstrap_mirror` evaluates both and compares the resolved values.
 
-**There is one accepted leak.**
-`.envrc` calls `source_up_if_exists`, which reads a parent `.envrc` above the checkout.
-It is kept because that is a personal, machine-level concern, and direnv carries on when the read is denied.
+**`XDG_CONFIG_HOME` is a blanket, and that has a cost worth knowing before you enter the shell.**
+It is set for the whole devShell, not only for a confined session, so *every* program you run in the checkout looks for its configuration under `$PWD/.config` — including an agent you installed on the host yourself.
+Inside the project, that agent finds none of your `~/.config` settings, subagents or skills.
+This is a tracked violation of the constitution's "prefer the tool's own variable" rule, recorded as `C1` in the feature's plan, and it is kept only because `nono` has no variable of its own: pointed at a directory that does not exist it falls back to the host's `~/.config` silently, which would let host confinement descriptions decide what a confined session may reach.
+Extensions you authored yourself are meant to come with you, by declaring them once for the machine rather than by widening this; that is not built yet.
+
+**There are two accepted leaks.**
+
+- `.envrc` calls `source_up_if_exists`, which reads a parent `.envrc` above the checkout.
+  It is kept because that is a personal, machine-level concern, and direnv carries on when the read is denied.
+- `$XDG_STATE_HOME/nono` stays on the host, because the mechanism anchors its own supervisory state there and refuses to start when any granted path overlaps it.
+  It is not a leak-registry entry for that reason: an entry claiming to grant it would be false.
+  A confined session's audit record — what it was actually granted — is written under it, which is how `check_j1_1` observes a real session rather than trusting a resolved policy.
 
 ### Checking it by hand
 
@@ -165,13 +175,19 @@ It is the natural input to the first spec.
 
 **Isolation.**
 
-- Confinement is now observed rather than asserted: `check_r6` proves the pre-flight refuses a host that cannot enforce it, and `check_j1_1` compares a real session's granted reach against the leak registry. The remaining claims — credentials, history, cross-project state — have no check yet.
-- The leak registry still grants all of `/nix/store`. Narrowing it to the closure the agent actually needs is its own task.
-- A confined session inherits `PATH` **whole**, host user profile included, and nono offers no way to narrow it: `set_vars.PATH` is rejected as reserved and `deny_vars` has no effect on it. While the store is granted wholesale this makes no difference; once it is not, any tool the session names has to be in the environment or it stops working.
+- Confinement is now observed rather than asserted: `check_r6` proves the pre-flight refuses a host that cannot enforce it, and `check_j1_1` compares a real session's granted reach against the project, the execution substrate and the leak registry. The remaining claims — credentials, history, cross-project state — have no check yet.
+- A session is granted the closure of what it runs, 128 store paths rather than the 67,000 the store holds, and the leak registry is now **empty**. What is not yet checked is the refusal side: no check yet reads a host key from inside a session and watches it fail.
+- **A grant on an exact path beats a `deny` the mechanism carries for it.** The five `required` deny groups, `deny_credentials` among them, are not a backstop behind the leak registry — a registry entry naming `$HOME/.ssh` would read the key, with the deny sitting beside the grant in the resolved manifest. Only a grant on an *ancestor* of denied paths is refused, and then the session does not start at all. So the registry's strictness is the whole of the guarantee.
+- The denial-set comparison behind the narrowing uses `strace`, which is Linux-only, so on macOS `check_substrate_denials` reports `SKIP` rather than passing. What macOS keeps is the component-layer equality, which reads the description rather than the kernel.
+- A confined session inherits `PATH` **whole**, host user profile included, and nono offers no way to narrow it: `set_vars.PATH` is rejected as reserved and `deny_vars` has no effect on it. Now that the store is no longer granted wholesale, this is literal: a tool the session can still *name* from the host profile is a tool it can no longer *run*.
+
+**State that still resolves into `$HOME`.**
+
+- `XDG_STATE_HOME` is not redirected, so a tool that honours it writes outside the checkout. `opencode` does: `opencode debug paths` reports its `state` root under `~/.local/state`. Inside a confined session that path is denied, so the agent would fail rather than relocate — the worst of both. The variable cannot simply join the table, because the mechanism resolves its own protected state root from the ambient value; it has to be redirected for the session rather than for the shell.
 
 **Tools the environment does not provide.**
 
-- `git` and `node` are not in the devShell, so they resolve from the host user profile. By [AGENTS.md](../AGENTS.md#3-environment-and-tooling) §3 that means they are *not available*, and the narrowing above will make that literal rather than theoretical.
+- `git` is now in the devShell, and so is `strace` on Linux. `node` is not: it resolves from the host user profile, which by [AGENTS.md](../AGENTS.md#3-environment-and-tooling) §3 means it is *not available*, and a confined session cannot run it because it is outside the substrate.
 
 **Orphans and small things.**
 

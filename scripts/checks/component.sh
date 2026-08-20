@@ -378,8 +378,19 @@ check_component_merge() {
 		esac
 	done <"$tmp/agent.deny"
 
-	# Claim 2. A `required` group's deny outranks a grant the description makes
-	# for the same path. The candidate is derived rather than named: the required
+	# Claim 2. A `required` group's deny survives a grant the description makes
+	# for the same path, rather than being dropped from the resolved manifest.
+	#
+	# What this does NOT claim, because M5a measured the opposite: that the deny
+	# wins. Granting exactly $HOME/.ssh -- which deny_credentials, a required
+	# group, denies -- starts a session that reads the key material, with the
+	# deny still listed beside the grant. Landlock is allow-only, so a deny is
+	# the absence of a grant and a grant of the same path simply supplies one.
+	# Only a grant on an *ancestor* of denied paths refuses, per D15. So this
+	# claim is about the resolver keeping its record honest, and R1's real
+	# guarantee is check_r1's, from inside a live session.
+	#
+	# The candidate is derived rather than named: the required
 	# groups come from nono's own machine-readable listing, their resolved paths
 	# from the group detail, and only a path that both a required group and the
 	# merge agree on is used. A candidate that survived a bad parse of the group
