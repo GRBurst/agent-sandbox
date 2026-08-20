@@ -283,7 +283,9 @@ That shape is what makes the property in `SC-1` expressible as a property rather
 nono profile show "$profile" --format manifest | jq -r '.filesystem.grants[].path'
 ```
 
-`check_component_merge` uses the same command against a profile and its base, which is the only way to observe merge semantics without starting a session.
+`check_component_merge` uses the same command, which is the only way to observe merge semantics without starting a session.
+`M3d` settled what it compares: not a profile against its base, since [D10](plan.md#d10) means no description names one, but the description under test against three derived counterparts — the same description stripped to `{meta}` for the floor, with one probe path added to `filesystem.read` for precedence, and with one probe group added to `groups.include` for additivity.
+It also found the manifest carries a fifth key, `$schema`, alongside the four above, and **no `environment` key at all**, which is why the `allow_vars`/`deny_vars` order is asserted behaviourally by `check_r3` rather than here.
 
 **The manifest is the sandbox-capability view, not the whole profile.**
 Its `network` key carries only `dns` and `mode`; `credentials`, `custom_credentials`, `credential_providers` and `credential_routes` do not appear.
@@ -376,9 +378,10 @@ Two consequences:
 1. Each agent's `stateVars` — `CODEX_HOME`, `PI_CODING_AGENT_DIR`, `OPENCODE_CONFIG` and the rest — belong in `environment.set_vars` **inside the profile**, expressed against `$WORKDIR`, rather than being exported by a wrapper script. The confinement description and the relocation then live in one artifact and cannot drift apart. `$WORKDIR` expansion is what makes the same profile text correct in every project, so nothing is generated per checkout.
 1. `environment.allow_vars` is the mechanism for the repetition scenarios, as D6 states. An allow-list closed to the variables the environment sets is what makes "the previous project's variables do not reach this session" a property of the profile rather than a hope about the caller's shell.
 
-D4's merge claims — `set_vars` merging as a map with the child winning, `allow_vars`/`deny_vars` additive — are **not** settled here.
-The schema describes the fields, not how `extends` combines two of them.
-`check_component_merge` in `M3` observes that, and until it does, D4 remains an assertion.
+D4's merge claims are **not** settled here, because the schema describes the fields and not how they combine.
+`M3d` settled the ones this environment rests on, by observation against resolved manifests: the floor arrives in full though no parent is named, an included group adds grants and removes none, and a `required` group's `deny` survives a description grant for the same path.
+The one it could **not** settle is the `allow_vars`/`deny_vars` order recorded at the top of this section, because the resolved manifest has no `environment` key and no other resolved form prints one.
+That order is read from the schema and stays read from the schema; nothing here depends on it, since [D6](plan.md#d6) sets an allowlist and no `deny_vars`, and FR-5's real requirement is asserted from inside a session by `check_r3`.
 
 ### A description names no parent, and the floor is the same either way
 

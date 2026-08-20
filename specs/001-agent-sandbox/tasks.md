@@ -322,26 +322,42 @@ The floor is derived by stripping the description under test down to `{meta}` wi
 
 **The planting found a defect in the check itself.** With `$HOME/.ssh` granted, `jq` reported `Cannot index string with string ("path")` beside the expected failure: in `$p | startswith(.path + "/")` the pipe rebinds `.` to `$p`, so `.path` indexed a string. The exact-match disjunct short-circuited for `/nix/store` and hid it. The entry is now bound with `. as $e` before the pipe. Known gap: with one registered path granted exactly, the prefix branch is not exercised by any current data, and a defect there would make the check too strict rather than too lax.
 
-### M3d — the merge is what the plan claims (Status: PENDING)
+### M3d — the merge is what the plan claims (Status: IMPLEMENTED)
 
 [D4](plan.md#d4) is a boundary contract, and P7 requires a boundary's merge behaviour be written down — and here, asserted. The schema does not settle it: it describes what fields exist, not how they combine.
 
 **Scenario**: D4
 
-**RED**: write `check_component_merge` asserting the three claims [D4](plan.md#d4) actually rests on, against `nono profile show --format manifest`: that a group's `deny` outranks a grant the description makes for the same path, that the floor's grants are present whether or not a parent is named, and that the environment filter applies `deny_vars` before `allow_vars`.
+**RED**: write `check_component_merge` asserting the three claims [D4](plan.md#d4) actually rests on, against `nono profile show --format manifest`: that a group's `deny` outranks a grant the description makes for the same path, that the floor's grants and denies are present whether or not a parent is named, and that an included group's contribution is additive.
 
-- [ ] Check written and seen to FAIL with a deliberately wrong claim
-- [ ] Nothing is asserted from the schema alone; every claim is observed against a resolved description
-- [ ] Every deny the merge produces is disjoint from the project directory, asserted as a property over `.filesystem.deny[].path` and derived from the resolved manifest rather than from a list of group names
-- [ ] The precedence claim is observed against the resolved manifest, and `nono why` is not read as enforcement anywhere in the check ([D15](plan.md#d15))
-- [ ] Violation planted (assert a description's grant beats a required group's `deny`), seen to FAIL, reverted, recorded in plan.md
-- [ ] Violation planted (a deny pointed at a path inside the project), seen to FAIL, reverted, recorded in plan.md
+The third claim was written as "the environment filter applies `deny_vars` before `allow_vars`" and has been **corrected in place**, because that claim cannot be observed against a resolved description and the second criterion below forbids asserting it from the schema. `--format manifest` has no `environment` key, `--format profile` prints no environment section, and `nono run --dry-run` prints capabilities only. It is also not a contract this environment rests on: [D6](plan.md#d6) chose an allowlist and `lib/confinement.nix` sets no `deny_vars`, so there are no two lists to order. FR-5's real requirement is behavioural and already has a home — `check_r3`, at the integration layer, against a canary from inside a session. Additivity replaces it because it is the one D4 claim left unasserted and it *is* observable here.
+
+- [x] Check written and seen to FAIL with a deliberately wrong claim
+- [x] Nothing is asserted from the schema alone; every claim is observed against a resolved description
+- [x] Every deny the merge produces is disjoint from the project directory, asserted as a property over `.filesystem.deny[].path` and derived from the resolved manifest rather than from a list of group names
+- [x] The precedence claim is observed against the resolved manifest, and `nono why` is not read as enforcement anywhere in the check ([D15](plan.md#d15))
+- [x] Violation planted (assert a description's grant beats a required group's `deny`), seen to FAIL, reverted, recorded in plan.md
+- [x] Violation planted (a deny pointed at a path inside the project), seen to FAIL, reverted, recorded in plan.md
 
 This task no longer asserts `extends` semantics. [D10](plan.md#d10) means no description this environment ships names a parent, so how `extends` combines two descriptions is not a contract anything here depends on. What is still a contract is the merge of the floor, the included groups and the description's own declarations — and the first of those three claims is the one the boundary rests on, because it is what makes a `required` deny group unable to be undone by a mistake elsewhere.
 
 **This task derisks `M4b`, and that is why the disjointness criterion is here rather than there.** [D15](plan.md#d15) found that Landlock is allow-only: a deny cannot carve a hole in a granted parent, and nono checks for the overlap before `landlock_restrict_self` and refuses to start rather than pretend. Granting `$WORKDIR` recursively therefore makes every `required` deny group a *precondition on the project a consumer runs this in*, not merely on this repository. If any deny path resolves inside a checkout, no session starts there at all — an unconditional failure of Journey 1 for that consumer, and the kind of thing that would otherwise be discovered as a mysterious `Sandbox initialization failed` in `M4b`. The component layer can see it one task earlier, from the manifest alone, because `nono profile validate --strict` **accepts** an overlapping deny without complaint. So validation is not the observer; the set is.
 
 The second planting is the honest control for that: a deny aimed inside the project must make the check fail with a message naming the path, at the component layer, without a kernel in the loop. `M4b` then confirms the consequence — a session that does start — rather than being the first place the condition is noticed.
+
+**Implementation.** `check_component_merge` and one helper, `manifest_denies`, in `scripts/checks/component.sh`. The helper mirrors `manifest_grants` — same repo-root subshell, since `profile show` has no `--workdir` — and reads `.filesystem.deny[].path`. The check compares the description under test against three counterparts it derives from that same description: stripped to `{meta}` for the floor, with one probe path added to `filesystem.read` for precedence, and with one probe group added to `groups.include` for additivity. Nothing is compared against a parent, because [D10](plan.md#d10) means there is none.
+
+**Precedence does not work the way the plan implied, and the correction is the finding.** The resolver does not drop the losing grant: a path a `required` group denies and the description also grants appears in `.filesystem.grants` **and** in `.filesystem.deny` of the same manifest. So precedence is observable as *deny-survival*, not as grant-absence, and a check written to watch the grant disappear would have concluded the opposite of the truth. The probe is not a path anyone wrote down — the required deny groups come from `nono profile groups --json` filtered on `required == true`, their paths from `nono profile groups <name>`, and the check takes the first that the merge actually denies. It came out `$HOME/.1password`, and a new nono release moving that set moves the probe with it. [D4](plan.md#d4) is corrected in place to state the observed form.
+
+**The precedence arm carries its own positive control**, per [D9](plan.md#d9), because its observable is a survival rather than a change: the probe grant must be *seen* in the mutated manifest, else the arm passes while proving only that a grant nono ignored did not disturb a deny. It did not fire during the planting, which is what makes that planting evidence.
+
+**Two arms would otherwise have held vacuously, and both now say so.** The floor comparison fails outright if the floor resolves to no grants or no denies. Additivity is worse: several non-required granting groups — `system_read_linux_core`, `user_tools`, `homebrew_linux` — are *already in the floor*, so including them adds nothing and a check that probed one would have asserted over an empty diff. The loop therefore walks the derived candidates until one genuinely adds a grant and fails if none does. `bun_runtime` is the first that does. `nix_runtime` adds six rather than [D15](plan.md#d15)'s seven, because `/nix/store` is already granted by the registry entry.
+
+**A deny above the project is not a violation and is not flagged.** Landlock being allow-only cuts both ways: an ancestor deny is expressed by not granting, and the project's own grant overrides it. Only a deny *inside* the granted subtree is unenforceable, which is exactly the plan's `deny_group_paths ∩ subtree($WORKDIR) = ∅` and no wider.
+
+`nono why` appears nowhere in the check, as the fourth criterion requires. The counts, for the record: the floor resolves to 35 grants and 51 denies, the description to 37 and 51.
+
+**`check_sc3` is unmoved** at 21, the same list before and after — correct for a task whose scenario is a plan-level decision rather than one of the spec's numbered scenarios. `unit.sh`'s parser matches `check_(j…|r…|rep…)` only, so this check is invisible to the bijection by construction rather than by luck.
 
 ______________________________________________________________________
 

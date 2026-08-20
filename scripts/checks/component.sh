@@ -41,6 +41,16 @@ manifest_grants() {
 		sed 's#/proc/[0-9][0-9]*#/proc/<pid>#' | sort -u
 }
 
+# The resolved deny set of a description, as paths. Same working-directory
+# reasoning as manifest_grants: a deny is expanded against $WORKDIR too.
+manifest_denies() {
+	local profile=$1 cfg=$2
+	(
+		cd "$REPO_ROOT" || exit 1
+		nono_hermetic "$cfg" profile show "$profile" --format manifest
+	) | jq -r '.filesystem.deny[].path' | sort -u
+}
+
 check_confinement_validates() {
 	local found=0 lib=$REPO_ROOT/lib/confinement.nix
 	local profile tmp cfg store agent=claude-code
@@ -233,6 +243,140 @@ check_sc1() {
 			found=1
 		}
 	done < <(jq -r '.[] | [.path, .mode] | @tsv' <<<"$registry")
+
+	[ "$found" -eq 0 ]
+}
+
+# D4: the merge of nono's floor, the groups a description includes and the
+# description's own declarations behaves as the plan claims. M1e established the
+# schema says which fields exist and not how they combine, so every claim below
+# is observed against a resolved description and none is read off the schema.
+#
+# `nono why` is deliberately absent. D15 found it reports a deny the kernel
+# cannot enforce, so it is not a proxy for what the merge produces.
+check_component_merge() {
+	local found=0 agent=claude-code
+	local profile tmp cfg project candidate group
+
+	profile=$(confinement_profile "$agent") || {
+		fail "the confinement description for $agent does not build"
+		return 1
+	}
+
+	tmp=$(mktemp -d "$REPO_ROOT/.tmp/component.XXXXXX")
+	cfg=$tmp/config
+	# shellcheck disable=SC2064
+	trap "rm -rf '$tmp'" RETURN
+
+	# A description that declares nothing and names no parent, derived from this
+	# one rather than written out. Whatever it still resolves to is the floor.
+	jq '{meta}' "$profile" >"$tmp/floor.json"
+
+	project=$(cd "$REPO_ROOT" && pwd -P)
+	manifest_grants "$profile" "$cfg" >"$tmp/agent.grants"
+	manifest_grants "$tmp/floor.json" "$cfg" >"$tmp/floor.grants"
+	manifest_denies "$profile" "$cfg" >"$tmp/agent.deny"
+	manifest_denies "$tmp/floor.json" "$cfg" >"$tmp/floor.deny"
+
+	# Anti-vacuity for every containment below: an empty floor would make them
+	# all hold while asserting nothing.
+	if [ ! -s "$tmp/floor.grants" ] || [ ! -s "$tmp/floor.deny" ]; then
+		fail "the floor resolves to no grants or no denies, so the merge claims would hold vacuously"
+		return 1
+	fi
+
+	# Claim 1. The floor's grants and denies are present although the
+	# description names no parent (D10) and asks for neither.
+	local path
+	while read -r path; do
+		[ -n "$path" ] || continue
+		printf 'floor grant absent from the resolved description: %s (%s)\n' "$path" "$agent"
+		found=1
+	done < <(comm -23 "$tmp/floor.grants" "$tmp/agent.grants")
+
+	while read -r path; do
+		[ -n "$path" ] || continue
+		printf 'floor deny absent from the resolved description: %s (%s)\n' "$path" "$agent"
+		found=1
+	done < <(comm -23 "$tmp/floor.deny" "$tmp/agent.deny")
+
+	# Every deny the merge produces lies outside the project. D15 found Landlock
+	# is allow-only, so a deny under the granted project subtree cannot be
+	# enforced and nono refuses to start rather than pretend it is. That makes
+	# this a precondition on every project the environment is consumed in, and
+	# `nono profile validate --strict` accepts the overlap, so the set is the
+	# only observer. A deny *above* the project is a different matter and fine:
+	# it is expressed by not granting, which the project's own grant overrides.
+	while read -r path; do
+		case $path in
+		"$project" | "$project"/*)
+			printf 'deny path inside the project: %s (%s)\n' "$path" "$agent"
+			found=1
+			;;
+		esac
+	done <"$tmp/agent.deny"
+
+	# Claim 2. A `required` group's deny outranks a grant the description makes
+	# for the same path. The candidate is derived rather than named: the required
+	# groups come from nono's own machine-readable listing, their resolved paths
+	# from the group detail, and only a path that both a required group and the
+	# merge agree on is used. A candidate that survived a bad parse of the group
+	# detail could not appear in the resolved deny set.
+	nono_hermetic "$cfg" profile groups --json |
+		jq -r '.[] | select(.required == true and (.deny.access // 0) > 0) | .name' |
+		while read -r group; do
+			nono_hermetic "$cfg" profile groups "$group" | sed -n 's/.*-> \(\/.*\)$/\1/p'
+		done | sort -u >"$tmp/required.deny"
+	comm -12 "$tmp/required.deny" "$tmp/agent.deny" >"$tmp/candidates"
+
+	if [ ! -s "$tmp/candidates" ]; then
+		fail "no required group's deny reaches the merge, so precedence cannot be observed"
+		return 1
+	fi
+	candidate=$(head -1 "$tmp/candidates")
+
+	jq --arg x "$candidate" '.filesystem.read += [$x]' "$profile" >"$tmp/granted.json"
+	manifest_grants "$tmp/granted.json" "$cfg" >"$tmp/granted.grants"
+	manifest_denies "$tmp/granted.json" "$cfg" >"$tmp/granted.deny"
+
+	# The grant has to be shown to have reached the merge, or a description nono
+	# quietly dropped would look the same as a deny that outranked it.
+	if ! awk -F'\t' -v p="$candidate" '$2 == p { hit = 1 } END { exit !hit }' \
+		"$tmp/granted.grants"; then
+		fail "the probe grant for $candidate never reached the merge, so precedence is untested"
+		return 1
+	fi
+
+	if ! grep -qxF "$candidate" "$tmp/granted.deny"; then
+		printf 'a description grant removed a required group deny: %s (%s)\n' "$candidate" "$agent"
+		found=1
+	fi
+
+	# Claim 3. An included group contributes its grants additively. The probe
+	# group is derived too, and the first one that adds anything is used: several
+	# of the granting groups are already in the floor, where inclusion is a
+	# no-op and the claim would hold vacuously.
+	local added=0 removed
+	while read -r group; do
+		jq --arg g "$group" '.groups.include += [$g]' "$profile" >"$tmp/probe.json"
+		manifest_grants "$tmp/probe.json" "$cfg" >"$tmp/probe.grants"
+		comm -13 "$tmp/agent.grants" "$tmp/probe.grants" >"$tmp/probe.added"
+		[ -s "$tmp/probe.added" ] || continue
+		added=1
+		removed=$(comm -23 "$tmp/agent.grants" "$tmp/probe.grants")
+		if [ -n "$removed" ]; then
+			printf 'including group %s removed a grant the description already had: %s\n' \
+				"$group" "$(printf '%s' "$removed" | tr '\n' ' ')"
+			found=1
+		fi
+		break
+	done < <(nono_hermetic "$cfg" profile groups --json |
+		jq -r '.[] | select(.required == false and (.deny | length) == 0 and (.allow.read // 0) > 0) | .name')
+
+	[ "$added" -eq 1 ] || {
+		fail "no group was observed to add a grant, so additivity would hold vacuously"
+		return 1
+	}
 
 	[ "$found" -eq 0 ]
 }
