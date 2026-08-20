@@ -649,7 +649,9 @@ ______________________________________________________________________
 
 **Scenario**: Journey 6.2, R11
 
-Unsigned commits are the default, and a key that is genuinely needed arrives from an agent or a secret service rather than from a granted directory ([D16](plan.md#d16)). Not hypothetical: this repository's own `M3c` commits failed exactly this way — `gpg` was denied its temporary file beneath `$HOME/.gnupg`, and `git` then reported `fatal: failed to write commit object`. It fires on the first commit, so a consumer meets it immediately.
+Unsigned commits are the default, and a key that is genuinely needed arrives from an agent or a secret service rather than from a granted directory ([D16](plan.md#d16)). Not hypothetical: every commit made while implementing this feature failed exactly this way — `M3c`, `M3d`, `M4a` and the `M4b` precondition commit, four for four — `gpg` denied its temporary file beneath `$HOME/.gnupg`, and `git` then reporting `fatal: failed to write commit object`. It fires on the first commit, so a consumer meets it immediately.
+
+**Which half of this task those failures belong to has been measured, and it is the half FR-24 configures away.** The demand comes from the *global* `~/.gitconfig`; under [D11](plan.md#d11)'s redirection the setting is not present anywhere, and a commit in a throwaway checkout then succeeded unsigned with no override. So `check_j6_2` is expected to pass on the mechanism already shipped in `lib/confinement.nix`, and the RED it starts from is the absence of the check rather than a missing capability. `check_r11` correspondingly **must set its demand in the checkout's own `.git/config`** — a demand set globally is erased by `GIT_CONFIG_GLOBAL`, so a check that plants it there would assert nothing and still pass. That is what makes the criterion's wording *a checkout whose own configuration demands a signature* load-bearing, and it is the first thing to get right when this task starts.
 
 **RED**: `check_j6_2` and `check_r11`, in one session, each the other's control ([D9](plan.md#d9)).
 
