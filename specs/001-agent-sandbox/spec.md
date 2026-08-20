@@ -26,6 +26,7 @@ Every claim is checked by one command, run unattended on clean machines, on ever
 - Authenticating happens once per machine, not once per project.
 - A host that cannot enforce confinement refuses to start an agent.
 - The ordinary toolchain — notably pushing over HTTPS — keeps working inside the boundary.
+- Extensions a consumer authored on their machine come with them into every project of theirs, without any project asking for them and without a stranger inheriting them.
 - Every claim above is proved by one command on clean machines, per platform, on every change.
 
 **Non-Goals**
@@ -55,6 +56,8 @@ Every claim is checked by one command, run unattended on clean machines, on ever
 | **Pre-flight check** | The executable probe run before an agent starts, which establishes that confinement can actually be enforced on this host. | `devenv.nix`'s unverified platform claims |
 | **Consumer** | A downstream project that points at this repository. | the handbook's "downstream flake" |
 | **Host-global agent configuration** | Configuration a consumer has already installed in their home directory to serve every project on the machine, independent of this repository. | — |
+| **Authoring surface** | The part of a host-global agent configuration a consumer wrote themselves to shape how an agent works: skills, subagents, commands, prompts. Declarative — it tells an agent what to do, rather than being code the agent runs. The one part of a host-global configuration a session may reach. | the drafts' `extraAllowPaths`, for this one use |
+| **Executable extension** | An extension an agent loads into its own process, running with everything the session can reach. Distinguished from the authoring surface because granting one grants far more than instructions. | the drafts' unqualified "plugin" |
 
 ## Scenarios
 
@@ -139,6 +142,24 @@ Signing is the second step's subject, and it is this journey's failure mode rath
    **And** its exit status alone separates a passing commit from a failing one
    **And** the expected reach it compares against is derived from the leak registry rather than restated inside the check.
 
+### Journey 8 — The consumer's own extensions come with them (P2)
+
+Confinement that costs a consumer the skills and subagents they wrote is confinement they will stop using, and the environment they fall back to is the unconfined one. This journey is what keeps the boundary adoptable, and it is the one place a host path is read on purpose rather than by accident.
+
+The distinction it rests on is what the host file *does*. An authoring surface is the consumer's own instruction to their own agent, in the same class as the parent `.envrc` the environment already accepts reading: a personal, machine-level concern. Credentials, conversation history, session state and any host confinement description are a different class, and R9 keeps them out.
+
+**Independently verifiable by**: declaring an authoring surface, starting a session, and asking the agent to enumerate what it loaded; then asserting the same session with no declaration enumerates none of it.
+
+1. **Given** a consumer who has authored agent extensions on their machine to serve every project, and has declared that surface once for the machine
+   **When** they start a confined session in any project directory
+   **Then** the agent reports those extensions as available to it
+   **And** the surface is unchanged afterwards, so a session cannot rewrite what it was lent.
+
+1. **Given** a machine with no such declaration, as a stranger who cloned the project has
+   **When** a confined session starts
+   **Then** the session's granted reach is the project directory and registry entries, unchanged
+   **And** the agent starts and works with none of those extensions, rather than failing on their absence.
+
 ### Refusal scenarios
 
 1. **R1 — Credentials outside the project are unreachable.**
@@ -186,14 +207,16 @@ Signing is the second step's subject, and it is this journey's failure mode rath
    **Then** the resulting message identifies it as an authentication failure
    **And** it is distinguishable from a confinement denial.
 
-1. **R9 — A host-global agent configuration does not reach the session.**
-   **Given** a machine whose home directory already configures these agents for every project, as a consumer migrating from a global setup would have
+1. **R9 — The rest of a host-global agent configuration does not reach the session.**
+   Journey 8's counterpart, and the harder half: the surface a consumer authored is theirs to carry, and reaching for it must not drag in the installation it sits inside. The self-referential case is the sharpest — a host confinement description that took part in deciding a session's reach would let configuration outside the boundary define the boundary.
+   **Given** a machine whose home directory already configures these agents for every project — stored credentials, conversation history, session state and confinement descriptions among them — and whose consumer has declared their authoring surface
    **When** a confined session starts in a project directory
-   **Then** no part of that host-global configuration is readable from inside the session
-   **And** the session starts and works regardless, rather than depending on it or failing on its absence.
+   **Then** nothing outside the declared authoring surface is readable from inside the session
+   **And** no host confinement description takes part in deciding that session's reach
+   **And** the session starts and works regardless, rather than depending on any of it or failing on its absence.
 
 1. **R10 — A host tool configuration does not direct the session.**
-   R9's counterpart for the ordinary toolchain, and the sharper case: an agent's host configuration merely widens what the agent knows, whereas the version-control toolchain's host configuration can name a program to run and have the tool run it.
+   The counterpart for the ordinary toolchain, and the case where Journey 8's licence does not transfer. An authoring surface is a consumer instructing their own agent, deliberately. The version-control toolchain's host configuration is read by a tool the session runs incidentally, and it can name a program for the tool to run, so nothing here asks for it and it stays out entirely.
    **Given** a machine whose home directory configures the version-control toolchain with a directive that runs a program
    **When** a confined session runs that toolchain
    **Then** the toolchain reads no configuration file from outside the project directory
@@ -234,11 +257,13 @@ Signing is the second step's subject, and it is this journey's failure mode rath
 - **The two platforms enforce differently.** One is allow-list only, the other permits deny-inside-allow, so an identical description yields different effective reach. Per-platform enforcement strength is recorded rather than smoothed over.
 - **The registry grows.** Every addition is a reviewable diff with a justification, so length is itself a signal. The bound is not a number but a kind: an entry is admissible only where the tool structurally cannot be redirected, never because redirecting it is inconvenient.
 - **A consumer needs an unpredicted path.** There is a documented way to widen one project's reach without editing this repository, and it is not a file inside the project.
+- **An agent reads its extensions from several places.** An agent may scan its own configuration root and also shared roots that other agents read, so a consumer's skills can sit in any of them. Every location an agent reads is covered, or the uncovered one is named — otherwise a consumer whose extensions live in the uncovered root concludes the declaration did nothing.
+- **The same extension exists in two of those places.** Which copy an agent prefers is the agent's behaviour, not this environment's, so the environment grants the locations and does not attempt to arbitrate between them. What it must not do is silently drop a location and change which copy wins.
 
 ## Requirements
 
 - **FR-1** The environment MUST provide confined sessions for `claude-code`, `opencode` and `pi`. All three are required, and `claude-code` is the reference case — not because it is the easiest, but because the other two obtain their credential from it, so nothing about FR-6 or FR-7 can be demonstrated until it works. That ordering front-loads the risk rather than deferring it: `claude-code` is also the agent whose configuration root is least certain to relocate, and building the credential story on an agent whose state is still escaping would be building twice.
-- **FR-2** A confined session's granted filesystem reach MUST be the project directory plus leak-registry entries, and nothing else.
+- **FR-2** A confined session's granted filesystem reach MUST be the project directory plus leak-registry entries, and nothing else. That is the reach with no override in force, which is what a stranger gets and what the checks assert; FR-15 is the only thing that widens it, and FR-25 the only widening this feature ships.
 - **FR-3** The leak registry MUST be a single file. Every entry states why the path is granted and why a narrower grant does not work. It carries no expiry mechanism. An entry is admissible only where the tool structurally cannot be directed elsewhere; convenience is never a justification.
 - **FR-4** Agent state MUST be written inside the project directory. Where an agent cannot be directed to do so, its state path MUST be a registry entry under FR-3.
 - **FR-5** A confined session MUST NOT inherit host environment variables carrying provider credentials.
@@ -251,16 +276,18 @@ Signing is the second step's subject, and it is this journey's failure mode rath
 - **FR-12** One command MUST verify every scenario in this spec, and MUST be the only place those assertions live.
 - **FR-13** The verification MUST run unattended on a clean machine with no prior agent state, for every supported platform, on every change.
 - **FR-14** Every claim the automated verification cannot reach MUST be listed in the usage document as verified by hand, with the procedure.
-- **FR-15** A consumer MUST be able to widen one project's granted reach only through an override supplied at invocation by the human or the calling environment. No file inside a project directory may widen reach.
+- **FR-15** A consumer MUST be able to widen one project's granted reach only through an override supplied at invocation by the human or the calling environment. No file inside a project directory may widen reach. FR-25's authoring surface is declared by the calling-environment route, which is why it is present for the consumer who declared it and absent for everyone else.
 - **FR-16** An authentication failure MUST be distinguishable, from its output alone, from a confinement denial.
 - **FR-17** Credential substitution MUST NOT silently break tools inside the boundary. Where it inspects encrypted traffic, inspection applies uniformly and trust in the inspecting authority reaches every runtime inside the boundary. Exempting a destination from inspection is a fallback, permitted only where propagating trust to a given runtime proves impossible, and recorded where it is used.
 - **FR-18** The environment MUST carry no packages, variables or ignore rules belonging to the prior Kafka project.
 - **FR-19** The canonical published reference MUST be named identically in every document. The usage document currently names a different owner and a different repository; that is corrected.
 - **FR-20** The confinement description MUST be authored so that both supported platforms enforce the same effective reach, expressed in the semantics of the more restrictive one. A platform whose enforcement is weaker is described under FR-11; weakness is never licence for a wider reach.
-- **FR-21** A pre-existing host-global agent configuration MUST neither reach a confined session nor prevent one from working. A consumer who already configures these agents for their whole machine adopts this environment for one project without changing the rest, and the usage document states that path.
+- **FR-21** A pre-existing host-global agent configuration MUST NOT direct a confined session, and MUST NOT prevent one from working. Its confinement descriptions MUST take no part in deciding a session's reach, on pain of letting configuration outside the boundary define the boundary; its credentials, conversation history and session state MUST stay unreachable, which is FR-6 and P1 applied to the case a migrating consumer actually presents. The consumer's own authoring surface is the sole exception, governed by FR-25. A consumer who already configures these agents for their whole machine adopts this environment for one project without changing the rest, and the usage document states that path.
 - **FR-22** Where an agent extends itself by fetching code at run time, that extension MUST be provisioned before the session rather than fetched from inside it.
 - **FR-23** A confined session's version-control toolchain MUST be directed at configuration this environment wrote, rather than left to search the home directory for it. Withholding the grant would already stop the host file being read, but it would leave the outcome dependent on what the host happens to contain, and it would leave the session without a commit identity. Directing the toolchain instead makes the effective configuration the same on every machine, which is what the repetition scenarios ask for, and gives that identity somewhere to live. The author's name and address are copied out of the host once, at setup: they are not credential material, the copy is visible in the file it produces, and a consumer may supply their own values in place of the host's.
 - **FR-24** A confined session's commits MUST NOT depend on key material outside its reach. Unsigned is the default, and the configuration this environment writes does not ask for a signature. Where a consumer wants signatures, the key MUST reach the session as a forwarded agent socket or a secret-service request supplied at invocation under FR-15 — never as a granted directory. FR-3 excludes that grant anyway: `ssh` and `gpg` both take a key from an agent over a socket, so a key directory is redirectable and the grant would rest on convenience. A checkout that demands a signature the session cannot produce fails visibly, per R11 and **P9**, rather than being committed unsigned.
+- **FR-25** A consumer MUST be able to make their authoring surface available inside a confined session — for every agent shipped, and at every location that agent reads such extensions from, or with the uncovered location named. The declaration is made once for the machine under FR-15, so a consumer's every project picks it up without repeating it and a stranger who clones one of those projects gets none of it. No file inside a project directory may make the declaration, per R5. The surface is lent, not handed over: a session MUST NOT be able to modify what it reads there, so a compromised session cannot rewrite the instructions every later session will read. This is a grant of directives rather than of data — an extension can tell an agent to run a program — and that is precisely why the declaration belongs to the consumer and to the machine, never to a project.
+- **FR-26** An agent's executable extensions MUST NOT arrive by FR-25's declaration. Where the environment needs one, it provisions it inside the project directory under FR-22 rather than granting the host location the agent would otherwise load it from. A consumer who wants their own supplies it under FR-15 as a widening of its own, and the usage document states why that is a larger grant than FR-25's: such code runs with everything the session can reach, whereas an authoring surface only tells the agent what to do.
 
 **Non-functional.**
 The change honours [docs/CONSTITUTION.md](../../docs/CONSTITUTION.md), and the plan's Constitution Check records how.
@@ -270,7 +297,7 @@ The change honours [docs/CONSTITUTION.md](../../docs/CONSTITUTION.md), and the p
 
 ## Success criteria
 
-- **SC-1** For every agent shipped, every granted filesystem path resolves under the project directory or matches a leak-registry entry. The property holds as agents are added, without editing the check.
+- **SC-1** For every agent shipped, with no override in force, every granted filesystem path resolves under the project directory or matches a leak-registry entry. The property holds as agents are added, without editing the check.
 - **SC-2** The registry is countable in one place, every entry carries a justification, and no entry rests on convenience, so erosion is visible in review rather than discovered later.
 - **SC-3** Every scenario here maps to exactly one executable check, and every check maps back to a scenario.
 - **SC-4** The verification command's exit status is sufficient to accept or reject a commit; no human reads its output to decide.
@@ -278,6 +305,7 @@ The change honours [docs/CONSTITUTION.md](../../docs/CONSTITUTION.md), and the p
 - **SC-6** No value that authenticates against a provider from outside the boundary exists at rest inside any project directory.
 - **SC-7** Two consecutive verification runs on an unchanged repository produce the same result.
 - **SC-8** Each supported platform is verified by the same command asserting the same properties, and the effective reach observed is the same on both. Where a platform's enforcement strength is weaker, the difference is documented; a platform that is neither verified nor documented as weaker is not claimed.
+- **SC-9** For every agent shipped, a declared authoring surface arrives at every location that agent reads extensions from, or the location it does not arrive at is named in the usage document. A consumer never has to discover by experiment which of their extensions came with them.
 
 ## Assumptions & Constraints
 
@@ -328,7 +356,7 @@ Three that were on this list have been confirmed and moved above: that every age
 - **Resource limits.** Memory and process caps.
 - **A second confinement backend**, and any abstraction anticipating one.
 - **Agents beyond the three named**, `codex` among them. It was named in the first draft of this spec and is deliberately deferred to a feature of its own: it authenticates by its own token flow rather than deriving from `claude-code`, so it shares nothing with FR-7's arrangement and would be a second credential story carried alongside the first. What research established about it is kept, so the follow-up starts with that in hand. SC-1 exists so that adding it does not reopen the checks.
-- **The home-manager module currently in the repository.** Its knowledge is absorbed and the module itself leaves; it continues to live in its author's own configuration, serving projects that have not adopted this environment. That coexistence is a requirement (FR-21), not a dependency.
+- **The home-manager module currently in the repository.** Its knowledge is absorbed and the module itself leaves; it continues to live in its author's own configuration, serving projects that have not adopted this environment. That coexistence is a requirement (FR-21 and FR-25), not a dependency. One thing the module did is now a requirement rather than a discard: it resolved its confinement descriptions from the author's own home directory, so a session carried what the author had written. FR-25 keeps the capability and FR-21 refuses the part of it that let host configuration decide a session's reach.
 - **The drafts' option surface.** `projectName`, backend selection and per-agent enable flags are proposals, not requirements; nothing here depends on them.
 - **The third-party name collision.** Another project publishes under a very similar name. Worth knowing; not this feature's problem.
 
@@ -368,14 +396,18 @@ Three that were on this list have been confirmed and moved above: that every age
 
 1. **Concurrent sessions may contend.** FR-8 requires two projects to run at once. Each supervised session takes a loopback port and writes beneath a shared supervisory state directory, so collision or contention is plausible and would surface as an intermittent failure. *Mitigation*: Journey 3 runs both sessions genuinely concurrently rather than in sequence.
 
-1. **A migrating consumer sees two configurations and cannot tell which won.** FR-21 requires a host-global setup to be neither used nor broken, which is precisely the situation in which a user misattributes behaviour. *Mitigation*: R9 asserts the property, and the usage document names the migration path rather than leaving it to be inferred.
+1. **A migrating consumer sees two configurations and cannot tell which won.** FR-21 and FR-25 together mean part of a host-global setup arrives and the rest does not, which is a sharper version of the same hazard than the original, where none of it arrived. A consumer whose skill loaded but whose stored session did not will reasonably conclude the boundary is arbitrary. *Mitigation*: Journey 8 and R9 assert the two halves separately, so the line between them is executable rather than described, and SC-9 forbids leaving a location's status to be discovered by experiment. The usage document names the migration path rather than leaving it to be inferred.
+
+1. **The authoring surface is a directive channel, and the checks may only prove it is a data channel.** An extension can instruct an agent to run a program, so FR-25 grants rather more than the file bytes. The failure mode is a check that asserts the file is readable and calls the requirement met, while never establishing that only the consumer's own declaration can put something there. *Mitigation*: R5 and Journey 8's second scenario carry that weight — a project cannot declare the surface, and an undeclared machine gets nothing — and the grant is read-only, so a session that reads a directive cannot leave one behind for the next.
+
+1. **A shared extension root is read `$HOME`-relative and slips past the environment's redirection.** Some extension locations are agent-specific and move when the agent's own configuration root moves; others are shared between agents and anchored at the home directory, so they are reached by a different route and neither the redirection nor the grant treats them alike. An extension in the second kind can therefore appear inside a session that declared nothing, which is FR-2 violated by accident rather than FR-25 satisfied. *Mitigation*: enumerate the locations per agent before granting any, and let SC-1 assert the undeclared default rather than assuming the redirection covered everything.
 
 ## Review checklist
 
 - [x] Every scenario has exactly one `When`, and a `Then` that is observable
-- [x] At least one refusal scenario is present, and it is a real denial rather than an error message — ten are present, including a fail-closed platform refusal, an untrusted-repository refusal, a host-global-configuration refusal and a host-tool-configuration refusal
+- [x] At least one refusal scenario is present, and it is a real denial rather than an error message — eleven are present, including a fail-closed platform refusal, an untrusted-repository refusal, a host-global-configuration refusal and a host-tool-configuration refusal
 - [x] A repetition scenario is present, or the feature provably changes no state — three are present
-- [x] Every requirement FR-1..n is covered by at least one scenario, with three stated exceptions rather than silent gaps: FR-14 and FR-19 are documentation obligations verified in review, and FR-22 constrains how the environment is built rather than how a session behaves, so it is verified as the absence of run-time fetching that P8 already requires
+- [x] Every requirement FR-1..n is covered by at least one scenario, with four stated exceptions rather than silent gaps: FR-14 and FR-19 are documentation obligations verified in review, and FR-22 and FR-26 constrain how the environment is built rather than how a session behaves, so both are verified as the absence of a thing — run-time fetching, which P8 already forbids, and a host executable-extension location among the grants, which SC-1 already asserts
 - [ ] No implementation detail appears anywhere in this file — **not fully clean, deliberately.** The confinement mechanism is named because the prompt names it, and the exit status `77` is pinned because a caller branches on it. Both are confined to Constraints and to FR-10, and no scenario depends on the mechanism's identity. Flagged for the reviewer rather than hidden
 - [x] Vocabulary names every new term, and no synonym for an existing one was introduced — `agent confinement` is deliberately distinguished from the repository's existing `project isolation`, and `enforcement tier` from whether a platform is verified
 - [x] Goals and Non-Goals are stated, and Out of Scope names the areas left alone

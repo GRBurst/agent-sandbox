@@ -533,15 +533,19 @@ The measured starting point is 233 variables crossing into a child, `HOME` and e
 - [ ] FR-15's override path is exercised too: widening works from the invocation, and only from there
 - [ ] Violation planted (the wrapper reads the in-checkout config when composing the description), seen to FAIL, reverted, recorded in plan.md
 
-### M5f — A host-global configuration does not reach the session (Status: PENDING)
+### M5f — A host-global configuration does not reach an undeclared session (Status: PENDING)
 
-**Scenario**: R9
+**Scenario**: Journey 8.2
 
-**RED**: `check_r9` populates the fake `$HOME` with a host-global agent configuration.
+This task was written against R9 and is now the *undeclared* half of the pair R9 became. A machine with no declaration is the state every consumer starts in and the only state a stranger is ever in, so it belongs here, with the rest of the boundary, and needs none of the mechanism `M8f` builds. R9 itself is the declared half and is a difference between two runs, which is why it moved to [`M8g`](#m8g--the-declared-surface-is-exactly-what-arrives-status-pending).
+
+**RED**: `check_j8_2` plants a whole host-global agent configuration in the fake `$HOME` — an authoring surface among it — declares nothing, and compares the session's granted reach to `{project} ∪ registry`.
 
 - [ ] Check written and seen to FAIL
-- [ ] Both halves asserted: unreadable from inside, **and** the session still starts and works rather than failing on its absence (FR-21) — which is this check's control as well as its second half
-- [ ] Violation planted (`$XDG_CONFIG_HOME/opencode` in the registry), seen to FAIL, reverted, recorded in plan.md
+- [ ] The assertion is the **set equality**, not the absence of an error. `~/.agents/skills` and `~/.claude/skills` were measured being read `$HOME`-relative rather than through any XDG variable, so an extension can reach a session that granted nothing and "no grant was added" has to be observed instead of inferred ([D17](plan.md#d17))
+- [ ] The agent starts, works, and reports none of the planted extensions — rather than failing on their absence (FR-21)
+- [ ] **Control**: an extension planted *inside* the project is reported in the same session, so "none of them arrived" cannot be satisfied by an agent that reports nothing at all
+- [ ] Violation planted (the wrapper reads the declaration from a file inside the project instead of the calling environment), seen to FAIL, reverted, recorded in plan.md
 
 ### M5g — A host tool configuration does not direct the session (Status: PENDING)
 
@@ -694,6 +698,8 @@ ______________________________________________________________________
 
 `claude-code` is already confined, from `M4b`. What is left is its own awkward corners, then the two agents that depend on it. The order is `claude-code` → `opencode` → `pi`, and it is the order [D14](plan.md#d14) forces rather than a preference.
 
+The consumer's own authoring surface (FR-25) closes this group rather than opening it. It has to be enumerated per agent before it can be granted for any, so it depends on all three being confined — which is also why `M5f` keeps only the undeclared half, the half that needs no mechanism at all.
+
 ### M8a — Extract `mkConfinedAgent` (Status: PENDING)
 
 A refactor, and therefore its own task per P6. No behaviour changes.
@@ -736,7 +742,50 @@ Shaped by `M1d`: relocation holds through the single variable `PI_CODING_AGENT_D
 - [ ] The path for a consumer who must install an extension — outside the confined entry point — is documented rather than left to be discovered
 - [ ] Seen to FAIL before the fix
 
-**Checkpoint**: FR-1 is satisfied; all three agents are confined and `check_sc1` still passes without being edited, which is the property SC-1 asserts.
+### M8e — Spike: where does each agent read its declarative extensions from? (Status: PENDING)
+
+**Scenario**: none — a spike. It exists because this feature has now been wrong three times about a location by reading rather than measuring, and FR-25 cannot be implemented against a guess.
+
+Only `opencode` is measured. At 1.18.18 it reads skills from six roots — `.opencode/skills`, `~/.config/opencode/skills`, `.claude/skills`, `~/.claude/skills`, `.agents/skills`, `~/.agents/skills` — resolves the project-relative three by walking up to the git worktree root, and dedups by skill name with the `~/.config` copy outranking the `~/.agents` one. `claude-code`'s and `pi`'s layouts are **unmeasured**: the session that went looking was itself confined and got `Permission denied` on `~/.claude`, `~/.config/pi` and `~/.pi`.
+
+**Question**: for each of the three agents, which locations does it read declarative extensions from, which of those are `$HOME`-relative rather than XDG-derived, and what is the sanctioned way to name an additional root?
+
+- [ ] Every location enumerated per agent, by observation — the agent's own listing command where it has one, `strace -f -e trace=openat` where it does not
+- [ ] Each location classified: authoring surface (FR-25) or executable extension (FR-26). For `opencode` this splits `~/.config/opencode` rather than granting it, since the same directory holds `plugin/` and `node_modules/`
+- [ ] The redirection interaction recorded per location: which survive the blanket `XDG_CONFIG_HOME` ([C1](plan.md#complexity-tracking)) because they are `$HOME`-relative, since those are the ones that can arrive without being declared
+- [ ] For each agent, the mechanism that names an extra root, and whether it covers the whole surface. `opencode`'s `skills.paths` does for skills; `OPENCODE_CONFIG_DIR` does **not**, because the documented list is agents, commands, modes and plugins with skills absent — a mechanism that covers part of a surface while looking like it covers all of it is the failure mode here
+- [ ] Findings written to `research.md`, and [D17](plan.md#d17) corrected where they contradict it
+
+### M8f — A declared authoring surface arrives (Status: PENDING)
+
+**Scenario**: Journey 8.1
+
+**RED**: `check_j8_1` declares an authoring surface holding one extension per location `M8e` enumerated, starts a session, and asks the agent to report the extensions it has.
+
+- [ ] Check written and seen to FAIL
+- [ ] The declaration comes from the calling environment, never from a file inside a project — the same channel as `source_up_if_exists`, which keeps R5 intact by construction ([D17](plan.md#d17))
+- [ ] The grant names the enumerated authoring directories individually and **no ancestor of them**, so nothing FR-26 excludes and no credential store arrives with the surface
+- [ ] The agent is *pointed* at the granted roots by the configuration this environment writes; nothing is copied into the project, so there is no reconciliation step and no staleness (P8)
+- [ ] Second arm: the surface is byte-identical before and after a session that tries to write to it — FR-25 lends it rather than handing it over
+- [ ] **Control**: an extension planted at a location that was *not* declared is asserted absent in the same session
+- [ ] Both violations planted (remove the configuration key while keeping the grant; make the grant read-write), each seen to FAIL, reverted, recorded in plan.md
+
+### M8g — The declared surface is exactly what arrives (Status: PENDING)
+
+**Scenario**: R9
+
+The half of R9 that needs `M8f` to exist. A grant that brings the surface *and* something else satisfies `M8f` completely, so the property is a difference and one observation cannot carry it — the shape `check_j6_1` and `M4c` both arrived at independently.
+
+**RED**: `check_r9` runs the same planted host configuration twice, once with the surface declared and once without, and subtracts the readable sets.
+
+- [ ] Check written and seen to FAIL
+- [ ] The difference set is asserted **equal** to the declared locations, in both directions: `⊇` is the surface arriving, `⊆` is nothing arriving with it
+- [ ] Stored credentials, conversation history and session state are planted under the same host root and asserted unreachable in both arms (FR-21)
+- [ ] No host confinement description takes part in deciding reach, asserted by comparing granted paths against a run with the host description removed — the self-referential case `M1e` found, where host configuration decides what a session may reach
+- [ ] **Control**: the session starts and works in both arms, so an agent that read nothing cannot pass
+- [ ] Both violations planted (widen the declaration to the locations' common ancestor; grant the host's confinement description directory), each seen to FAIL, reverted, recorded in plan.md
+
+**Checkpoint**: FR-1 is satisfied; all three agents are confined and `check_sc1` still passes without being edited, which is the property SC-1 asserts. FR-25 holds for every agent, and SC-9's obligation — that any location the surface does *not* reach is named in the usage document rather than discovered by experiment — is carried into `M10a`.
 
 ______________________________________________________________________
 
@@ -786,7 +835,7 @@ An assertion that two things are equal is the shape most easily satisfied by not
 
 The second arm is what makes this checkable at all: exit 0 alone is also what a suite that ran nothing produces, which is why `validate.sh` treats "no checks ran" as a failure ([M1a](#m1a--the-scenario--check-bijection-status-done)). The cross-platform comparison is the one assertion in the suite that no single machine can make, so it lives here rather than in a check.
 
-**Checkpoint**: `check_sc3` passes for the first time — every scenario has its check, and the bijection is closed. The set it has been naming since [M1a](#m1a--the-scenario--check-bijection-status-done) — twenty scenarios — is empty for the first time.
+**Checkpoint**: `check_sc3` passes for the first time — every scenario has its check, and the bijection is closed. The set it has been naming since [M1a](#m1a--the-scenario--check-bijection-status-done) is empty for the first time. Its size is deliberately not written down here: it was twenty when this line was first drafted, it was already twenty-two, and Journey 8 made it twenty-four. The check derives it from `spec.md`, which is the point.
 
 ______________________________________________________________________
 
@@ -798,7 +847,9 @@ ______________________________________________________________________
 - [ ] Known drift entries retired and deleted: the Kafka leftovers, the six leftover variables, `system = "x86_64-linux"` hardcoding, the four devcontainer bind mounts, orphaned `ai.nix`, the stray `^`, missing `scripts/validate.sh`, missing `README.md`, absent `shellcheck`/`shfmt`, absent `statix`/`deadnix`, no `justfile`, and the wrong canonical ref which FR-19 corrects
 - [ ] Anything from that list still true is *moved* rather than deleted, so a gap stays a known gap
 - [ ] Root `README.md` written: component table taken from the code, one `flowchart LR` for structure, one `sequenceDiagram` per phase including **a refused case of its own** (AGENTS.md §6), checked by eye in both themes
-- [ ] The migration path for a consumer with a host-global setup is documented (FR-21) — including that the prior-art arrangement granted the authenticating agent's state read-write and that [D14](plan.md#decisions) replaces it, so a migrating consumer knows what they are giving up and what they get back
+- [ ] The migration path for a consumer with a host-global setup is documented (FR-21) — which half of their setup comes with them and which does not, how to declare the authoring surface once for the machine (FR-25), that the prior-art arrangement granted the authenticating agent's state read-write and that [D14](plan.md#decisions) replaces it, so a migrating consumer knows what they are giving up and what they get back
+- [ ] SC-9: for every agent, either the surface reaches every location that agent reads extensions from, or the location it does not reach is **named**. A consumer must not have to find out by experiment which of their own extensions came with them
+- [ ] FR-26: why an executable extension is a larger grant than a declarative one is stated, along with the FR-15 route for a consumer who wants their own anyway
 - [ ] FR-11: the supported platforms are named, each with the enforcement tier its operating system provides, and a weaker guarantee says so with the difference named
 - [ ] FR-14 and FR-12: every claim the automated run cannot reach is listed with its procedure, and the handbook describes what a human runs without restating the assertions anywhere
 - [ ] The way to run an agent unconfined — by not invoking the confined entry point — is described rather than concealed (FR-10)
