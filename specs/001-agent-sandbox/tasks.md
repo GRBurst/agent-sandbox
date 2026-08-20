@@ -576,16 +576,37 @@ So nono's default without the key is pass-everything, and the 221 corroborates t
 
 The integration layer is `6 checks passed`, run as `nix develop -c bash scripts/validate.sh --layer integration`, and the whole suite is `1 of 13 checks failed`, that one being the progress bar: `check_sc3`'s missing-scenario set went from 19 to 18, `r3` leaving and nothing else moving.
 
-### M5d — An agent cannot widen its own confinement (Status: PENDING)
+### M5d — An agent cannot widen its own confinement (Status: IMPLEMENTED)
 
 **Scenario**: R4
 
 **RED**: `check_r4` rewrites `lib/leak-registry.nix` from inside a running session.
 
-- [ ] Check written and seen to FAIL
-- [ ] Both halves asserted, which together are FR-9: the running session's reach is unchanged, **and** a newly started session's reach is unchanged before re-entry
-- [ ] **Control**: the edit is confirmed to have landed on disk, so a write that silently failed cannot pass as a boundary holding
-- [ ] Violation planted (wrapper reads the profile from `$PWD`), seen to FAIL, reverted, recorded in plan.md
+- [x] Check written and seen to FAIL — and here, unlike M5a to M5c, the first FAIL was at the integration layer and was the check's own fault: the wrapper assertion started as a line-level search for `$PWD` near `--profile`, and the shipped wrapper legitimately carries `--workdir "$PWD"` on that same line. It reported the workdir as if it were the description. The assertion now extracts the value given to `--profile` and to `PREFLIGHT_PROFILE=` and requires each to be the store path or the variable holding it.
+- [x] Both halves asserted, which together are FR-9: four readings of the same target — before the edit and after it inside the editing session (`BEFORE :: 1`, `EDIT :: 0`, `AFTER :: 1`), from a second session started with the same description once the first exited (`READ :: 1`), and from a third started with the description rebuilt out of the edited source (`READ :: 0 :: <canary>`)
+- [x] **Control**: the edit is confirmed to have landed on disk — the file differs from the backup and carries the planted path — and the check returns the source to what it found, then rebuilds and asserts the original description store path comes back
+- [x] Violation planted (wrapper reads the profile from `$PWD`), seen to FAIL, reverted, recorded in plan.md
+
+**Measured before starting.** Recorded under [`M5d`](research.md#m5d--an-agent-cannot-widen-its-own-confinement).
+
+| Step | Observed |
+| --- | --- |
+| Session edits `lib/leak-registry.nix`, reads the target before and after | `BEFORE :: 1`, `EDIT :: 0`, `AFTER :: 1` — the write lands, the reach does not move |
+| Second session, same description | `READ :: 1` |
+| `nix build .#confinement-claude-code` from the edited tree | a different store path, and `warning: Git tree is dirty` on stderr |
+| Third session, rebuilt description | `READ :: 0 :: <canary>`, the capability banner listing the granted directory |
+| Old wrapper store path after the rebuild | still names the old description — a built entry point is pinned to the description it was built with |
+
+**Implementation.**
+
+- The scenario says "grant the whole home directory". It cannot: M5b measured that a grant covering a parent of nono's deny rules makes it refuse to start, so every session would fail to start and the refusals would be that refusal rather than the boundary holding. The grant names an exact directory inside the fake `$HOME` instead.
+- The planted violation is caught by the wrapper assertion and by nothing else. Every session in the check is driven by handing `nono` a description path, so an entry point that resolved its description from `$PWD` leaves all four readings exactly as they are. That is why the check reads the built entry point at all, and why the assertion is about the value of `--profile` rather than about the shape of the line it appears on.
+- The widening is written by substituting a needle, `entries = map checkEntry [ ];`, and the check fails loudly when the needle is absent rather than writing the file back unchanged. A registry that had been refactored would otherwise leave this check passing on an edit that widened nothing.
+- The registry is restored by a `RETURN` trap that runs before the scratch directory holding the backup is removed. A run killed outside bash's control leaves the registry edited; `git checkout -- lib/leak-registry.nix` is the repair, and the check says so where the trap is set.
+- stdout and stderr are kept in separate files rather than merged the way `check_r1` and `check_r2` merge them, because nono prints its whole capability banner to stderr and the readings would be needles in it. The two `nix build` invocations have their stderr captured for the same reason: the dirty-tree warning on the suite's own stderr reads as the suite having left the tree changed.
+- This is the most expensive check in the suite — three sessions and two evaluations of the flake — because the scenario's second half is about what a *rebuild* produces, and nothing short of a rebuild answers it.
+
+The integration layer is `7 checks passed`, run as `nix develop -c bash scripts/validate.sh --layer integration`, and the whole suite is `1 of 14 checks failed`, that one being the progress bar: `check_sc3`'s missing-scenario set went from 18 to 17, `r4` leaving and nothing else moving.
 
 ### M5e — An untrusted repository cannot grant itself paths (Status: PENDING)
 

@@ -784,3 +784,251 @@ check_r3() {
 
 	[ "$found" -eq 0 ]
 }
+
+# R4. A session cannot widen the boundary it is running inside.
+#
+# The scenario in one run. A session edits `lib/leak-registry.nix`, the source
+# its own description is generated from, to grant itself a directory outside
+# the project, and the same directory is then read four times: before the edit
+# and after it from inside that session, from a second session started once it
+# has exited, and from a third session started with a description rebuilt out
+# of the edited source.
+#
+# The grant names an exact directory inside the fake $HOME rather than $HOME
+# itself, which is what the scenario's wording suggests. nono refuses to start
+# when a grant covers a parent of its deny rules, measured on check_r2, so
+# granting $HOME would stop every session below from starting and the refusals
+# would be the refusal to start rather than the boundary holding.
+#
+# Controls, because three of the four readings are refusals (D9):
+#
+#   1. The edit is confirmed to have landed: the file on disk differs from the
+#      backup and carries the planted path. A write that failed silently would
+#      otherwise read as a boundary holding.
+#   2. The target is unreadable *before* the edit as well. Were it reachable
+#      already, "the reach is unchanged" would also be satisfied by a boundary
+#      that had changed.
+#   3. Rebuilding from the edited source produces a *different* description,
+#      and a session started with that one does read the target. That is the
+#      scenario's "until a human re-enters the environment" and the standing
+#      positive control in one: the edit was well-formed, it does widen, and
+#      what held the first three readings back was the description they ran
+#      with.
+#
+# The entry point is also read directly, and that pair of greps is what the
+# planted violation of this task breaks. Every session below is driven by
+# handing `nono` a description path, so an entry point that resolved its
+# description from `$PWD` would leave all four readings exactly as they are.
+#
+# stdout and stderr are kept apart rather than merged as check_r1 and check_r2
+# merge them, because nono prints its whole capability banner to stderr and the
+# readings would be needles in it.
+check_r4() {
+	local agent=claude-code
+	# The flake attribute of an entry point is the binary's name, not the
+	# agent's. M8 pairs the two per agent; until then both are written out.
+	local entry=claude
+	local entry_dir ref value registry backup outside home scratch canary
+	local source needle replacement why rebuilt restored rc found=0
+	local FIXTURE_PROFILE FIXTURE_SUBSTRATE FIXTURE_BASH
+	local -a SESSION_ENV profile_refs
+
+	session_fixture "$agent" || return 1
+
+	entry_dir=$(pinned_bin "$entry") || {
+		fail "the entry point $entry does not build"
+		return 1
+	}
+
+	# The description every session below runs with is the one the entry point
+	# would start them with, so what they observe is what a user would.
+	if ! grep -qF "$FIXTURE_PROFILE" "$entry_dir/$entry"; then
+		found=1
+		fail 'the entry point does not name the description this check probes with, so the session it starts is not the session measured here'
+	fi
+	# Every description the entry point names is either the store path this
+	# check probes with or the variable holding it. A line-level search for
+	# `$PWD` near `--profile` will not do: the same line legitimately carries
+	# `--workdir "$PWD"`, and matching it reports the workdir as if it were the
+	# description.
+	mapfile -t profile_refs < <(grep -oE -- '(--profile|PREFLIGHT_PROFILE=)[[:space:]]*[^[:space:]]+' "$entry_dir/$entry")
+	if [ "${#profile_refs[@]}" -eq 0 ]; then
+		found=1
+		fail 'the entry point names no description at all, so it is not the mechanism this check measures'
+	fi
+	for ref in "${profile_refs[@]}"; do
+		value=${ref#*=}
+		value=${value#--profile }
+		value=${value#\"}
+		value=${value%\"}
+		# The first arm is the literal text in the built script, not this
+		# shell's value of it.
+		# shellcheck disable=SC2016
+		case $value in
+		'$PREFLIGHT_PROFILE' | "$FIXTURE_PROFILE") ;;
+		*)
+			found=1
+			fail "$(printf 'the entry point takes its description from %s rather than from the store, so a session could write what its successor starts from' \
+				"$value")"
+			;;
+		esac
+	done
+
+	outside=$(mktemp -d -p "${XDG_RUNTIME_DIR:-/tmp}" agent-sandbox-r4.XXXXXX)
+	scratch="$REPO_ROOT/.tmp/r4"
+	rm -rf "$scratch"
+	mkdir -p "$scratch"
+
+	registry="$REPO_ROOT/lib/leak-registry.nix"
+	backup="$scratch/leak-registry.nix.orig"
+	cp -p "$registry" "$backup"
+	# Restored before the directory holding the backup is removed. A run killed
+	# outside bash's control leaves the registry edited, and
+	# `git checkout -- lib/leak-registry.nix` is the repair.
+	# shellcheck disable=SC2064
+	trap "cp -pf '$backup' '$registry'; rm -rf '$outside' '$scratch'" RETURN
+
+	# Outside the project, for the reason recorded on check_r1.
+	home="$outside/home"
+	mkdir -p "$home/reach"
+	canary="REACH-CANARY-$RANDOM$RANDOM"
+	printf '%s\n' "$canary" >"$home/reach/target.txt"
+
+	session_env "$outside/state"
+
+	# The widening the session will write. $HOME stays unexpanded: nix does not
+	# interpolate it, and nono expands it at the boundary. Failing on a missing
+	# needle rather than writing the file unchanged, because a registry that had
+	# been refactored would otherwise leave this check passing on an edit that
+	# widened nothing.
+	needle='entries = map checkEntry [ ];'
+	why='PLANTED by check_r4 from inside a session, restored before it returns.'
+	# shellcheck disable=SC2016
+	replacement=$(printf 'entries = map checkEntry [\n    {\n      path = "%s";\n      mode = "read";\n      agents = [ "%s" ];\n      why = "%s";\n      whyNotNarrower = "%s";\n    }\n  ];' \
+		'$HOME/reach' "$agent" "$why" "$why")
+	source=$(<"$registry")
+	if [[ $source != *"$needle"* ]]; then
+		fail "lib/leak-registry.nix no longer contains '$needle', so this check cannot widen it"
+		return 1
+	fi
+	printf '%s\n' "${source/"$needle"/$replacement}" >"$scratch/widened.nix"
+
+	# Builtins only, for the reason recorded on check_r1: PATH is inherited
+	# whole, host entries and all, so a name could resolve to a binary the
+	# session may not execute.
+	cat >"$scratch/probe-edit.sh" <<-'PROBE'
+		before_rc=0
+		before=$(<"$1") || before_rc=$?
+		printf 'BEFORE :: %s :: %s\n' "$before_rc" "$before"
+		edit_rc=0
+		printf '%s\n' "$(<"$2")" >"$3" || edit_rc=$?
+		printf 'EDIT :: %s\n' "$edit_rc"
+		after_rc=0
+		after=$(<"$1") || after_rc=$?
+		printf 'AFTER :: %s :: %s\n' "$after_rc" "$after"
+	PROBE
+	cat >"$scratch/probe-read.sh" <<-'PROBE'
+		rc=0
+		value=$(<"$1") || rc=$?
+		printf 'READ :: %s :: %s\n' "$rc" "$value"
+	PROBE
+
+	# Reading 1 and 2, in the session that does the editing.
+	env "${SESSION_ENV[@]}" "HOME=$home" \
+		"$(pinned_bin nono)/nono" run \
+		--profile "$FIXTURE_PROFILE" --workdir "$REPO_ROOT" --allow-cwd -- \
+		"$FIXTURE_BASH/bin/bash" "$scratch/probe-edit.sh" \
+		"$home/reach/target.txt" "$scratch/widened.nix" "$registry" \
+		>"$scratch/edit.out" 2>"$scratch/edit.err" && rc=0 || rc=$?
+
+	if ! grep -qFx 'EDIT :: 0' "$scratch/edit.out"; then
+		fail "$(printf 'the session did not rewrite the source of its own confinement (exit %s), so nothing below was tested:\n%s' \
+			"$rc" "$(tail -n 5 "$scratch/edit.err")")"
+		return 1
+	fi
+	# Control 1. The claim under test is about a boundary, not about a write
+	# that quietly did nothing.
+	if cmp -s "$backup" "$registry"; then
+		fail 'the registry on disk is unchanged after the session reported writing it, so the write never landed'
+		return 1
+	fi
+	# shellcheck disable=SC2016
+	if ! grep -qF '$HOME/reach' "$registry"; then
+		fail 'the registry on disk does not carry the planted grant, so the session wrote something else'
+		return 1
+	fi
+	# Control 2.
+	if grep -q '^BEFORE :: 0 ' "$scratch/edit.out"; then
+		found=1
+		fail 'the target outside the project was readable before the edit, so a reach that did not change proves nothing'
+	fi
+	# The scenario's first half.
+	if grep -q '^AFTER :: 0 ' "$scratch/edit.out"; then
+		found=1
+		fail 'the running session read a path its own edit granted, so an edit widens the boundary it is made inside'
+	fi
+	if grep -qF "$canary" "$scratch/edit.out"; then
+		found=1
+		fail 'the canary from outside the project appears in the output of the session that planted the grant for it'
+	fi
+
+	# Reading 3, in a session started after the editing one exited, with the
+	# environment not re-entered: the same description, deliberately.
+	env "${SESSION_ENV[@]}" "HOME=$home" \
+		"$(pinned_bin nono)/nono" run \
+		--profile "$FIXTURE_PROFILE" --workdir "$REPO_ROOT" --allow-cwd -- \
+		"$FIXTURE_BASH/bin/bash" "$scratch/probe-read.sh" \
+		"$home/reach/target.txt" \
+		>"$scratch/before.out" 2>"$scratch/before.err" && rc=0 || rc=$?
+
+	if ! grep -q '^READ :: ' "$scratch/before.out"; then
+		found=1
+		fail "$(printf 'the session started after the edit produced no reading at all (exit %s), so it observed nothing:\n%s' \
+			"$rc" "$(tail -n 5 "$scratch/before.err")")"
+	elif grep -q '^READ :: 0 ' "$scratch/before.out" || grep -qF "$canary" "$scratch/before.out"; then
+		found=1
+		fail 'a session started after the edit, without the environment being re-entered, read a path the edit granted'
+	fi
+
+	# Control 3, in two parts. The build log is captured because a dirty tree
+	# makes nix warn, and a warning on the suite's stderr reads as the suite
+	# having left the tree changed.
+	rebuilt=$(nix build --no-link --print-out-paths "$REPO_ROOT#confinement-$agent" 2>"$scratch/build.log") || {
+		fail "$(printf 'the edited registry does not evaluate, so the widening this check plants is not a valid one:\n%s' \
+			"$(tail -n 5 "$scratch/build.log")")"
+		return 1
+	}
+	if [ "$rebuilt" = "$FIXTURE_PROFILE" ]; then
+		fail 'rebuilding after the edit produced the same description, so the edit reached nothing and the readings above are not evidence'
+		return 1
+	fi
+
+	# Reading 4, with the rebuilt description: the re-entry the scenario says
+	# the widening waits for.
+	env "${SESSION_ENV[@]}" "HOME=$home" \
+		"$(pinned_bin nono)/nono" run \
+		--profile "$rebuilt" --workdir "$REPO_ROOT" --allow-cwd -- \
+		"$FIXTURE_BASH/bin/bash" "$scratch/probe-read.sh" \
+		"$home/reach/target.txt" \
+		>"$scratch/after.out" 2>"$scratch/after.err" && rc=0 || rc=$?
+
+	if ! grep -qFx "READ :: 0 :: $canary" "$scratch/after.out"; then
+		found=1
+		fail "$(printf 'a session started from the rebuilt description cannot read the target either (exit %s), so what held the readings above back was something other than the description they ran with:\n%s' \
+			"$rc" "$(tail -n 5 "$scratch/after.err")")"
+	fi
+
+	# Left as found, and said so rather than assumed: the description this check
+	# started from is the one the restored source produces.
+	cp -pf "$backup" "$registry"
+	restored=$(nix build --no-link --print-out-paths "$REPO_ROOT#confinement-$agent" 2>>"$scratch/build.log") || {
+		fail 'the registry does not evaluate after being restored, so this check has left the tree broken'
+		return 1
+	}
+	if [ "$restored" != "$FIXTURE_PROFILE" ]; then
+		found=1
+		fail 'restoring the registry did not reproduce the description this check started from, so it has left the source changed'
+	fi
+
+	[ "$found" -eq 0 ]
+}
