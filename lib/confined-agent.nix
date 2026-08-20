@@ -35,7 +35,13 @@ pkgs.writeShellApplication {
   # machine `nono` resolves from a user profile at a different minor version, and
   # AGENTS.md §3 is explicit that a tool resolving only from a user profile is
   # not available at all.
-  runtimeInputs = [ agentPkgs.nono ];
+  #
+  # git is here for FR-23's copy below, and is the same derivation the session's
+  # own substrate is rooted at, so it adds nothing to the closure.
+  runtimeInputs = [
+    agentPkgs.nono
+    pkgs.git
+  ];
 
   text = ''
     # nono reads its own configuration from $XDG_CONFIG_HOME, and M1e watched it
@@ -55,6 +61,45 @@ pkgs.writeShellApplication {
     PREFLIGHT_PROFILE=${profile}
     ${builtins.readFile ./preflight.sh}
     preflight_or_die
+
+    # FR-23 / D11 / R10. The session's GIT_CONFIG_GLOBAL names a file in the
+    # project, so the toolchain never searches the home directory for one and a
+    # host directive — `credential.helper`, `core.hooksPath` — cannot direct it.
+    # That direction on its own would leave the session with no commit identity,
+    # so the author's name and address are copied out of the host here. Only
+    # those two keys: they are not credential material, and the copy is visible
+    # in the file it produces rather than hidden in a variable.
+    #
+    # Written by the entry point and not by the shell hook, because a stranger
+    # running `nix run <ref>#${binary}` never enters a shell. Create-if-absent,
+    # because that is what makes entering twice change nothing and is also the
+    # override FR-23 asks for: whatever the file already says wins over the host,
+    # and nothing here ever rewrites it.
+    agent_sandbox_git_config="$PWD/.agents/git/config"
+    if [ ! -e "$agent_sandbox_git_config" ]; then
+      # --get exits 1 on an unset key, and this script runs under `set -e`.
+      agent_sandbox_git_name="$(git config --global --get user.name || true)"
+      agent_sandbox_git_email="$(git config --global --get user.email || true)"
+
+      # A host with no identity of its own leaves no file at all, so a commit
+      # fails with git's own "Please tell me who you are" (P9) rather than being
+      # attributed to a placeholder this environment invented — and a host that
+      # gains one later is still picked up.
+      if [ -n "$agent_sandbox_git_name" ] || [ -n "$agent_sandbox_git_email" ]; then
+        mkdir -p "$PWD/.agents/git"
+        {
+          printf '# Written by agent-sandbox: the identity a confined session commits under.\n'
+          printf '# Copied from the host once. Edit freely — an existing file is never rewritten.\n'
+          printf '[user]\n'
+          if [ -n "$agent_sandbox_git_name" ]; then
+            printf '\tname = %s\n' "$agent_sandbox_git_name"
+          fi
+          if [ -n "$agent_sandbox_git_email" ]; then
+            printf '\temail = %s\n' "$agent_sandbox_git_email"
+          fi
+        } >"$agent_sandbox_git_config"
+      fi
+    fi
 
     # --allow-cwd is not decoration. M4b ran the same profile with and without
     # it: `workdir.access = "readwrite"` sets the *level* of the working

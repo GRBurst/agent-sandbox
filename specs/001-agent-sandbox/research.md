@@ -1254,6 +1254,59 @@ The plant the task's criterion names is the wrapper reading the declaration from
 
 That is not a hole in the checks so much as the boundary of what they cover: the registry is this repository's own reviewed content, pinned by the ref a consumer names, and not a file a consumer's checkout carries. `check_r4` covers a session editing it, and `check_r5` covers a checkout shipping a description of its own. What no check covers is a reviewer waving through a registry entry that names a host path, which is a human gate and is recorded as one.
 
+## M5g — A host tool configuration does not direct the session
+
+Measured on x86_64-linux with nono 0.74.0 and git 2.55.0 out of the shipped substrate, against `.#confinement-claude-code` and the `.#claude` entry point. The planted host configuration was the same one the check now uses: `$HOME/.gitconfig` carrying `user.name`, `user.email`, `credential.helper = cache --timeout=99999`, `core.hooksPath`, `commit.gpgsign = true` and `alias.canary = !echo <canary>`, plus a `$HOME/.config/git/config` carrying `core.hooksPath`, that being git's second global location.
+
+Resolving git inside the substrate needs a `[ -x "$p/bin/git" ]` loop over `store-paths`, not a name match: `grep -m1 -E '\-git-[0-9]'` finds the `-doc` output first, which has no `bin/git`.
+
+### The effective configuration inside a session is already clean, and the file it is pointed at did not exist
+
+| Reading, inside the session | Observed |
+| --- | --- |
+| `GIT_CONFIG_GLOBAL` | `$WORKDIR/.agents/git/config` — and the file was **absent** |
+| `GIT_CONFIG_SYSTEM` | `/dev/null` |
+| `XDG_CONFIG_HOME` | unset — no `XDG_*` variable is in `allow_vars` |
+| a direct read of `$HOME/.gitconfig` | denied |
+| `git config --list --show-origin --show-scope` | `local file:.git/config` entries only — no `global` scope, no `system` scope, none of the six planted directives, no canary |
+| the same probe, unconfined, same `HOME` | all six directives, under `global file:$HOME/.gitconfig` |
+
+So the probe discriminates, and pointing `GIT_CONFIG_GLOBAL` at a path that does not exist suppresses **both** `~/.gitconfig` and `~/.config/git/config`. The absent file is the gap this task closed: the control criterion — a setting this environment wrote, read back — could not pass, because `user.name` inside a session was coming from the repository's own `.git/config`.
+
+### `GIT_CONFIG_SYSTEM=/dev/null` is load-bearing on a host with no system file
+
+`/etc/gitconfig` does not exist on this machine and nix's git ships no `$out/etc/gitconfig`, but git's compiled-in system path is `/etc/gitconfig` regardless.
+
+| `git config --list --system` | Result |
+| --- | --- |
+| with the variable set | exit 0, empty output |
+| with the variable absent | exit 128, `fatal: unable to read config file '/etc/gitconfig': No such file or directory` |
+
+The variable stops the toolchain *going looking*. The assertion is therefore that the system scope **resolves and contributes nothing**, which fails by error on a host like this one and by content on a host that carries the file. `/dev/null` never appears as a `file:` origin, so the origins property needs no special case for it.
+
+### A `core.hooksPath` hook does run, so the second arm is testing something live
+
+Measured unconfined, with the planted `core.hooksPath` and a `pre-commit` writing a marker: the hook ran and the marker was written. The hook lives **inside the project directory** in every arm, because a hook in the fake home would be unreadable inside a session and a crossed directive would then fail for a reason that has nothing to do with the directive. Its shebang is the substrate's own bash: `#!/bin/sh` would fail to exec in a store-only session, which would mask a leak as an unrelated failure.
+
+A commit with no identity at all fails visibly — exit 128, `Author identity unknown`, `*** Please tell me who you are.` — which is the **P9** shape, and is why a host with no identity leaves no file rather than a placeholder.
+
+### The grant and the variables catch different things
+
+| Plant | Integration | Component |
+| --- | --- | --- |
+| `groups = [ "git_config" ]` | **nothing** — `10 checks passed` | `check_confinement_validates`: `groups.include carries git_config`; `check_sc1`: `~/.gitconfig`, `~/.config/git/ignore` and the host's home-manager gitconfig store path granted |
+| that, plus dropping `GIT_CONFIG_GLOBAL` | `check_r10`, every assertion but the system scope — including the hook actually running | the same two |
+| dropping `GIT_CONFIG_SYSTEM` | `check_r10`, the system scope and the direction | `check_confinement_validates` |
+
+The first row is the finding: **the grant alone is not the leak.** While `GIT_CONFIG_GLOBAL` is set, git ignores `~/.gitconfig` however readable it is. What leaks is the *search*, which is exactly what `D11` says and what a read-only grant does not stop. So `check_r10` is not the check that catches a `git_config` grant — the component layer is — and the two halves of the criterion belong in two layers rather than being duplicated into both.
+
+The second row reconstructs the incident `D11` was written from: `credential.helper = cache` in the effective configuration, `commit.gpgsign` producing `gpg failed to sign the data` and `COMMIT_RC :: 128`, and a program named by the host configuration executing inside the session and leaving its marker behind.
+
+### Two bugs in the check itself, both found by planting
+
+- **`git config --file <listing>` parses a listing.** Control 2 first read the effective configuration back with `git config --file effective.txt --list`, falling back to `sed` on failure. git parsed the `--show-origin --show-scope` listing as though it were a configuration file and exited 0, so the fallback never ran and the control failed against a file that plainly carried the setting. The fix strips the two tab-separated prefix fields with `sed` and matches with `grep -qxF`.
+- **git lowercases section and key names in `--list` output.** `core.hooksPath` reads back as `core.hookspath`, so the one directive whose hook was observed *running* was the one directive the check did not report. It was the only assertion of the six that could not have failed. Matching is now case-insensitive. Both bugs argue the same thing: a check that has only ever passed has not been checked.
+
 ## M8e — Where each agent reads its declarative extensions from
 
 **Partial.** `opencode` is measured; `claude-code` and `pi` are not.

@@ -1428,3 +1428,278 @@ check_j8_2() {
 
 	[ "$found" -eq 0 ]
 }
+
+# R10 / FR-23 / D11 — a host tool configuration does not direct the session.
+#
+# The counterpart to check_j8_2 and the harder case, because this one was
+# observed rather than reasoned about: a live session read
+# `credential.helper = cache` out of the host `~/.gitconfig` and tried to start
+# a daemon. It failed only because that session's working directory happened to
+# be read-only at the time.
+#
+# So the danger is not the file being readable, it is the directives in it. A
+# read-only grant is no protection against `core.hooksPath`, and neither is
+# denying the path: withhold the grant alone and the outcome depends on what the
+# host happens to contain, and the session has no commit identity either. The
+# toolchain is *directed* at configuration this environment wrote (D11), and
+# this check is what says the direction holds.
+#
+# The subject is the real entry point, run twice, plus one session driving the
+# toolchain itself:
+#
+#   1. `claude --version` in a scratch project, which is what must write the
+#      identity file. It has to be the entry point rather than the shell hook,
+#      because a stranger reaching an agent by `nix run <ref>#claude` never runs
+#      the hook, and the file has to exist before the session starts.
+#   2. A session running `git` out of the substrate, which reports the effective
+#      configuration and then commits.
+#   3. `claude --version` again, over an identity file the check has replaced
+#      with one of its own, which is FR-23's override and M9b's idempotency
+#      asserted as one statement: an existing file is never rewritten.
+#
+# The planted host configuration carries five directives, and `core.hooksPath`
+# names a hook **inside the scratch project** on purpose. A hook script in the
+# fake home would be unreadable from inside the session, so a directive that had
+# crossed would fail to run for a reason that has nothing to do with the
+# directive — and the check would pass while the boundary leaked. Everything the
+# directive needs in order to run is reachable; the only thing outside the
+# project is the file the directive came from.
+check_r10() {
+	local agent=claude-code binary=claude
+	local entry outside home proj ctrl cfg gitdir git probe hook
+	local canary want_name want_email got rc arm
+	local FIXTURE_PROFILE FIXTURE_SUBSTRATE FIXTURE_BASH
+	local -a SESSION_ENV
+	local found=0
+
+	entry=$(pinned_bin "$binary")
+	session_fixture "$agent" || return 1
+	gitdir=$(substrate_member "$FIXTURE_SUBSTRATE" git) || {
+		fail "the substrate for $agent provides no git, so there is no toolchain to observe"
+		return 1
+	}
+	git="$gitdir/bin/git"
+
+	outside=$(mktemp -d -p "${XDG_RUNTIME_DIR:-/tmp}" agent-sandbox-r10.XXXXXX)
+	# shellcheck disable=SC2064
+	trap "rm -rf '$outside'" RETURN
+
+	# The scratch project is a sibling of the fake home rather than a directory
+	# inside it: the description carries 48 $HOME-relative deny rules, and a
+	# workdir underneath the home they are relative to makes nono refuse to
+	# start on the overlap.
+	home="$outside/home"
+	proj="$outside/proj"
+	ctrl="$outside/ctrl"
+	cfg="$outside/cfg"
+	mkdir -p "$home" "$proj/hooks" "$ctrl/hooks" "$cfg"
+
+	canary="HOOK-RAN-$RANDOM$RANDOM"
+	# The interpreter is the substrate's own bash, and the marker is written
+	# relative to the hook's working directory, which git sets to the top of the
+	# worktree. Neither detail is cosmetic: a `#!/bin/sh` hook would fail to
+	# exec inside a session that is granted the store and not `/bin`, and a
+	# `git rev-parse` would resolve a program off the inherited PATH. Either
+	# would make a directive that had crossed fail for its own reasons, and this
+	# check would pass while the boundary leaked.
+	for hook in "$proj" "$ctrl"; do
+		printf '#!%s/bin/bash\nprintf "%%s\\n" %s >./hook-ran\n' \
+			"$FIXTURE_BASH" "$canary" >"$hook/hooks/pre-commit"
+		chmod +x "$hook/hooks/pre-commit"
+	done
+
+	# The host configuration a consumer's machine actually carries, with the
+	# directive that was observed crossing among it. `commit.gpgsign` is here
+	# because it is next to the two keys FR-23 does copy, and a copy that took
+	# the whole file would bring it along and make every commit demand a key the
+	# session cannot reach (FR-24).
+	want_name="Host Person $RANDOM"
+	want_email="host-$RANDOM@example.invalid"
+	{
+		printf '[user]\n\tname = %s\n\temail = %s\n' "$want_name" "$want_email"
+		printf '[credential]\n\thelper = cache --timeout=99999\n'
+		printf '[core]\n\thooksPath = %s\n' "$proj/hooks"
+		printf '[commit]\n\tgpgsign = true\n'
+		printf '[alias]\n\tcanary = !echo %s\n' "$canary"
+	} >"$home/.gitconfig"
+	# The second location git searches for a global file, so a check that only
+	# suppressed the first would still pass with this one live.
+	mkdir -p "$home/.config/git"
+	printf '[core]\n\thooksPath = %s\n' "$proj/hooks" >"$home/.config/git/config"
+
+	session_env "$outside/state"
+
+	# Control 1, and it comes first because every assertion below is about an
+	# absence. Unconfined, with the same home and the same repository, the
+	# planted directive runs: the hook fires and leaves its canary. A hook that
+	# could never have run would make the confined arm's silence meaningless.
+	(
+		cd "$ctrl" || exit 1
+		env -u GIT_CONFIG_GLOBAL -u GIT_CONFIG_SYSTEM "HOME=$home" \
+			"$git" init -q . &&
+			env -u GIT_CONFIG_GLOBAL -u GIT_CONFIG_SYSTEM "HOME=$home" \
+				"$git" commit -q --allow-empty -m control --no-gpg-sign
+	) >"$outside/control.log" 2>&1
+	if [ "$(cat "$ctrl/hook-ran" 2>/dev/null)" != "$canary" ]; then
+		fail "$(printf 'the planted host directive does not run even outside the boundary, so its absence inside proves nothing:\n%s' \
+			"$(cat "$outside/control.log")")"
+		return 1
+	fi
+
+	# Session 1. The entry point, which is what must write the identity file.
+	env "${SESSION_ENV[@]}" "HOME=$home" "XDG_CONFIG_HOME=$cfg" \
+		env -C "$proj" "$entry/$binary" --version \
+		>"$outside/entry1.out" 2>"$outside/entry1.err" && rc=0 || rc=$?
+	if [ "$rc" -ne 0 ]; then
+		fail "$(printf 'the entry point does not start in a scratch project (exit %s):\n%s' \
+			"$rc" "$(tail -20 "$outside/entry1.err")")"
+		return 1
+	fi
+
+	# FR-23, first half: the file exists, and it holds the host's author
+	# identity and nothing else out of that file.
+	if [ ! -f "$proj/.agents/git/config" ]; then
+		fail "the toolchain is directed at a configuration file this environment never wrote, so the session has no commit identity and the outcome depends on what the host contains"
+		return 1
+	fi
+	got=$("$git" config --file "$proj/.agents/git/config" --list | sort)
+	if [ "$got" != "$(printf 'user.email=%s\nuser.name=%s' "$want_email" "$want_name")" ]; then
+		found=1
+		fail "$(printf 'the configuration this environment wrote is not the host author identity and only that:\n%s' "$got")"
+	fi
+
+	# Session 2. The toolchain, inside the boundary, reporting on itself and
+	# then committing. Written to the project because the project is what the
+	# host can read afterwards.
+	probe="$proj/probe.sh"
+	cat >"$probe" <<-'PROBE'
+		git=$1
+		work=$2
+		printf 'GLOBAL_VAR :: %s\n' "${GIT_CONFIG_GLOBAL-<unset>}"
+		printf 'SYSTEM_VAR :: %s\n' "${GIT_CONFIG_SYSTEM-<unset>}"
+		"$git" config --list --show-origin --show-scope >"$work/effective.txt" 2>&1
+		printf 'LIST_RC :: %s\n' "$?"
+		"$git" config --list --system >"$work/system.txt" 2>&1
+		printf 'SYSTEM_RC :: %s\n' "$?"
+		cd "$work" || exit 1
+		"$git" init -q . >>"$work/git.log" 2>&1
+		printf 'INIT_RC :: %s\n' "$?"
+		"$git" commit -q --allow-empty -m r10 >>"$work/git.log" 2>&1
+		printf 'COMMIT_RC :: %s\n' "$?"
+	PROBE
+
+	env "${SESSION_ENV[@]}" "HOME=$home" \
+		"$(pinned_bin nono)/nono" run \
+		--profile "$FIXTURE_PROFILE" --workdir "$proj" --allow-cwd -- \
+		"$FIXTURE_BASH/bin/bash" "$probe" "$git" "$proj" \
+		>"$outside/probe.out" 2>"$outside/probe.err" && rc=0 || rc=$?
+
+	if ! grep -qF 'LIST_RC :: 0' "$outside/probe.out"; then
+		fail "$(printf 'the toolchain cannot report its own configuration inside the session (exit %s):\n%s\n%s' \
+			"$rc" "$(cat "$outside/probe.out")" "$(tail -20 "$outside/probe.err")")"
+		return 1
+	fi
+
+	# Control 2. A setting this environment wrote is read back from the
+	# effective configuration, so a toolchain that had read no configuration at
+	# all could not pass. It accumulates rather than returning, so a violation
+	# that both breaks this and lets a host directive through reports both.
+	# `--show-scope --show-origin` prefixes each line with two tab-separated
+	# fields, so the setting itself is what is left once both are stripped.
+	if ! grep -qxF "user.name=$want_name" \
+		<(sed 's/^[^\t]*\t[^\t]*\t//' "$proj/effective.txt"); then
+		found=1
+		fail "$(printf 'the effective configuration does not carry the setting this environment wrote:\n%s' \
+			"$(cat "$proj/effective.txt")")"
+	fi
+
+	# The scenario's first Then, as a property over origins rather than a list
+	# of the files this environment happens to know about. Every file the
+	# toolchain read is under the project directory, so a scope this check never
+	# heard of fails it too.
+	while IFS= read -r origin; do
+		case $origin in
+		"$proj"/*) ;;
+		*)
+			found=1
+			fail "$(printf 'the toolchain read a configuration file outside the project directory: %s' "$origin")"
+			;;
+		esac
+	done < <(sed -n 's/^[a-z]*\tfile:\([^\t]*\)\t.*/\1/p' "$proj/effective.txt" | sort -u)
+
+	# The scenario's second Then. Each directive named, because each is a
+	# different way in: one starts a daemon, one runs a program at commit time,
+	# one runs a program on a subcommand, one demands a key the session cannot
+	# reach.
+	#
+	# Matched case-insensitively, and that is not fastidiousness: git lowercases
+	# section and key names in its own listing, so the planted `core.hooksPath`
+	# reads back as `core.hookspath`. The first draft searched for the name as
+	# written and reported nothing while the plant's hook was demonstrably
+	# running — the one assertion of the six that could not have failed.
+	for arm in credential.helper core.hooksPath commit.gpgsign alias.canary; do
+		if grep -qiF "$arm=" "$proj/effective.txt"; then
+			found=1
+			fail "$(printf 'the host directive %s is in the effective configuration inside the session:\n%s' \
+				"$arm" "$(grep -iF "$arm=" "$proj/effective.txt")")"
+		fi
+	done
+	if grep -qF "$canary" "$proj/effective.txt"; then
+		found=1
+		fail "the host configuration's canary appears in the effective configuration"
+	fi
+
+	# D11's second variable, and the reason it is not redundant on a host with
+	# no system file: git's compiled-in system path is /etc/gitconfig whether or
+	# not it exists, so a session with the variable dropped goes looking. The
+	# assertion is that the scope resolves and contributes nothing — which fails
+	# by an error on a host without the file, and by content on one with it.
+	if ! grep -qF 'SYSTEM_RC :: 0' "$outside/probe.out" ||
+		[ -s "$proj/system.txt" ]; then
+		found=1
+		fail "$(printf 'the system scope does not resolve to nothing inside the session:\n%s\n%s' \
+			"$(grep -F 'SYSTEM_RC' "$outside/probe.out")" "$(cat "$proj/system.txt")")"
+	fi
+	if ! grep -qF "GLOBAL_VAR :: $proj/.agents/git/config" "$outside/probe.out" ||
+		! grep -qF 'SYSTEM_VAR :: /dev/null' "$outside/probe.out"; then
+		found=1
+		fail "$(printf 'the toolchain is not directed where D11 says it is:\n%s' \
+			"$(grep -F '_VAR ::' "$outside/probe.out")")"
+	fi
+
+	# The second arm: no process started, and nothing written outside the
+	# project. The hook is asserted from the host rather than from the session,
+	# and the commit is asserted to have succeeded, because a commit that failed
+	# would leave no marker either.
+	if ! grep -qF 'COMMIT_RC :: 0' "$outside/probe.out"; then
+		found=1
+		fail "$(printf 'the session cannot commit, so a hook that never ran cannot be told from a commit that never happened:\n%s\n%s' \
+			"$(cat "$outside/probe.out")" "$(cat "$proj/git.log" 2>/dev/null)")"
+	fi
+	if [ -e "$proj/hook-ran" ]; then
+		found=1
+		fail "$(printf 'a program named by the host configuration ran inside the session, leaving %s' \
+			"$(cat "$proj/hook-ran")")"
+	fi
+
+	# Session 3. FR-23's override and M9b's idempotency are the same statement:
+	# an existing file is never rewritten, so a consumer who edits it keeps
+	# their own values however many times an agent starts.
+	"$git" config --file "$proj/.agents/git/config" user.name "Consumer $canary"
+	"$git" config --file "$proj/.agents/git/config" user.email "consumer@example.invalid"
+	cp "$proj/.agents/git/config" "$outside/override.expected"
+	env "${SESSION_ENV[@]}" "HOME=$home" "XDG_CONFIG_HOME=$cfg" \
+		env -C "$proj" "$entry/$binary" --version \
+		>"$outside/entry2.out" 2>"$outside/entry2.err" && rc=0 || rc=$?
+	if [ "$rc" -ne 0 ]; then
+		found=1
+		fail "$(printf 'the entry point does not start a second time in the same project (exit %s):\n%s' \
+			"$rc" "$(tail -20 "$outside/entry2.err")")"
+	elif ! diff -q "$outside/override.expected" "$proj/.agents/git/config" >/dev/null; then
+		found=1
+		fail "$(printf 'the consumer own author identity was overwritten by a second start:\n%s' \
+			"$(diff -u "$outside/override.expected" "$proj/.agents/git/config" | sed '1,2d')")"
+	fi
+
+	[ "$found" -eq 0 ]
+}

@@ -704,7 +704,7 @@ The in-project control cannot be `.claude/skills`. Every arm printed `1 project-
 
 The integration layer is `9 checks passed`, run as `direnv exec . bash scripts/validate.sh --layer integration`, and the whole suite is `1 of 16 checks failed`, that one being the progress bar: `check_sc3`'s missing-scenario set went from 16 to 15.
 
-### M5g — A host tool configuration does not direct the session (Status: PENDING)
+### M5g — A host tool configuration does not direct the session (Status: IMPLEMENTED)
 
 **Scenario**: R10
 
@@ -712,12 +712,33 @@ R9's counterpart for the ordinary toolchain, and the sharper case, because this 
 
 **RED**: `check_r10` places a configuration in the fake `$HOME` carrying a directive that runs a program, and inspects the toolchain's effective configuration from inside.
 
-- [ ] Check written and seen to FAIL with the host directive present in the effective configuration
-- [ ] `groups.include` does not carry `git_config`; `GIT_CONFIG_GLOBAL` points at a file this environment wrote and `GIT_CONFIG_SYSTEM` is `/dev/null` ([D11](plan.md#d11))
-- [ ] Second arm: no process started and nothing was written outside `$WORKDIR`
-- [ ] **Control**: a setting this environment *did* write is read back from the effective configuration, so a toolchain with no configuration at all cannot pass
-- [ ] `user.name` and `user.email` are copied from the host once at setup and a consumer can override them (FR-23)
-- [ ] Both violations planted (include `git_config`; drop `GIT_CONFIG_SYSTEM`), each seen to FAIL, reverted, recorded in plan.md
+- [x] Check written and seen to FAIL — and this is the **one task in `M5` with a real RED**, because the property did not hold as shipped. It failed on its own control: `the toolchain is directed at a configuration file this environment never wrote, so the session has no commit identity and the outcome depends on what the host contains`. `GIT_CONFIG_GLOBAL` named `$WORKDIR/.agents/git/config` and nothing anywhere created it
+- [x] `groups.include` does not carry `git_config`; `GIT_CONFIG_GLOBAL` points at a file this environment wrote and `GIT_CONFIG_SYSTEM` is `/dev/null` ([D11](plan.md#d11)). **The two halves are asserted one layer apart, because they catch different things** — see below. The group is `check_confinement_validates`'s and `check_sc1`'s; the variables' *values* are asserted from inside a live session by this check, which is stronger than asserting the key is present
+- [x] Second arm: `COMMIT_RC :: 0` and the marker the planted `pre-commit` hook would have written is absent afterwards, checked from the host
+- [x] **Control**: two of them. The planted directive is confirmed to run **outside** the boundary first, so a hook that never worked cannot pass as a hook refused; and `user.name` is read back out of the effective configuration inside the session, so a toolchain with no configuration at all cannot pass
+- [x] `user.name` and `user.email` are copied from the host once at setup and a consumer can override them (FR-23). The file is asserted to hold **exactly** those two keys with the host's values and nothing else, and a third session asserts a file the consumer has edited is left untouched
+- [x] Both violations planted, each seen to FAIL, reverted, recorded in plan.md. **Three plants, not two**, because the first one does not bite where the criterion assumed
+
+**Measured before starting**, recorded under [`M5g`](research.md#m5g--a-host-tool-configuration-does-not-direct-the-session).
+
+The effective configuration inside a session was already clean — no `global` scope, no `system` scope, none of six planted directives — while the same probe run unconfined with the same `HOME` reported all six. So the probe discriminates, and pointing `GIT_CONFIG_GLOBAL` at a path that does not exist suppresses both `~/.gitconfig` and `~/.config/git/config`.
+
+But the file it pointed at **did not exist**, and nothing in the repository created it. `user.name` inside a session was coming from the checkout's own `.git/config`. That is the RED, and closing it is this task's production change.
+
+`GIT_CONFIG_SYSTEM=/dev/null` is load-bearing even here, where `/etc/gitconfig` does not exist: with the variable, `git config --list --system` is exit 0 and empty; without it, exit 128 and `fatal: unable to read config file '/etc/gitconfig'`. The variable stops the toolchain going looking, so the assertion is that the system scope resolves and contributes nothing — failing by error on this host and by content on one that carries the file.
+
+A `core.hooksPath` hook in a granted directory does run, measured unconfined, so the second arm tests something live rather than hypothetical. And a commit with no identity fails visibly, exit 128 with `Please tell me who you are`, which is the **P9** shape a missing file should produce.
+
+**Implementation.** `check_r10` joins `scripts/checks/integration.sh` — three sessions and one unconfined control — and the entry point gains the file FR-23 always said existed.
+
+- **The identity file is written by the entry point, create-if-absent**, which is the decision `D11` had left open. Not the shell hook, because a stranger running `nix run <ref>#<binary>` never enters one. Create-if-absent makes three requirements one mechanism: "once at setup", the consumer override — whatever the file says already wins, and nothing rewrites it — and `M9b`'s idempotency. Only `user.name` and `user.email` are copied, `|| true` on each because `git config --get` exits 1 when unset. A host with no identity leaves **no file**, so the failure is git's own rather than a placeholder commit, and a host that gains one later is still picked up.
+- **No environment-variable override was added.** FR-23's "a consumer may override" is satisfied by editing the file, which no check would distinguish from a variable, and the skill forbids an option no check exercises.
+- **The scratch project is a sibling of the fake `$HOME`, never under it**, for the reason `M5a` found: the 48 `$HOME`-relative deny rules make a granted directory beneath the home unenforceable.
+- **The hook lives inside the project and its shebang is the substrate's own bash.** A hook in the fake home would be unreadable inside a session, so a crossed directive would fail for a reason unrelated to the directive; `#!/bin/sh` would fail to exec in a store-only session. Either would mask a leak as an unrelated error.
+- **The origins assertion is a property**: every `file:` origin in the effective configuration must be under the project. The four named directives are asserted individually alongside it, because a property failure names a file and the point of the scenario is which directive arrived.
+- **Plant 1 is inert at this layer, and that is the finding.** Including `git_config` changes nothing `check_r10` can see: while `GIT_CONFIG_GLOBAL` is set, git ignores `~/.gitconfig` however readable it is. **The grant alone is not the leak — the search is**, which is `D11`'s point made executable. The component layer catches it instead, so no value assertion was added there: it would be a third copy of an assertion two layers already make.
+- **Plant 2 reconstructs the incident the decision was written from**, and is the one that matters: `credential.helper = cache` in the effective configuration, `commit.gpgsign` producing `gpg failed to sign the data`, and a program named by the host configuration **executing inside the session** and leaving its marker.
+- **Two bugs in the check were found by planting, not by writing it.** `git config --file` happily parses a `--show-origin` listing and exits 0, so the control's fallback never ran; and git lowercases keys in `--list`, so `core.hooksPath` read back as `core.hookspath` and the one directive observed *running* was the one directive not reported. It was the only assertion of the six that could not have failed. Both say the same thing: a check that has only ever passed has not been checked.
 
 ### M5h — Every refusal check has a control (Status: PENDING)
 
