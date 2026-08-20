@@ -1237,3 +1237,194 @@ check_r5() {
 
 	[ "$found" -eq 0 ]
 }
+
+# A claude-code skills-directory extension, which is what `claude plugin list`
+# enumerates. The manifest is the part that makes one observable: a bare
+# SKILL.md is invisible to that command, measured unconfined against a plant
+# that had one and nothing else, so a check that planted only prose would watch
+# an agent report nothing and call it confinement.
+plant_extension() {
+	local root=$1 name=$2
+	mkdir -p "$root/$name/.claude-plugin"
+	printf '{ "name": "%s", "version": "0.1.0", "description": "%s", "skills": ["./"] }\n' \
+		"$name" "$name" >"$root/$name/.claude-plugin/plugin.json"
+	printf -- '---\nname: %s\ndescription: planted by check_j8_2\n---\n\nNothing.\n' \
+		"$name" >"$root/$name/SKILL.md"
+}
+
+# Is this extension reported as loaded? The name heads a stanza and the status
+# is a later line of it, so the stanza is delimited first: a file-wide search
+# for both strings would let one extension's status stand in for another's,
+# which is exactly the confusion this check exists to avoid when several are
+# planted at once.
+extension_loaded() {
+	local listing=$1 name=$2
+	awk -v n="$name@skills-dir" '
+		index($0, n) == 1 || index($0, " " n) { inside = 1; next }
+		inside && /@skills-dir/ { inside = 0 }
+		inside && /Status:/ { if (index($0, "loaded")) ok = 1; inside = 0 }
+		END { exit !ok }
+	' "$listing"
+}
+
+# Journey 8.2 — a home directory that already configures these agents for every
+# project, and a consumer who declared nothing. That is the state every consumer
+# starts in and the only state a stranger is ever in.
+#
+# Two observables, and the pair is the point. The reach comparison is the same
+# set equality check_j1_1 makes, asserted under the one condition that makes it
+# interesting: a home full of agent configuration, a host confinement
+# description among it, so FR-21's "its confinement descriptions take no part in
+# deciding a session's reach" is observed rather than assumed. The extension
+# assertion is the other half, and D17 is why it cannot be dropped — an
+# extension root read relative to $HOME needs no grant to be found, so "no grant
+# was added" does not imply "no extension arrived", and the two have to be
+# asserted separately.
+#
+# The subject is the built entry point rather than `nix develop -c`, because the
+# question is what this repository's wrapper and description grant and not what
+# a developer's shell happens to export. XDG_CONFIG_HOME is a scratch root for
+# the same reason M5e used one: a real one carries nono packages of its own.
+#
+# FR-21's credentials, history and session state are planted and are covered by
+# the reach comparison rather than by assertions of their own: no path under the
+# fake home is granted, so no file under it is reachable, whatever it holds.
+check_j8_2() {
+	local agent=claude-code binary=claude
+	local outside home state cfg hostroot projroot project registry substrate
+	local entry hostext projext hostile session rc found=0
+	local -a sessions=()
+
+	entry=$(pinned_bin "$binary") || return 1
+	session_fixture "$agent" || return 1
+
+	# Outside the project, because 48 of the description's deny rules are
+	# $HOME-relative and nono refuses to start when a granted path overlaps
+	# one, and clean, because a stranger's home configures nothing yet — this
+	# check puts back only what it wants to be found.
+	outside=$(mktemp -d -p "${XDG_RUNTIME_DIR:-/tmp}" agent-sandbox-j8_2.XXXXXX)
+	home="$outside/home"
+	state="$outside/state"
+	cfg="$outside/config"
+	hostroot="$home/.claude/skills"
+	hostile="$home/reach"
+	hostext="hostsurface-$RANDOM$RANDOM"
+	projext="projectsurface-$RANDOM$RANDOM"
+	# The project's own extension root is where the description points
+	# CLAUDE_CONFIG_DIR, so the control is inside the project directory and
+	# needs no grant beyond the one every session has. The project-scope
+	# .claude/skills root cannot serve: every arm of the measurement reported
+	# it scanned and not loaded, pending an interactive trust dialog.
+	projroot="$REPO_ROOT/.agents/claude/skills"
+	# shellcheck disable=SC2064
+	trap "rm -rf '$outside' '$projroot/$projext'" RETURN
+	mkdir -p "$hostroot" "$hostile" "$cfg" "$projroot"
+
+	# The host-global configuration a consumer accumulates, all of it declared
+	# to nobody: an authoring surface, a stored credential, conversation
+	# history, session state, and a confinement description of nono's own that
+	# grants a directory outside the project.
+	plant_extension "$hostroot" "$hostext"
+	plant_extension "$projroot" "$projext"
+	printf 'HOST-CREDENTIAL-%s\n' "$RANDOM$RANDOM" >"$home/.claude/.credentials.json"
+	printf '{"prompt":"a previous conversation"}\n' >"$home/.claude/history.jsonl"
+	printf '{"projects":{}}\n' >"$home/.claude.json"
+	printf 'reachable only by a session that took its description from here\n' \
+		>"$hostile/target.txt"
+	mkdir -p "$home/.config/nono/profiles"
+	jq --arg d "$hostile" '.filesystem.read += [$d]' \
+		"$FIXTURE_PROFILE" >"$home/.config/nono/profiles/$agent.json"
+
+	session_env "$state"
+	# `plugin list` rather than `--version`: it starts the agent, so FR-21's
+	# "does not prevent one from working" is asserted by the same run that
+	# enumerates what reached it, and it is the only instrument claude-code
+	# has for the question — there is no `debug skill`, and `--print /skills`
+	# answers that /skills is unavailable in this environment.
+	(
+		cd "$REPO_ROOT" && env "${SESSION_ENV[@]}" \
+			"HOME=$home" "XDG_CONFIG_HOME=$cfg" \
+			"$entry/$binary" plugin list
+	) >"$outside/list.out" 2>"$outside/list.err" && rc=0 || rc=$?
+
+	# FR-21's second half, and first, so nothing below is read from a session
+	# that never ran.
+	if [ "$rc" -ne 0 ]; then
+		fail "$(printf 'a home directory full of host-global agent configuration stopped the agent working: exit %s\n%s' \
+			"$rc" "$(tail -n 20 "$outside/list.err")")"
+		return 1
+	fi
+
+	# The control (D9). An extension inside the project is reported by this
+	# same session, so "none of the host ones arrived" cannot be satisfied by
+	# an agent that reports nothing at all, or by one whose enumeration is
+	# broken.
+	#
+	# It does not return early, unlike the exit status above it. A violation
+	# that both grants the host root and stops redirecting the agent's config
+	# root breaks the control and satisfies the assertion below at once, and
+	# returning here would report the broken control and hide the extension
+	# that arrived — which is the louder of the two findings.
+	if ! extension_loaded "$outside/list.out" "$projext"; then
+		found=1
+		fail "$(printf 'the extension inside the project was not reported as loaded, so this session cannot say anything about the ones outside it:\n%s' \
+			"$(cat "$outside/list.out")")"
+	fi
+
+	if extension_loaded "$outside/list.out" "$hostext"; then
+		found=1
+		fail "$(printf 'a host-global extension nobody declared reached the session:\n%s' \
+			"$(cat "$outside/list.out")")"
+	fi
+	# There is deliberately no assertion here that the listing mentions no path
+	# under the fake home. Under the plant, the extension that arrived was
+	# reported as `Path: ~/.claude/skills/<name>`: the agent abbreviates the
+	# home prefix, so such an assertion would have passed while an extension
+	# was loading, and would have read as evidence. The name is the observable.
+
+	while IFS= read -r session; do
+		if jq -e --arg b "/bin/$binary" '.command[0] | endswith($b)' "$session" >/dev/null 2>&1; then
+			sessions+=("$session")
+		fi
+	done < <(find "$state/nono/audit" -mindepth 2 -maxdepth 2 -name session.json)
+
+	if [ "${#sessions[@]}" -ne 1 ]; then
+		fail "$(printf 'expected exactly one confined %s session, found %s under %s' \
+			"$binary" "${#sessions[@]}" "$state/nono/audit")"
+		return 1
+	fi
+
+	project=$(cd "$REPO_ROOT" && pwd -P)
+	registry=$(nix eval --json "$REPO_ROOT#leakRegistry" \
+		--apply "es: builtins.filter (e: builtins.elem \"$agent\" e.agents) es")
+
+	# The set equality, unchanged from check_j1_1's and derived from the same
+	# artefacts, because "the granted reach is unchanged" is a claim about this
+	# set and not about this fixture. Every term comes out of what the
+	# repository builds, so a declaration moves both sides and only reach
+	# nobody declared can fail it.
+	if ! diff -u \
+		<({
+			printf '%s\n' "$project"
+			cat "$FIXTURE_SUBSTRATE/store-paths"
+			jq -r '.[].path' <<<"$registry"
+		} | sort -u) \
+		<(jq -r '.tracked_paths[]' "${sessions[0]}" | sort -u) \
+		>"$outside/reach.diff" 2>&1; then
+		found=1
+		fail "$(printf 'a home directory full of host-global agent configuration changed the granted reach:\n%s' \
+			"$(sed '1,2d' "$outside/reach.diff")")"
+	fi
+
+	# Named separately from the comparison above, because this is the one the
+	# scenario is about: a confinement description outside the boundary taking
+	# part in deciding the boundary. The comparison would catch it, and would
+	# report it as a diff hunk among 130 store paths.
+	if jq -r '.tracked_paths[]' "${sessions[0]}" | grep -qF "$home"; then
+		found=1
+		fail "$(printf 'the session was granted a path under the host home directory, so configuration outside the boundary decided the boundary:\n%s' \
+			"$(jq -r '.tracked_paths[]' "${sessions[0]}" | grep -F "$home")")"
+	fi
+
+	[ "$found" -eq 0 ]
+}

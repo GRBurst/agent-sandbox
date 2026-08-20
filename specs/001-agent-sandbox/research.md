@@ -1198,6 +1198,62 @@ Four separate things follow, and only the last was anticipated.
 
 `XDG_STATE_HOME` must be outside the workdir. Pointed inside it, nono refuses with `Refusing to grant '<project>' (source: user) because it overlaps protected nono state root '<project>/…/nono'`, which is the same protected-state-root refusal `M5b` met from the other side.
 
+## M5f — A host-global configuration does not reach an undeclared session
+
+Measured on x86_64-linux with nono 0.74.0 against `claude-code` 2.1.237, through the built `.#claude` entry point and, for the arms that need a baseline, the raw binary out of the same closure.
+
+### The enumeration instrument is `claude plugin list`
+
+`claude-code` has no counterpart to `opencode debug skill`. Its subcommands are `agents auth auto-mode doctor gateway import install mcp plugin|plugins project setup-token ultrareview update`; `claude --print /skills` answers `/skills isn't available in this environment.`, and `claude doctor` reports installation health only — version, platform, authentication state, a `~/.local/bin` PATH warning — and names no extension.
+
+`claude plugin list` is the instrument. It prints a `Skills-directory plugins (.claude/skills/*):` heading and one stanza per extension carrying the name as `<name>@skills-dir`, then `Version:`, `Scope:`, `Path:` and `Status: ✔ loaded`. It runs confined, exits 0 in about a second, and needs no credential, so it is both the "the agent starts and works" observable and the "which extensions reached it" observable in one run.
+
+Two properties of its output shape the check. The status is a **later line** of the stanza the name heads, so a file-wide search for the name and for `loaded` would let one extension's status stand in for another's when several are planted. And the path is **abbreviated**: the extension that arrived under the plant was reported as `Path: ~/.claude/skills/<name>`, not as the absolute path, so an assertion that the listing mentions nothing under the fake `$HOME` would have passed while a host extension was loading. The name is the only usable observable.
+
+### A skills-directory extension needs a manifest, and prose alone is invisible
+
+A directory holding only `SKILL.md` is not reported at all — measured unconfined, against a plant that had one and nothing else: `No plugins installed`. `claude plugin init <name>`, documented as scaffolding at `~/.claude/skills/<name>/` and auto-loading next session as `<name>@skills-dir`, writes `.claude-plugin/plugin.json` (`{$schema, name, version, description, author, skills: ["./"]}`) beside a frontmattered `SKILL.md`, and `plugin list` then reports it loaded. It also writes `~/.claude.json` and `~/.claude/backups/`.
+
+So the minimal observable plant is a manifest plus a frontmattered `SKILL.md`. A check that planted prose alone would watch the agent report nothing and record it as confinement.
+
+### The host surface is hidden by redirection, not by denial — which is a finding against `D17`
+
+Three canaries planted at once, at `$HOME/.claude/skills`, at `$WORKDIR/.agents/claude/skills` and at `$WORKDIR/.claude/skills`:
+
+| Arm | Reported |
+| --- | --- |
+| unconfined, `HOME` only | the host canary, `Scope: user`, `Path: ~/.claude/skills/…`, loaded |
+| unconfined, plus `CLAUDE_CONFIG_DIR=$WORKDIR/.agents/claude` | the project-state canary only; the host one **absent** |
+| confined, through the entry point | the project-state canary only; the host one absent, and **no denial in stderr** |
+
+`D17`'s hazard — an extension root read `$HOME`-relative, reaching a session that granted nothing — was measured for `opencode` and **does not transfer to this agent**. `claude-code`'s user-scope skills root follows `CLAUDE_CONFIG_DIR`, which the description already sets to a path inside the project, so the host root is not consulted at all. The set equality `D17` asks for is still the right assertion, and for a sharper reason than the one it gives: the mechanism that hides the host surface here is a variable in `set_vars`, and nothing about a *grant* is doing the work, so a check that only compared reach would pass while an extension arrived. Both halves have to be asserted, and neither implies the other.
+
+The confined arm is indistinguishable from the unconfined arm that has the variable set, which is FR-21's "must not prevent one from working" already holding.
+
+### The in-project control cannot be `.claude/skills`
+
+Every arm above also printed `⚠ 1 project-scope plugin directory under ./.claude/skills/ was not loaded because this workspace was not trusted when plugins were scanned. After accepting the trust dialog, run /reload-plugins (or relaunch) to load it.`
+
+A project-scope extension is therefore scanned and **not loaded** without an interactive dialog, and cannot serve as a positive control. `$CLAUDE_CONFIG_DIR/skills` — `$WORKDIR/.agents/claude/skills`, inside the project directory and inside the one grant every session has — loads cleanly, and is what the control uses.
+
+### Which plants bite, and which does not
+
+| Plant | Fires |
+| --- | --- |
+| `--read "$HOME/.claude/skills"` in the wrapper's exec block | the reach comparison and the host-path assertion. **`check_j1_1` passes**: its fake home has no `.claude/skills`, and a grant on a path that does not exist is silent |
+| the same, plus deleting `CLAUDE_CONFIG_DIR` from the description | all four assertions — the host extension loads, the control breaks, and the reach moves |
+| deleting `CLAUDE_CONFIG_DIR` alone | **nothing.** The session looks at `$HOME/.claude/skills`, is refused *silently* — exit 0, `No plugins installed`, and no denial anywhere in stderr — and the agent still works |
+
+The third row is why the extension assertion needs the grant to be planted alongside the redirection: the redirection is not what keeps the host surface out on its own, and removing it produces a session that is indistinguishable from a correct one.
+
+The first row is why this check exists beside `check_j1_1` rather than being folded into it. The two make the same comparison; only this one has a home directory with something in it for a stray grant to find.
+
+### An in-project declaration channel neither check can see
+
+The plant the task's criterion names is the wrapper reading the declaration from a file inside the project. The faithful rendering of that in this repository is an entry in `lib/leak-registry.nix` naming `$HOME/.claude/skills` — and it **does not fail either check**, because the registry appears on both sides of the reach comparison by design, and the redirection hides the surface anyway.
+
+That is not a hole in the checks so much as the boundary of what they cover: the registry is this repository's own reviewed content, pinned by the ref a consumer names, and not a file a consumer's checkout carries. `check_r4` covers a session editing it, and `check_r5` covers a checkout shipping a description of its own. What no check covers is a reviewer waving through a registry entry that names a host path, which is a human gate and is recorded as one.
+
 ## M8e — Where each agent reads its declarative extensions from
 
 **Partial.** `opencode` is measured; `claude-code` and `pi` are not.

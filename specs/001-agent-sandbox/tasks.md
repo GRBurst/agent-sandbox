@@ -661,7 +661,7 @@ What that settles before the check is written:
 - The plant the criterion names is the wrapper resolving `--profile evil`, or dropping `--profile` so `NONO_PROFILE` decides. Both were measured reading the canary out, so either bites.
 - Still unmeasured, and owed before this task can claim to have covered the surface: what keys `nono/config.toml` accepts, what a project-level `trust-policy.json` can do, and `--bypass-protection <PATH>`, which is documented as overriding a deny rule.
 
-### M5f — A host-global configuration does not reach an undeclared session (Status: PENDING)
+### M5f — A host-global configuration does not reach an undeclared session (Status: IMPLEMENTED)
 
 **Scenario**: Journey 8.2
 
@@ -669,11 +669,40 @@ This task was written against R9 and is now the *undeclared* half of the pair R9
 
 **RED**: `check_j8_2` plants a whole host-global agent configuration in the fake `$HOME` — an authoring surface among it — declares nothing, and compares the session's granted reach to `{project} ∪ registry`.
 
-- [ ] Check written and seen to FAIL
-- [ ] The assertion is the **set equality**, not the absence of an error. `~/.agents/skills` and `~/.claude/skills` were measured being read `$HOME`-relative rather than through any XDG variable, so an extension can reach a session that granted nothing and "no grant was added" has to be observed instead of inferred ([D17](plan.md#d17))
-- [ ] The agent starts, works, and reports none of the planted extensions — rather than failing on their absence (FR-21)
-- [ ] **Control**: an extension planted *inside* the project is reported in the same session, so "none of them arrived" cannot be satisfied by an agent that reports nothing at all
-- [ ] Violation planted (the wrapper reads the declaration from a file inside the project instead of the calling environment), seen to FAIL, reverted, recorded in plan.md
+- [x] Check written and seen to FAIL — at the unit layer, `check_sc3`'s missing-scenario set going from 16 to 15, `j8_2` leaving and nothing else moving. As with every task in this group, the property already held as shipped, so the FAILs that say something about the code are the two planted ones below
+- [x] The assertion is the **set equality**, not the absence of an error — `diff -u` of the session's own `tracked_paths` against `{project} ∪ substrate ∪ registry`, derived the same way `check_j1_1` derives it. The reason has changed, and the change strengthens the criterion rather than retiring it: for `claude-code` the host surface is hidden by **redirection**, not by denial, so nothing would have been denied and no error would have appeared either way ([D17](plan.md#d17))
+- [x] The agent starts, works, and reports none of the planted extensions — `claude plugin list` exits 0 and its listing carries the in-project extension and not the host one (FR-21)
+- [x] **Control**: an extension planted inside the project — under `$CLAUDE_CONFIG_DIR/skills`, not `.claude/skills` — is reported `✔ loaded` in the same session. It accumulates rather than returning early, so a violation that breaks the control and loads a host extension at once reports both
+- [x] Violation planted, seen to FAIL, reverted, recorded in plan.md. **Not the plant written here**, and the correction is the finding: the wrapper reading a declaration from a file inside the project fails no check, because the file it would read is `lib/leak-registry.nix`, which sits on both sides of the comparison. Two plants are used instead — a `--read "$HOME/.claude/skills"` in the wrapper, which fires the set equality, and that plus dropping `CLAUDE_CONFIG_DIR`, which fires all four assertions
+
+**Measured before starting**, recorded under [`M5f`](research.md#m5f--a-host-global-configuration-does-not-reach-an-undeclared-session). Four things, on `claude-code` 2.1.237 with nono 0.74.0.
+
+`claude plugin list` is the enumeration instrument, and it is the only one. There is no `debug skill` equivalent — `claude --print /skills` answers `/skills isn't available in this environment.` and `claude doctor` reports installation health and names no extension. `plugin list` runs confined, exits 0 in about a second, and needs no credentials.
+
+A skills-directory extension needs a manifest. A bare `SKILL.md` is invisible to `plugin list` even unconfined, so the planted extension carries `.claude-plugin/plugin.json` alongside it.
+
+**The host surface is hidden by redirection, not by denial**, and that is a finding against the criterion this task was written from.
+
+| Arm | Reported |
+| --- | --- |
+| unconfined, `HOME` only | the host canary, `Scope: user`, loaded |
+| unconfined, `HOME` plus `CLAUDE_CONFIG_DIR` | the project canary only; the host canary absent |
+| confined, through the entry point | the project canary only; the host canary absent, and **no denial in stderr** |
+
+`D17`'s `$HOME`-relative hazard was measured for `opencode`; `claude-code`'s user-scope skills root follows `CLAUDE_CONFIG_DIR`, which the description already sets. So the confined arm is behaviourally identical to the unconfined arm that sets the variable, which is FR-21's "must not prevent one from working" already holding — and it is why the set equality matters more rather than less, since a leak here would arrive silently with nothing to catch it.
+
+The in-project control cannot be `.claude/skills`. Every arm printed `1 project-scope plugin directory under ./.claude/skills/ was not loaded because this workspace was not trusted when plugins were scanned`, so a project-scope extension is scanned and not loaded pending an interactive dialog. `$CLAUDE_CONFIG_DIR/skills` — `$WORKDIR/.agents/claude/skills`, inside the project — loads cleanly and is the control.
+
+**Implementation.** `check_j8_2` joins `scripts/checks/integration.sh`, one session, with two helpers beside it: `plant_extension` writes the manifest and the prose, and `extension_loaded` delimits one stanza of the listing before looking for `loaded` on its `Status:` line.
+
+- **One session answers both halves**, because the extension question and the reach question are asked of the same run: `claude plugin list` through the real entry point, with a whole host-global configuration planted in the fake `$HOME` — an authoring surface, a credential file, a history file, `.claude.json`, a target directory, and a nono description of its own naming that directory in `filesystem.read`. Credentials, history and state are covered by the set equality rather than by assertions of their own, which is what makes that assertion carry FR-21 whole.
+- **A second, named assertion says no tracked path is under the fake `$HOME`.** The set equality already implies it, but its failure would be one hunk among 130 store paths, and the self-referential case — a host description taking part in deciding reach — is the sharpest thing this check refutes and deserves to be legible.
+- **An assertion was removed after the plant showed it could not bite.** A `grep -F "$home"` over the listing would pass while a host extension was loading, because `claude` abbreviates the prefix and prints `Path: ~/.claude/skills/<name>`. A comment stands where it was.
+- **The control accumulates rather than returning early.** The first run of the second plant reported only the broken control, hiding the host extension being loaded in the same listing. Ordering the control first satisfies `D9` — a session that never started fails there — but only if the louder finding is still reached.
+- **The criterion's own plant fails no check, and that is recorded rather than worked around.** An in-project declaration channel for this feature would be an entry in `lib/leak-registry.nix`, which both this check and `check_j1_1` read as the expected set, so a host path added there moves both sides together. The gate is human review of that file, and it is written into the plan's coverage gap.
+- **Plant 1 leaves `check_j1_1` passing**, which is why this check exists: that check's fake `$HOME` has no `.claude/skills`, and a grant on a path that does not exist is silent.
+
+The integration layer is `9 checks passed`, run as `direnv exec . bash scripts/validate.sh --layer integration`, and the whole suite is `1 of 16 checks failed`, that one being the progress bar: `check_sc3`'s missing-scenario set went from 16 to 15.
 
 ### M5g — A host tool configuration does not direct the session (Status: PENDING)
 
