@@ -167,6 +167,11 @@ It is the natural input to the first spec.
 
 - Confinement is now observed rather than asserted: `check_r6` proves the pre-flight refuses a host that cannot enforce it, and `check_j1_1` compares a real session's granted reach against the leak registry. The remaining claims — credentials, history, cross-project state — have no check yet.
 - The leak registry still grants all of `/nix/store`. Narrowing it to the closure the agent actually needs is its own task.
+- A confined session inherits `PATH` **whole**, host user profile included, and nono offers no way to narrow it: `set_vars.PATH` is rejected as reserved and `deny_vars` has no effect on it. While the store is granted wholesale this makes no difference; once it is not, any tool the session names has to be in the environment or it stops working.
+
+**Tools the environment does not provide.**
+
+- `git` and `node` are not in the devShell, so they resolve from the host user profile. By [AGENTS.md](../AGENTS.md#3-environment-and-tooling) §3 that means they are *not available*, and the narrowing above will make that literal rather than theoretical.
 
 **Orphans and small things.**
 

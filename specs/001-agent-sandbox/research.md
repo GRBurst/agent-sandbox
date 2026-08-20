@@ -756,3 +756,78 @@ M4b's own planted violation therefore occurred unbidden, before the code that wa
 - A flake in a dirty tree cannot see an untracked file: `error: Path 'lib/confined-agent.nix' … is not tracked by Git`. `git add -N` is enough.
 - `$XDG_STATE_HOME` must stay outside the project, or nono refuses to start: `Refusing to grant '<project>' … because it overlaps protected nono state root`. The integration layer's four conditions, recorded in `M3c`, all still hold under `0.74.0`.
 - The devShell has to carry `shellcheck` and `shfmt` itself. `AGENTS.md` §4 names both, and until now they resolved only from a user profile — the same class of mistake as the host `nono`.
+
+## M4c
+
+Measured on `x86_64-linux`, NixOS host, nono `0.74.0`, against the shipped `.#confinement-claude-code` description and the shipped `.#claude` wrapper. Every arm ran under `HOME` and `XDG_STATE_HOME` outside the project, `TMPDIR` inside it, and a pre-touched audit ledger — the four conditions `M3c` recorded.
+
+### The substrate can be narrowed by three orders of magnitude, and the agent does not notice
+
+| root | paths in closure |
+| --- | --- |
+| `claude-code-2.1.237` | 17 |
+| `nono-0.74.0` | 7 |
+| the `.#claude` wrapper | 25 |
+| the 35 store directories on the devShell's own `PATH` | 111 |
+| the whole store, for comparison | 67,051, of which 251 are `-source` |
+
+Two arms of `strace -f -e trace=openat` over `claude --version`, differing only in `filesystem.read`:
+
+| arm | rc | child output | `openat` lines | distinct store paths opened |
+| --- | --- | --- | --- | --- |
+| `["/nix/store"]` | 0 | `2.1.237 (Claude Code)` | 152 | 13 |
+| the agent's 17 paths | 0 | `2.1.237 (Claude Code)` | 196 | 25 |
+
+The closure arm opens *more*, not less: nono opens each grant to build its Landlock rule, the same inflation `M3c` saw. Function is unchanged, so the narrowing costs the session nothing.
+
+The agent's closure is `glibc`, `openssl`, `readline`, `socat`, `bash`, `pcre2`, `libcap`, `libunistring`, `libidn2`, `bubblewrap`, `wrap-buddy`, `libselinux`, `ncurses`, three gcc runtimes and the agent itself. There is no `node` in it — the publisher's build is self-contained — and no `coreutils`.
+
+### Criterion 3 cannot be met as written, because the floor itself denies
+
+Both arms produce exactly the same **11** `EACCES`, none of them in the store: `/sys/devices/system/cpu/online`, nine `cpu.max`/`memory.high`/`memory.max` files under three `/sys/fs/cgroup/user.slice` levels, and `/sys/kernel/debug/tracing/trace_marker`. A session that reaches the whole store is already denied all eleven, so "no `EACCES` outside what a probe asks for" is false of the control as much as of the treatment.
+
+The property has to be **differential**: run the shipped description and a control whose `filesystem.read` is `["/nix/store"]`, and assert the two denial sets are *equal*. That is derived from the system under test rather than pinning `/sys` literals a kernel or a cgroup layout can move, it states the claim exactly — narrowing the substrate costs the session nothing — and criterion 7's plant, dropping a needed path, breaks it by adding a denial the control does not have.
+
+### The locale archive, and why setting `LOCALE_ARCHIVE` is not enough on its own
+
+Under the closure grant the *only* non-`/sys` denial is `openat("/run/current-system/sw/lib/locale/locale-archive") = -1 EACCES`. The whole-store arm never sees it because that path is a symlink into `/nix/store/…-glibc-locales-…`, which a whole-store grant covers.
+
+Setting `LOCALE_ARCHIVE=/nonexistent/bogus-archive` in the *parent* changed nothing: the child still opened the same path. So the variable never reaches the child — `allow_vars` is default-deny under [D6](plan.md#d6) — and the path is nixpkgs glibc's compiled-in default rather than something the environment chose. glibc then probes `$glibc/lib/locale/en_US.UTF-8/LC_*` and `/usr/lib/locale/locale-archive`, all `ENOENT` and harmless, and successfully reads `…-locale.conf`, a store path nono's **floor** grants individually. The floor already carries single store paths beside our directory grants, which is fine: Landlock is allow-only, so overlapping allows compose.
+
+`glibcLocales` is 222 MiB; `glibcLocalesUtf8` is **2 MiB** at the same version, closure of one. Granting the UTF-8 one *and* setting `set_vars.LOCALE_ARCHIVE` to the archive inside it validates (`Result: valid`), opens the archive successfully, keeps `claude --version` at rc 0 and leaves **zero** non-`/sys` denials. Setting the variable without granting the path it names only moves the `EACCES`, so the criterion needs both halves. Both are glibc-specific and must be conditional on `stdenv.hostPlatform.isLinux`; `lib/confinement.nix` has no platform conditional today.
+
+### `PATH` is inherited whole and cannot be narrowed
+
+This is the finding that decides what the substrate has to be. A confined `bash -c` printed a `PATH` carrying the devShell's entries *and* the entire host user profile — `/etc/profiles/per-user/…`, `~/.nix-profile/bin`, `/run/current-system/sw/bin`, `~/.local/bin`, flatpak and devbox exports — even though `PATH` is not in `allow_vars`. nono then prepends its own `nono-browser-XXXX` under `$TMPDIR`.
+
+- `set_vars.PATH` is refused: `Invalid set_vars key 'PATH': PATH is reserved; use allow_vars/deny_vars to control it`.
+- `deny_vars: ["PATH"]` changes nothing — the inherited value comes through byte for byte.
+
+So nono offers no mechanism to narrow the session's `PATH`, and the confinement cannot assume the agent will only execute its own closure. Under the 17-path grant, `ls`, `env`, `sort` and `cut` all resolve to `coreutils` and die with `Permission denied`: **the agent's own closure is not a viable substrate**, because the agent's Bash tool could not run `ls`.
+
+### The root set has to be the paths that are actually on `PATH`
+
+A 109-grant profile assembled from *package attributes* (`coreutils`, `bash-interactive`, `git`, `ripgrep`, `jq`, `findutils`, `gnugrep`, `gnused`, plus the agent and the locales) started in 0.33 s — grant count is not a constraint at this scale — but `jq` failed inside it. `PATH` names `…-jq-1.8.2-bin/bin/jq`, the `bin` output, while `nixpkgs#jq^out` yields `…-jq-1.8.2`. Different path, not granted, `EACCES`.
+
+Deriving the root set from the devShell's `PATH` instead — 35 store roots, 111 paths, plus the locales — fixes it. Every tool the devShell provides works:
+
+| tool | resolves to | result |
+| --- | --- | --- |
+| `ls`, `env` | `coreutils-9.11` | works |
+| `jq` | `jq-1.8.2-bin` | works |
+| `rg`, `sed`, `grep`, `find`, `bash` | the devShell's own | works |
+| `git`, `node` | `/etc/profiles/per-user/…` | **denied** |
+
+`git` and `node` fail because the devShell does not provide them: they resolve through the host user profile into store paths nothing granted. In the package-attribute arm `git` *worked*, by the accident that the hand-listed `git` closure happened to contain the very path the host symlink pointed at. That accident is exactly what `AGENTS.md` §3 warns about, and a closure-scoped substrate turns it into a hard failure — which is the outcome we want, but it means **every tool the agent needs must be in the list**, and today `git` is not.
+
+The design this points to: one nix list, used twice — as the devShell's `packages` and as `closureInfo`'s `rootPaths`. Then the grants and the `PATH` are the same expression, criterion 1's "cannot drift apart" holds by construction rather than by discipline, and the `jq^bin` class of mistake cannot recur because nothing restates an output.
+
+### A confined agent cannot start a second confined agent
+
+`claude` inside a confined session exits 1 with `XDG_CONFIG_HOME: not set; enter the environment … rather than running this from the store`. `XDG_CONFIG_HOME` is not in `allow_vars`, so the wrapper's own guard fires. That is the designed refusal from `M4b`, not a defect, and nesting is not a use case — but it does mean the wrapper is unusable as a probe from inside a session.
+
+### Method notes
+
+- `nixpkgs#strace` prints the `-man` path first; `nixpkgs#strace^out` is required, or `env` reports `No such file or directory` with rc 127. The same trap as `M3c`'s `nixpkgs#bash`.
+- `strace` is Linux-only. `nix eval nixpkgs#legacyPackages.aarch64-darwin.strace.drvPath` refuses: `not available on the requested hostPlatform`. An unconditional `strace` in the devShell would stop `devShells.aarch64-darwin.default` evaluating, which `M4b` verified as working and the handbook now claims, so it must be `lib.optionals stdenv.hostPlatform.isLinux`.
+- The store figures move. `M3c` measured 61,799 paths and 211 `-source` trees; this session measures 67,051 and 251. Nothing should pin either number.

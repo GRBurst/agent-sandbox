@@ -438,19 +438,28 @@ The wrapper creates `$XDG_CONFIG_HOME` before invoking nono. `M1e` observed that
 
 **Scenario**: SC-1
 
-[D15](plan.md#d15) grants the whole store read because at `M3c` there was no session whose closure could be computed. `M4b` creates one, so the temporal justification in the registry entry expires here. The reach this narrows is not hypothetical: the store on the developing machine holds 61,799 paths, of which 211 are `-source` trees belonging to *other projects*. Read access to another project's source is precisely the leak this feature exists to prevent, so leaving it is not an option once the closure is knowable.
+[D15](plan.md#d15) grants the whole store read because at `M3c` there was no session whose closure could be computed. `M4b` creates one, so the temporal justification in the registry entry expires here. The reach this narrows is not hypothetical: the store on the developing machine holds tens of thousands of paths, a few hundred of them `-source` trees belonging to *other projects* — 67,051 and 251 when last measured, both of which drift upward with every build, which is why no criterion below pins either number. Read access to another project's source is precisely the leak this feature exists to prevent, so leaving it is not an option once the closure is knowable.
 
 **RED**: extend `check_sc1`'s expectation to the closure and watch it fail against the whole-store grant.
 
-- [ ] The granted substrate is derived from `closureInfo` over the session's own package set, so a rebuild regenerates the grants and the closure the session runs from the same expression and they cannot drift apart
-- [ ] `LOCALE_ARCHIVE` points at a store path, because the default `/run/current-system/sw/lib/locale/locale-archive` is outside the store and must not be granted to reach it
-- [ ] `strace -f -e trace=openat` over a real session shows **no** `EACCES` or `EPERM` outside the paths a probe deliberately asks for, asserted as a property over the trace rather than as a count
-- [ ] `strace` is in the devshell, so the check does not depend on a host tool ([P1](../../docs/CONSTITUTION.md))
+- [ ] The granted substrate is derived from `closureInfo` over **one** list that is also the devShell's `packages`, so the grants and the `PATH` the session runs with are the same expression and cannot drift apart. Roots are taken as package attributes, never as a restated output: `PATH` carries `jq`'s `bin` output while `jq^out` is a different path, and a root set that names the wrong one denies a tool the session can see
+- [ ] Every tool the devShell puts on `PATH` still works inside the session, and the tools the agent's own Bash tool needs — `git` above all, which the devShell does **not** provide today — are in that list rather than resolved from the host user profile ([P1](../../docs/CONSTITUTION.md), `AGENTS.md` §3)
+- [ ] `LOCALE_ARCHIVE` is set to an archive inside a **granted** store path, because the compiled-in default `/run/current-system/sw/lib/locale/locale-archive` is outside the store and setting the variable without granting what it names only moves the denial. `glibcLocalesUtf8` (2 MiB) rather than `glibcLocales` (222 MiB), and both halves conditional on `stdenv.hostPlatform.isLinux`
+- [ ] `strace -f -e trace=openat` over a real session shows **no `EACCES` or `EPERM` that a whole-store control does not also show**, asserted as an equality between two denial sets rather than as a count or a list of literals
+- [ ] `strace` is in the devshell for Linux only, as `lib.optionals stdenv.hostPlatform.isLinux`, so the check does not depend on a host tool ([P1](../../docs/CONSTITUTION.md)) and `devShells.aarch64-darwin.default` keeps evaluating
 - [ ] The registry's substrate entry is replaced or deleted, and if it survives, its `whyNotNarrower` no longer rests on the closure being unknowable
 - [ ] `bash scripts/validate.sh --layer integration` passes
 - [ ] Violation planted (a path dropped from the closure that the session needs), seen to FAIL, reverted, recorded in plan.md
 
-Two measurements from `M3c`'s spike bound the work. A 62-path closure of `bash`, `coreutils` and `nodejs` served a session that opened 55 store paths, so the closure is a tight upper bound rather than a loose one; and every gap it left was named by exact path in the trace. Both gaps were the locale archive, which is why `LOCALE_ARCHIVE` is a criterion and not a discovery.
+**Preconditions**, measured before the task and recorded in [research.md § M4c](research.md#m4c):
+
+- The narrowing works and is free. `claude --version` under a 17-path grant behaves exactly as under the whole store, and the store is 67,051 paths.
+- **`PATH` cannot be narrowed.** It is inherited whole, host user profile included, even though it is not in `allow_vars`; `set_vars.PATH` is rejected as reserved and `deny_vars: ["PATH"]` has no effect. So the substrate cannot be the agent's own closure — under it the agent's Bash tool cannot run `ls` — and it has to cover everything the session can reach by name.
+- **The floor denies eleven `/sys` paths in every arm**, including the whole-store control, so criterion 3's original form was unsatisfiable and is now differential.
+- Grant count is not a constraint: 109 grants started in 0.33 s.
+- A confined agent cannot start a second confined agent — the wrapper's `XDG_CONFIG_HOME` guard fires, by design — so the wrapper is not usable as a probe from inside a session.
+
+One measurement from `M3c`'s spike still bounds the work: a 62-path closure served a session that opened 55 store paths, so the closure is a tight upper bound rather than a loose one, and every gap it left was named by exact path in the trace. Both gaps were the locale archive, which is why `LOCALE_ARCHIVE` is a criterion and not a discovery.
 
 `strace` is the observer because nono is not. On a session that failed for a denied locale archive, `nono run --diagnostics-json` reported `"denials": []` and `"violations": []`, offering only an `info`-level `command_failed_likely_sandbox` whose remediation names a discovery mode that does not exist — there is no `--discover`, `--learn` or `--permissive` flag and no `discover` subcommand. A check that trusted nono's own denial reporting would pass over exactly the failure this task exists to find.
 
