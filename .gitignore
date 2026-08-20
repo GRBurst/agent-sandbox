@@ -7,8 +7,7 @@ dist/
 target/
 *.log
 
-# Tool state redirected into the project. .config/ itself is committed, because
-# it holds project config rather than state.
+# Tool state redirected into the project.
 /.docker/
 .envrc.local
 
@@ -17,8 +16,12 @@ target/
 # sandbox that denies $HOME needs this pointed inside the project (M4b).
 /.local/
 
-# nono's own root under XDG_CONFIG_HOME, which holds state rather than config.
-/.config/nono/
+# XDG_CONFIG_HOME. Deny by default, because the redirect is a blanket: every
+# program run from the environment lands here, not just the ones this repository
+# knows about. An earlier allow-by-default rule collected a GUI editor's caches
+# and local storage on the first developer to open one from the project shell.
+# Anything this repository genuinely commits gets its own negation below.
+/.config/
 
 # Agent state, one directory per agent, written inside the project so that it
 # belongs to this project and no other.
