@@ -51,6 +51,29 @@ substrate_member() {
 	return 1
 }
 
+# Everything a check needs before it can run a probe inside a session: the
+# agent's resolved description, its execution substrate, and a bash out of that
+# substrate. Sets FIXTURE_PROFILE, FIXTURE_SUBSTRATE and FIXTURE_BASH.
+#
+# Each of the three fails loudly and separately. A caller that let a build
+# failure through would run its session against an empty path and report the
+# refusal it was looking for.
+session_fixture() {
+	local agent=$1
+	FIXTURE_PROFILE=$(nix build --no-link --print-out-paths "$REPO_ROOT#confinement-$agent") || {
+		fail "the confinement for $agent does not build"
+		return 1
+	}
+	FIXTURE_SUBSTRATE=$(nix build --no-link --print-out-paths "$REPO_ROOT#substrate-$agent") || {
+		fail "the execution substrate for $agent does not build"
+		return 1
+	}
+	FIXTURE_BASH=$(substrate_member "$FIXTURE_SUBSTRATE" bash) || {
+		fail "the substrate for $agent provides no bash to run a probe with"
+		return 1
+	}
+}
+
 # The paths an strace log shows refused, one per line, sorted and unique.
 #
 # Only openat, and only EACCES or EPERM: those are the two errors Landlock
@@ -370,22 +393,12 @@ check_substrate_denials() {
 # stands behind the registry's own strictness.
 check_r1() {
 	local agent=claude-code
-	local outside home key inside probe scratch profile substrate bash_pkg
+	local outside home key inside probe scratch
 	local key_canary inside_canary arm description rc out found=0
+	local FIXTURE_PROFILE FIXTURE_SUBSTRATE FIXTURE_BASH
 	local -a SESSION_ENV
 
-	profile=$(nix build --no-link --print-out-paths "$REPO_ROOT#confinement-$agent") || {
-		fail "the confinement for $agent does not build"
-		return 1
-	}
-	substrate=$(nix build --no-link --print-out-paths "$REPO_ROOT#substrate-$agent") || {
-		fail "the execution substrate for $agent does not build"
-		return 1
-	}
-	bash_pkg=$(substrate_member "$substrate" bash) || {
-		fail "the substrate provides no bash to run the probe"
-		return 1
-	}
+	session_fixture "$agent" || return 1
 
 	outside=$(mktemp -d -p "${XDG_RUNTIME_DIR:-/tmp}" agent-sandbox-r1.XXXXXX)
 	scratch="$REPO_ROOT/.tmp/r1"
@@ -429,16 +442,16 @@ check_r1() {
 
 	session_env "$outside/state"
 
-	jq --arg d "$home/.ssh" '.filesystem.read += [$d]' "$profile" >"$scratch/granted.json"
+	jq --arg d "$home/.ssh" '.filesystem.read += [$d]' "$FIXTURE_PROFILE" >"$scratch/granted.json"
 
 	for arm in shipped granted; do
-		description=$profile
+		description=$FIXTURE_PROFILE
 		[ "$arm" = shipped ] || description="$scratch/granted.json"
 
 		out=$(env "${SESSION_ENV[@]}" "HOME=$home" \
 			"$(pinned_bin nono)/nono" run \
 			--profile "$description" --workdir "$REPO_ROOT" --allow-cwd -- \
-			"$bash_pkg/bin/bash" "$probe" "$key" "$inside" 2>&1) && rc=0 || rc=$?
+			"$FIXTURE_BASH/bin/bash" "$probe" "$key" "$inside" 2>&1) && rc=0 || rc=$?
 
 		# The in-project read is asserted in both arms: it is what says the
 		# session started and the probe ran, and the granted arm needs that
@@ -473,6 +486,137 @@ check_r1() {
 		if ! printf '%s' "$out" | grep -q 'Permission denied'; then
 			found=1
 			fail "$(printf 'the read did not fail on permission, so the key may simply not have been there:\n%s' "$out")"
+		fi
+	done
+
+	[ "$found" -eq 0 ]
+}
+
+# R2 — a write outside the project is refused, and leaves nothing behind.
+#
+# The target is a subdirectory of the fake $HOME rather than the fake $HOME
+# itself, and that is forced by the arm below it: the granted arm has to name
+# the path it grants exactly, because granting the home directory overlaps both
+# nono's own state root candidate at `$HOME/.nono` and the 48 $HOME-relative
+# deny rules, and nono refuses to start rather than narrowing. Both arms then
+# aim at the same path, so the only difference between them is the grant.
+#
+# Both halves of the scenario are asserted, and the second half is asserted
+# from outside the session, after it has exited: a refusal reported inside the
+# sandbox is the sandbox's own account of itself, while the file's absence on
+# the host is the fact the scenario is about. A non-zero exit is not enough on
+# its own either, so the refusal must say `Permission denied` — a write to a
+# path that had never existed would fail just as convincingly.
+#
+# Two controls, because the observable is a failure (D9):
+#
+#   1. In the same session, a file inside the workdir is written and is there
+#      afterwards. A session that died at startup cannot pass, and neither can
+#      one confined read-only, which would refuse both writes alike.
+#   2. The same target is written once from outside the boundary before the
+#      session runs, so the refusal is attributable to confinement rather than
+#      to a directory that was never writable.
+#
+# The third arm is a standing positive control on the probe itself: with the
+# target's directory added to `filesystem.allow`, the same probe must write the
+# file and it must be there afterwards. Without it, a probe that could write
+# nothing at all would pass the shipped arm.
+check_r2() {
+	local agent=claude-code
+	local outside home target inside probe scratch canary arm description rc out found=0
+	local FIXTURE_PROFILE FIXTURE_SUBSTRATE FIXTURE_BASH
+	local -a SESSION_ENV
+
+	session_fixture "$agent" || return 1
+
+	outside=$(mktemp -d -p "${XDG_RUNTIME_DIR:-/tmp}" agent-sandbox-r2.XXXXXX)
+	scratch="$REPO_ROOT/.tmp/r2"
+	rm -rf "$scratch"
+	mkdir -p "$scratch"
+	# shellcheck disable=SC2064
+	trap "rm -rf '$outside' '$scratch'" RETURN
+
+	home="$outside/home"
+	mkdir -p "$home/outside"
+	target="$home/outside/created.txt"
+	# Per run, so a stale file from an earlier run cannot satisfy the assertion.
+	canary="OUTSIDE-WRITE-$RANDOM$RANDOM"
+
+	# Control 2. Unconfined, the target is writable.
+	if ! printf '%s\n' "$canary" >"$target" 2>/dev/null || [ ! -f "$target" ]; then
+		fail "the target is not writable outside the boundary, so a refusal inside it would prove nothing"
+		return 1
+	fi
+	rm -f "$target"
+
+	# The probe attempts the write outside first and reports its own status, so
+	# the in-workdir write is attempted whatever the first one did. It writes
+	# with the shell's own redirection rather than by calling a program: PATH is
+	# inherited whole, host entries included, so a name resolved inside the
+	# session can land on a binary the session may not read, and the probe would
+	# report a denial of its own making.
+	probe="$scratch/probe.sh"
+	cat >"$probe" <<-'PROBE'
+		out_rc=0
+		printf '%s\n' "$3" >"$1" || out_rc=$?
+		printf 'OUTSIDE :: %s\n' "$out_rc"
+		in_rc=0
+		printf '%s\n' "$3" >"$2" || in_rc=$?
+		printf 'INSIDE :: %s\n' "$in_rc"
+		exit "$out_rc"
+	PROBE
+
+	session_env "$outside/state"
+
+	jq --arg d "$home/outside" '.filesystem.allow += [$d]' "$FIXTURE_PROFILE" >"$scratch/granted.json"
+
+	for arm in shipped granted; do
+		description=$FIXTURE_PROFILE
+		[ "$arm" = shipped ] || description="$scratch/granted.json"
+		inside="$scratch/inside-$arm.txt"
+		rm -f "$target" "$inside"
+
+		out=$(env "${SESSION_ENV[@]}" "HOME=$home" \
+			"$(pinned_bin nono)/nono" run \
+			--profile "$description" --workdir "$REPO_ROOT" --allow-cwd -- \
+			"$FIXTURE_BASH/bin/bash" "$probe" "$target" "$inside" "$canary" 2>&1) && rc=0 || rc=$?
+
+		# The in-workdir write is asserted in both arms: it is what says the
+		# session started and the probe ran, and the granted arm needs that
+		# said as much as the shipped one.
+		if ! printf '%s' "$out" | grep -qF 'INSIDE :: 0' ||
+			[ "$(cat "$inside" 2>/dev/null)" != "$canary" ]; then
+			found=1
+			fail "$(printf 'the %s arm never wrote inside the project, so it observed no session (exit %s):\n%s' \
+				"$arm" "$rc" "$out")"
+			continue
+		fi
+
+		if [ "$arm" = granted ]; then
+			# Control 3. The probe must be able to write outside the project
+			# when the boundary allows it, or the shipped arm's refusal is the
+			# probe's and not the sandbox's.
+			if ! printf '%s' "$out" | grep -qF 'OUTSIDE :: 0' ||
+				[ "$(cat "$target" 2>/dev/null)" != "$canary" ]; then
+				found=1
+				fail "$(printf 'the probe cannot write outside the project even when the boundary grants it (exit %s):\n%s' \
+					"$rc" "$out")"
+			fi
+			continue
+		fi
+
+		if printf '%s' "$out" | grep -qF 'OUTSIDE :: 0'; then
+			found=1
+			fail "$(printf 'a write outside the project succeeded:\n%s' "$out")"
+		fi
+		if ! printf '%s' "$out" | grep -q 'Permission denied'; then
+			found=1
+			fail "$(printf 'the write did not fail on permission, so the target may simply not have been there:\n%s' "$out")"
+		fi
+		# The half of the scenario the session cannot be asked about.
+		if [ -e "$target" ]; then
+			found=1
+			fail "$(printf 'the file exists after the refused write, holding %s' "$(cat "$target")")"
 		fi
 	done
 

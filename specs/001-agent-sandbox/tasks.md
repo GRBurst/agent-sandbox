@@ -511,16 +511,36 @@ Granting an **ancestor** of a denied path refuses to start instead of narrowing 
 
 The integration layer is `4 checks passed` and the whole suite is `1 of 11 checks failed`, that one being the progress bar. **The integration layer must be run from inside the devShell** — `nix develop -c bash scripts/validate.sh --layer integration` — because the pre-flight `check_r6` exercises execs `true` by bare name, which on a host carrying one outside the store resolves to an ungranted path and turns assertion 1 into a false 77. Recorded in the plan's coverage gap.
 
-### M5b — A write outside the project is refused (Status: PENDING)
+### M5b — A write outside the project is refused (Status: IMPLEMENTED)
 
 **Scenario**: R2
 
 **RED**: `check_r2` creates a file in the fake `$HOME` from inside.
 
-- [ ] Check written and seen to FAIL
-- [ ] Assertion covers both halves: the attempt fails **and** the file does not exist afterwards
-- [ ] **Control**: a write inside the workdir succeeds in the same session and the file is there afterwards, so a read-only session cannot pass
-- [ ] Violation planted (`filesystem.allow = ["$HOME"]`), seen to FAIL, reverted, recorded in plan.md
+- [x] Check written and seen to FAIL — under the plant, as with `M5a`: the property already held
+- [x] Assertion covers both halves: the attempt fails **and** the file does not exist afterwards. The second half is asserted from the host, after the session has exited
+- [x] **Control**: a write inside the workdir succeeds in the same session and the file is there afterwards, so a read-only session cannot pass
+- [x] Violation planted, seen to FAIL, reverted, recorded in plan.md. **Not the plant written here**: `filesystem.allow = ["$HOME"]` makes nono refuse to start, so it fails the check on its control instead of on its refusal. The plant that bites names the target's own directory, `$HOME/outside`
+
+**Measured before starting.** Four arms against the shipped description, all on x86_64-linux with nono 0.74.0.
+
+| Arm | Result |
+| --- | --- |
+| Write to the fake `$HOME` | `Permission denied`, exit 1, **file absent afterwards**, and the in-workdir write in the same session succeeds |
+| `filesystem.allow += ["$HOME"]` | **Refuses to start.** `Refusing to grant '<home>' (source: Profile) because it overlaps protected nono state root '<home>/.nono'` |
+| `filesystem.allow += ["$HOME/probe"]` | Starts, the write succeeds, the file is there — so `$HOME` expands in `allow` as it does in `read` |
+| The same subdirectory, shipped | Denied — so the arm above differs by the grant and not by the path |
+
+The second row is the one that changed the task. nono protects a state root **candidate** under `$HOME` whether or not `XDG_STATE_HOME` moved the real one elsewhere, so any grant on a home directory is refused before the 48 deny rules are even considered. That is a second, earlier reason a plant must name an exact path, alongside the deny-overlap `M5a` found.
+
+**Implementation.** `check_r2` joins `scripts/checks/integration.sh`, three arms, one session each: the shipped description, the shipped description with the target's directory added to `filesystem.allow`, and an unconfined write to the target before either.
+
+- **Both arms aim at the same path**, a subdirectory of the fake `$HOME` rather than the fake `$HOME` itself, because the granted arm cannot name a home directory without being refused at startup. A control that succeeded at a different path than the one the shipped arm is refused at would not be controlling the same thing.
+- **The second half of the scenario is asserted from the host, not from the session.** A refusal reported inside the sandbox is the sandbox's own account of itself; the file's absence afterwards is the fact `R2` is about. This matters more than it looks: nono's own summary printed `No path denials were observed during this session. The failure may be unrelated to sandbox restrictions.` for a write it had just refused, so its report is not usable as evidence either way and the check relies on the shell's `Permission denied` and on `[ -e ]`.
+- **The plant the task asked for proves nothing**, and correcting it in place is the finding. With `$HOME` granted, all five integration checks fail at startup — including `check_r6` and `check_substrate_denials`, which grant the *real* `$HOME` and hit the same refusal — and `check_r2`'s failure is `the shipped arm never wrote inside the project, so it observed no session`. That is the control firing. The corrected plant fires all three refusal assertions at once instead.
+- **The three checks now sharing a live session grew a fixture.** `session_fixture <agent>` resolves the description, the substrate and a `bash` out of that substrate, each failing separately, so `check_r1` and `check_r2` state it once rather than twice — and `M5c` onwards will not state it a third time.
+
+The integration layer is `5 checks passed`, run as `nix develop -c bash scripts/validate.sh --layer integration`, and the whole suite is `1 of 12 checks failed`, that one being the progress bar: `check_sc3`'s missing-scenario set went from 20 to 19, `r2` leaving and nothing else moving.
 
 ### M5c — No host secret crosses (Status: PENDING)
 

@@ -976,6 +976,46 @@ The checks resolve every binary they run through `substrate_member` precisely to
   `sed -n '/^{/,$p'` before `jq`, or `jq` fails with `Invalid numeric literal at line 1, column 2`.
 - With `HOME` inside the project, nono also warns that it is *skipping* the `system_write_linux` grant on `<project>/.tmp` for the same overlap reason, before going on to refuse.
 
+## M5b — A write outside the project is refused
+
+Same instrument as [M5a](#m5a--a-key-outside-the-project-is-unreadable): the shipped `.#confinement-claude-code`, a `bash` from the substrate, a fake `$HOME` under `$XDG_RUNTIME_DIR`, `TMPDIR` inside the project and the audit ledger pre-touched.
+The probe writes to a target outside the project, reports its own status, then writes inside the workdir and reports that, so the second write is attempted whatever the first one did.
+
+### A home directory cannot be granted at all, for a reason that arrives before the deny rules
+
+`filesystem.allow += ["$HOME"]` does not widen anything and does not narrow anything.
+nono refuses to start:
+
+```text
+nono: Sandbox initialization failed: Refusing to grant
+'/…/agent-sandbox-r2.EYKqds/home' (source: Profile) because it overlaps
+protected nono state root '/…/agent-sandbox-r2.EYKqds/home/.nono'.
+```
+
+The state root named is `$HOME/.nono`, which **does not exist** and is not the state root this session uses — `XDG_STATE_HOME` points the real one elsewhere, and it is honoured.
+nono is protecting the *candidate* location it would have used, so the refusal does not depend on the directory being there or on the session using it.
+
+That is a second reason a grant cannot name a home directory, and it fires earlier than the deny-overlap refusal M5a measured: with `$HOME` granted the 48 `$HOME`-relative deny rules also overlap it, but the message never mentions them.
+Either way the consequence for a check is the same — a plant must name an exact path, and one that names `$HOME` fails every check in the layer at startup rather than testing anything.
+
+### `$HOME` expands in `filesystem.allow`, and an exact grant is honoured
+
+`filesystem.allow += ["$HOME/probe"]`, written unexpanded exactly as the registry would produce it, starts and lets the write through; the file is on the host afterwards.
+The same path under the shipped description is refused with `Permission denied` and leaves nothing.
+So the expansion M5a found in `filesystem.read` applies to `allow` too, and the difference between the two arms is the grant rather than the path.
+
+### nono's own denial report is not evidence
+
+For a write it had just refused, nono's summary said:
+
+```text
+No path denials were observed during this session.
+The failure may be unrelated to sandbox restrictions.
+```
+
+A `Landlock`-refused `open` for writing does not reach whatever nono counts as a path denial.
+A check that read nono's report would conclude the refusal was unrelated to confinement, so `check_r2` asserts on the shell's `Permission denied` and on the file's absence on the host instead.
+
 ## M8e — Where each agent reads its declarative extensions from
 
 **Partial.** `opencode` is measured; `claude-code` and `pi` are not.
