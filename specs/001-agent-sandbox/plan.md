@@ -10,7 +10,7 @@
 
 **Predicted diff shape.** `devenv.*`, `ai.nix` and the drafts are deleted; `flake.nix` is rewritten around two systems and a `lib/` of four small Nix files; `scripts/validate.sh` and a two-platform CI workflow are new; `docs/` is updated at close-out.
 
-**The pivot, resolved.** `M1b` closed [Decision D1](#d1) by falsifying its premise, and `M1c`–`M1g` closed the rest. `M1g` was the last of them and the one that could have redirected the design: `claude-code`'s configuration root does relocate, through three of thirteen candidate variables, and nothing survives beneath the home directory — but the credential relocates **with** it, so FR-7 is not satisfiable by relocation and needs exactly the supervisor-side injection D1 and [D14](#d14) had already chosen. `claude-code` is the reference case because `opencode` and `pi` take their credential from the session it authenticates (FR-7), so nothing about FR-6 or FR-7 is demonstrable until it works.
+**The pivot, resolved.** `M1b` closed [Decision D1](#d1) by falsifying its premise, and `M1c`–`M1g` closed the rest. `M1g` was the last of them and the one that could have redirected the design: `claude-code`'s configuration root does relocate, through three of thirteen candidate variables, and nothing survives beneath the home directory — but the credential relocates **with** it, so FR-7 is not satisfiable by relocation and needs exactly the supervisor-side injection D1 and [D14](#d14) had already chosen. `claude-code` is the reference case because it is the agent whose credential the injection was measured against, so nothing about FR-6 or FR-7 is demonstrable until it works — **not** because the other two take their credential from the session it authenticates, which `M7b` measured they do not ([D14](#d14)).
 
 ## Read first
 
@@ -162,6 +162,16 @@ Read these before writing anything. Do not skim `ai.nix`; it is the working prio
 
   **Corrected by `M7b`: there is no first agent, and no agent takes anything from another.** The mechanism above is withdrawn, the same way `M7a` withdrew `D1`'s fork and for the same reason — it describes an OAuth capture that cannot be exercised. What was measured instead is that each agent's own description declares the same service name and the supervisor mints it an **independent** substitute: two descriptions differing only in `meta.name`, run in two unrelated checkouts against one supervisor environment, each got a distinct 64-hex value and neither read anything of the other's. So the login belongs to the machine rather than to any agent, and "the other agents obtain what they need from the authenticating one" is not what happens — they need nothing from it.
   The decision's outcome stands and its wording is what changes. **The sequencing consequence is withdrawn too**: nothing about `opencode` or `pi` depends on a credential `claude-code` captured, so `M7` no longer has to land before the remaining agents for that reason. `M7` still comes first because `M8`'s agents will each need the service name in their table entry, and `M7a` is what established what a table entry has to say.
+
+  **Which state is machine-scoped, which is project-scoped, and why that is not FR-4 being bent.** FR-7 wants one login per machine and FR-4 wants agent state inside the project, and the two would collide if the login were state an agent holds. It is not. The division is:
+
+  | Scope | What lives there | Where it is |
+  | --- | --- | --- |
+  | Machine | the real credential, once | the supervisor's own environment or keychain, **outside** every session's reach — no agent, and no project, can read it |
+  | Session | the substitute the agent authenticates with | injected into the child's environment, minted per session, never at rest |
+  | Project | everything else an agent writes — configuration, history, caches, memory, the VCS identity | under `$WORKDIR`, which is the property `check_state_vars` asserts over the whole table |
+
+  So no agent-held state is machine-scoped at all, and FR-4 needs no exception: what is shared between projects is a value the projects never see, and what each session holds is a value that is worthless to any other session. `check_j5_1`'s distinctness assertion is what keeps that honest — a substitute shared between two sessions would be machine-scoped state inside the boundary, which is the thing this division exists to prevent.
 
 <a id="d15"></a>
 
@@ -706,7 +716,7 @@ Mandatory per P2. Tick `Verified` only after seeing red, **and only after confir
 | `check_j1_1` | Consume the environment from the working tree rather than the pushed ref | the e2e arm passes against local state, so it must fail instead | [ ] |
 | `check_j4_1` | Withdraw `network.credentials` and add `ANTHROPIC_API_KEY` to `allow_vars`, so the session reads the supervisor's own value | three assertions at once — `the credential the session can read is not of the substitute form: 27 character(s), not 64 lowercase hex`, `the real credential is readable inside the session, carried by: ANTHROPIC_API_KEY`, and `two sessions were handed the same substitute, so one copied out of a session stays valid in the next`. It also takes `check_r3` with it, on both `the host secret crossed into the session` and the routed-name assertion this task added. SC-6's project-tree search does **not** fire: the value crossed in the environment and nothing wrote it at rest, so the two halves are independent and this plant exercises only the first | [x] |
 | `check_j4_1` | Add `ANTHROPIC_API_KEY` to `allow_vars` with the route left in place — the widening a consumer would actually reach for | **inert, and that is the finding**: `13 checks passed`. The route overrides the grant, so a widening cannot get behind it, and the new `check_r3` assertion can only be falsified by removing the route | [x] |
-| `check_j5_1` | Empty `credentialServices` for one agent in the table | that agent's session is handed no credential, so FR-7's across-agents axis fails. `M7b` measured that there are no `credential_routes` to remove — the criterion's original plant named a mechanism `D14` withdrew | [ ] |
+| `check_j5_1` | Empty `credentialServices` for one agent in the table | that agent's session is handed no credential, so FR-7's across-agents axis fails. `M7b` measured that there are no `credential_routes` to remove — the criterion's original plant named a mechanism `D14` withdrew. Bit in four places at once: both of that agent's project arms, the count over the table, and the control's positive half | [x] |
 | `check_j7_1` | Run only the cheapest layer in the workflow | the suite reports success without having covered every layer | [ ] |
 | `check_rep1` | Have the wrapper write a timestamped file into the checkout on entry | the second entry differs from the first | [ ] |
 | `check_rep3` | Have authentication record the session it ran in | the two resulting states are distinguishable | [ ] |
@@ -745,7 +755,7 @@ Listed here and copied into `docs/HANDBOOK.md` at close-out, so each gap is know
 
 - **Live provider rejection** (Journey 4, second `Then`). Needs a real account and a real key; the automated half asserts substitute *shape* against mock credentials. Hand-verified. `M7a` narrowed the gap without closing it: the substitute is the session's own proxy token, minted per session and observed differing between two runs, so it is not a credential the provider has ever seen and it stops working the moment the session ends. That is an argument, not an observation of a provider refusing it.
 
-- **Live OAuth login** (Rep3, and Journey 5's first `Given`). Needs a browser, and possibly MFA. Hand-verified.
+- **Live OAuth login** (Rep3). Needs a browser, and possibly MFA. Hand-verified. `M7b` removed Journey 5's first `Given` from this gap: authenticating once on the machine is a value in the calling environment, which `check_j5_1` sets, so both of that scenario's axes are observed unattended.
 
 - **A host genuinely unable to enforce confinement** (R6). CI runners all have Landlock, so the automated check plants the violation rather than reproducing the condition. Hand-verified on an older kernel, or accepted as unreproducible and stated as such.
 

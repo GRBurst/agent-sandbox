@@ -893,7 +893,7 @@ Gated on `M1b` and `M1g`. [D1](plan.md#d1) resolved to the branch where the real
 
 The full suite is `1 of 21 checks failed`, the one being `check_sc3`, the deliberate progress bar, now at 11 missing scenarios. `nix flake check` passes.
 
-### M7b — Authenticating once serves every project, and every agent (Status: PENDING)
+### M7b — Authenticating once serves every project, and every agent (Status: IMPLEMENTED)
 
 **Scenario**: Journey 5.1
 
@@ -901,11 +901,11 @@ Two axes in one scenario. Across projects is the original claim; across agents i
 
 **RED**: `check_j5_1` puts one credential in the calling environment, then starts a session per checkout and per agent and asserts each is handed a substitute of its own with no login.
 
-- [ ] Check written and seen to FAIL
-- [ ] Every agent in the table declares the service in its own entry, and each session is minted a substitute of its own — so no agent reads another's store, and the axis is asserted as a property over the table rather than against a named second agent. **The criterion was written as "`credential_providers` captures the token flow and `credential_routes` exposes it", and the measurement below withdraws that**, as `M7a` withdrew the same mechanism from [D1](plan.md#d1)
-- [ ] **Control**: a third identity that has *not* been authenticated must **not** work in the same session, so a route that authenticates everything cannot pass as a route that authenticates the right thing ([D9](plan.md#d9))
-- [ ] The tension with FR-4 is resolved explicitly: credentials are machine-scoped, all other agent state is project-scoped, and the plan says which is which
-- [ ] Violation planted (empty one agent's `credentialServices`), seen to FAIL, reverted, recorded in plan.md
+- [x] Check written and seen to FAIL
+- [x] Every agent in the table declares the service in its own entry, and each session is minted a substitute of its own — so no agent reads another's store, and the axis is asserted as a property over the table rather than against a named second agent. **The criterion was written as "`credential_providers` captures the token flow and `credential_routes` exposes it", and the measurement below withdraws that**, as `M7a` withdrew the same mechanism from [D1](plan.md#d1)
+- [x] **Control**: a third identity that has *not* been authenticated must **not** work in the same session, so a route that authenticates everything cannot pass as a route that authenticates the right thing ([D9](plan.md#d9))
+- [x] The tension with FR-4 is resolved explicitly: credentials are machine-scoped, all other agent state is project-scoped, and the plan says which is which
+- [x] Violation planted (empty one agent's `credentialServices`), seen to FAIL, reverted, recorded in plan.md
 
 **Measured before starting**, in [`research.md § M7b`](research.md#m7b--authenticating-once-serves-every-project-and-every-agent). Five findings, each of which changes the task.
 
@@ -918,6 +918,19 @@ Two axes in one scenario. Across projects is the original claim; across agents i
 **The across-agents axis is written as a property over `builtins.attrNames agents`, not against a second agent.** Only `claude-code` is in the table until `M8`, so a check naming a second agent would either block this task on `M8` or assert against a stand-in description that proves nothing about the table. The property grows on its own when `M8` lands and needs no edit here.
 
 **The layer moves from e2e to integration, and the reason is that nothing logs in any more.** `e2e` was chosen when authenticating meant a live OAuth exchange needing a real account. Authentication is now a variable in the calling environment, both axes were measured unattended above, and there is no `scripts/checks/e2e.sh` for the check to live in. Recorded in the plan's test-strategy row.
+
+**Implementation.**
+
+- **The production diff is empty**, and that is the result rather than a shortfall: `lib/` and `flake.nix` are byte-identical before and after, and the whole task is `check_j5_1`. `M7a`'s two lines of `credentialServices` already satisfied both axes, which is what measuring first established; adding a mechanism here would have been adding one for a scenario that already held.
+- **The RED is therefore the planted one, and it bit in four places at once**: both project arms of the emptied agent, the count of sessions handed a credential against the size of the table, and the control's positive half. Four independent messages rather than one, which is what the count assertion and the control's positive half are for.
+- **The sessions are the product of the agent table and two sibling checkouts** — two today, six when `M8` lands, with no edit here. One `$HOME` and one `XDG_STATE_HOME` for every arm, because a login that served only the session it was made in would still pass a check that gave each arm a machine of its own.
+- **Distinctness is asserted over every session at once**, pairwise across the whole product rather than between two named arms, so the across-projects and across-agents axes are one assertion instead of two. A shared substitute would be machine-scoped state *inside* the boundary, which is exactly what the plan's new scope table says must not exist.
+- **The control gained a positive half the measurement did not have.** Research observed `GITHUB_TOKEN` absent and the warning naming `github`; the check also asserts that the *authenticated* identity still arrives as 64 hex in that same session. Without it, a control description that broke the route outright would show the same absence and be read as a refusal.
+- **The `credential_not_found` grep names the service** rather than matching the warning in general. FR-7 is about the identity this machine authenticated, so an `M8` agent that declares a service nobody has a credential for must not fail this check — and the control depends on that same warning firing for `github`, so a blanket match would make the two assertions contradict each other.
+- **`local -a` leaves an array unset, and `${#arr[@]}` on an unset name is an unbound-variable error under `set -u`.** The plant run is what found it, on the arms that fail before appending — so the first thing the planted violation proved was that the failure path runs at all. The two accumulator arrays are assigned empty rather than only declared.
+- `check_r3`'s `routed` list is untouched, because no new service is declared. It grows in `M8`, per the note above this section.
+
+The full suite is `1 of 22 checks failed`, the one being `check_sc3`, the deliberate progress bar, now at 10 missing scenarios — `j5_1` leaving and nothing else moving. `nix flake check` passes. `plan.md` gained the machine/session/project scope table that resolves the FR-4 tension, and Journey 5 left the live-OAuth coverage gap, which now belongs to `Rep3` alone.
 
 ### M7c — Authentication failure is not a denial (Status: PENDING)
 

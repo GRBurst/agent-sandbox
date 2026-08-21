@@ -2377,3 +2377,244 @@ check_j4_1() {
 
 	[ "$found" -eq 0 ]
 }
+
+# Journey 5.1: one login on the machine serves every project and every agent.
+#
+# Both axes were measured to hold before this check was written (research.md §
+# M7b), so the RED it starts from is the planted one recorded in plan.md rather
+# than a capability that had to be built.
+#
+# What "authenticated once on the machine" is here: the real value in the
+# supervisor's own environment, the same store M7a measured nono reading. There
+# is no login step in any arm, which is the whole of "with no further login" — a
+# session that had to authenticate would have to do it from inside, and nothing
+# inside is given the means.
+#
+# The sessions are the product of the agent table and two unrelated checkouts:
+#
+#   * across projects, because the same agent runs in two sibling checkouts
+#     that know nothing of each other, and neither is the one the credential
+#     was put in the environment for;
+#   * across agents, as a property over the table rather than against a named
+#     second agent. Only claude-code is in it until M8, so naming a second
+#     would either block this task on M8 or assert against a stand-in
+#     description that says nothing about the table. The product grows on its
+#     own when M8 lands and needs no edit here.
+#
+# D14 said the other agents obtain what they need from the authenticating one.
+# They do not, and what happens instead is stronger: each declares the service
+# in its own entry and the supervisor mints it an independent substitute, so no
+# agent reads another's credential store and FR-6 rests on no grant between
+# them. Distinctness is what carries that, asserted over every session at once
+# rather than pairwise between two named ones.
+#
+# One $HOME and one state root for every arm, because a login that served only
+# the session it was made in would still pass a check that gave each arm a
+# machine of its own.
+#
+# The control is one further session, and it is the criterion's third identity
+# (D9): `github` declared alongside `anthropic`, with only the anthropic
+# credential in the environment. Without it, a route that handed every declared
+# service a substitute would satisfy every assertion above — the substitute's
+# form cannot tell an authenticated identity from an unauthenticated one.
+# `github` because it is one of only three built-in services that name an
+# environment variable at 0.74.0; openai, gemini and google-ai name none, so
+# nothing in a calling environment could authenticate them either way and their
+# absence would prove nothing.
+check_j5_1() {
+	# The service and the name it claims are the mechanism's own policy rather
+	# than this repository's description, so they are written down here for the
+	# same reason check_r3's `routed` list is a literal.
+	local service=anthropic credvar=ANTHROPIC_API_KEY
+	local unauth=github unauthvar=GITHUB_TOKEN
+	local outside home real agent project proj arm desc rc value entry
+	local env_pkg expected found=0 i j
+	local FIXTURE_PROFILE FIXTURE_SUBSTRATE FIXTURE_BASH
+	local -a SESSION_ENV table crossed carriers
+	# Assigned rather than only declared: `local -a` leaves an array unset, and
+	# `${#arr[@]}` on an unset name is an unbound-variable error under `set -u`.
+	# An arm that fails before appending is the case this exists for.
+	local -a arms=() substitutes=()
+
+	if ! mapfile -t table < <(nix eval --json "$REPO_ROOT#agents" \
+		--apply builtins.attrNames | jq -r '.[]'); then
+		fail 'the agent table does not evaluate, so there is no set to assert the property over'
+		return 1
+	fi
+	# Anti-vacuity: a property over an empty table holds by matching nothing.
+	if [ "${#table[@]}" -eq 0 ]; then
+		fail 'the agent table is empty, so "every agent in the table is authenticated" holds vacuously'
+		return 1
+	fi
+
+	outside=$(mktemp -d -p "${XDG_RUNTIME_DIR:-/tmp}" agent-sandbox-j5_1.XXXXXX)
+	# shellcheck disable=SC2064
+	trap "rm -rf '$outside'" RETURN
+
+	# Outside the project, per check_r1: 48 of the deny rules are $HOME-relative
+	# and a $HOME under the workdir overlaps a granted parent, which nono
+	# refuses to start with.
+	home="$outside/home"
+	mkdir -p "$home" "$outside/work/alpha" "$outside/work/beta"
+	session_env "$outside/state"
+
+	# Per run and shaped like the real thing, so the absence asserted below is
+	# the absence of something a provider would have accepted, and a value left
+	# behind by an earlier run cannot satisfy it.
+	real="sk-ant-real-canary-$RANDOM$RANDOM"
+
+	# The probe writes its dump inside its own granted workdir: research.md §
+	# M7b records a harness that wrote outside it and got an exit of 1 with no
+	# output, which reads exactly like the mechanism refusing to start.
+	for project in alpha beta; do
+		cat >"$outside/work/$project/probe-env.sh" <<-'PROBE'
+			"$1" -0 >"$2"
+		PROBE
+	done
+
+	for agent in "${table[@]}"; do
+		session_fixture "$agent" || return 1
+		env_pkg=$(substrate_member "$FIXTURE_SUBSTRATE" env) || {
+			fail "the substrate for $agent provides no env, so its session cannot print its own environment"
+			return 1
+		}
+
+		for project in alpha beta; do
+			arm="$agent/$project"
+			proj="$outside/work/$project"
+
+			env "${SESSION_ENV[@]}" "HOME=$home" "$credvar=$real" \
+				"$(pinned_bin nono)/nono" run \
+				--profile "$FIXTURE_PROFILE" --workdir "$proj" --allow-cwd -- \
+				"$FIXTURE_BASH/bin/bash" "$proj/probe-env.sh" \
+				"$env_pkg/bin/env" "$proj/env.$agent.bin" \
+				>"$outside/out.$agent.$project" 2>"$outside/err.$agent.$project" && rc=0 || rc=$?
+
+			if [ ! -s "$proj/env.$agent.bin" ]; then
+				found=1
+				fail "$(printf 'the %s session printed no environment (exit %s), so it observes nothing:\n%s' \
+					"$arm" "$rc" "$(cat "$outside/err.$agent.$project")")"
+				continue
+			fi
+			mapfile -d '' -t crossed <"$proj/env.$agent.bin"
+
+			value=
+			for entry in "${crossed[@]}"; do
+				[ "${entry%%=*}" = "$credvar" ] && value=${entry#*=}
+			done
+
+			# The scenario, per session. An empty value is the whole of "this
+			# agent was not authenticated": nothing was minted for it, which is
+			# what emptying its credentialServices produces.
+			if [ -z "$value" ]; then
+				found=1
+				fail "$(printf 'the %s session was handed no credential, so the one login on this machine did not serve it' "$arm")"
+				continue
+			fi
+			# The form rather than inequality with the real value, per
+			# check_j4_1: a truncation differs and still authenticates.
+			if [[ ! $value =~ ^[0-9a-f]{64}$ ]]; then
+				found=1
+				fail "$(printf 'the credential the %s session was handed is not of the substitute form: %s character(s), not 64 lowercase hex' \
+					"$arm" "${#value}")"
+			fi
+			arms+=("$arm")
+			substitutes+=("$value")
+
+			# The carriers are named rather than printed, per check_r3.
+			carriers=()
+			for entry in "${crossed[@]}"; do
+				[[ $entry == *"$real"* ]] && carriers+=("${entry%%=*}")
+			done
+			if [ "${#carriers[@]}" -gt 0 ]; then
+				found=1
+				fail "$(printf 'the real credential is readable inside the %s session, carried by: %s' \
+					"$arm" "${carriers[*]}")"
+			fi
+
+			# "With no further login", from the supervisor's side: the route
+			# says when it could not find a credential, and for an agent this
+			# machine's login serves it must not be saying it.
+			if grep -qaF "credential_not_found /$service" "$outside/err.$agent.$project"; then
+				found=1
+				fail "$(printf 'the supervisor reports %s unauthenticated for the %s session, so that session would need a login of its own' \
+					"$service" "$arm")"
+			fi
+		done
+	done
+
+	# Bookkeeping, so a loop that quietly ran fewer sessions than the table has
+	# entries cannot pass on the arms it did run.
+	expected=$((${#table[@]} * 2))
+	if [ "${#substitutes[@]}" -ne "$expected" ]; then
+		found=1
+		fail "$(printf '%s of %s sessions were handed a credential, so the property does not hold over the whole table' \
+			"${#substitutes[@]}" "$expected")"
+	fi
+
+	# Each of its own. Nothing is shared between two projects or between two
+	# agents, so no session's substitute is a thing another session could have
+	# copied out — which is what makes a machine-scoped login safe to hold while
+	# every other piece of agent state stays project-scoped (FR-4).
+	for ((i = 0; i < ${#substitutes[@]}; i++)); do
+		for ((j = i + 1; j < ${#substitutes[@]}; j++)); do
+			if [ "${substitutes[i]}" = "${substitutes[j]}" ]; then
+				found=1
+				fail "$(printf 'the %s and %s sessions were handed the same substitute, so neither is minted its own' \
+					"${arms[i]}" "${arms[j]}")"
+			fi
+		done
+	done
+
+	# The control (D9). One session, the reference agent, with a second identity
+	# declared that this machine has never authenticated.
+	session_fixture "${table[0]}" || return 1
+	env_pkg=$(substrate_member "$FIXTURE_SUBSTRATE" env) || {
+		fail "the substrate for ${table[0]} provides no env for the control session"
+		return 1
+	}
+	desc="$outside/ctrl.json"
+	jq --arg s "$unauth" '.network.credentials += [$s]' "$FIXTURE_PROFILE" >"$desc"
+	proj="$outside/work/alpha"
+
+	env "${SESSION_ENV[@]}" "HOME=$home" "$credvar=$real" \
+		"$(pinned_bin nono)/nono" run \
+		--profile "$desc" --workdir "$proj" --allow-cwd -- \
+		"$FIXTURE_BASH/bin/bash" "$proj/probe-env.sh" \
+		"$env_pkg/bin/env" "$proj/env.ctrl.bin" \
+		>"$outside/out.ctrl" 2>"$outside/err.ctrl" && rc=0 || rc=$?
+
+	if [ ! -s "$proj/env.ctrl.bin" ]; then
+		fail "$(printf 'the control session printed no environment (exit %s), so the sessions above are unattributable:\n%s' \
+			"$rc" "$(cat "$outside/err.ctrl")")"
+		return 1
+	fi
+	mapfile -d '' -t crossed <"$proj/env.ctrl.bin"
+	value=
+	for entry in "${crossed[@]}"; do
+		[ "${entry%%=*}" = "$credvar" ] && value=${entry#*=}
+	done
+	# The control's own positive half: the authenticated identity still arrives
+	# in this session, so the unauthenticated one being absent is the
+	# authentication's doing and not the extra declaration breaking the route.
+	if [[ ! $value =~ ^[0-9a-f]{64}$ ]]; then
+		found=1
+		fail 'the control session was handed no substitute for the identity this machine did authenticate, so its refusal of the other one attributes to nothing'
+	fi
+	value=
+	for entry in "${crossed[@]}"; do
+		[ "${entry%%=*}" = "$unauthvar" ] && value=${entry#*=}
+	done
+	if [ -n "$value" ]; then
+		found=1
+		fail "$(printf 'an identity this machine never authenticated arrived in the session under %s, so the route authenticates whatever is declared rather than what was logged in' \
+			"$unauthvar")"
+	fi
+	if ! grep -qaF "credential_not_found /$unauth" "$outside/err.ctrl"; then
+		found=1
+		fail "$(printf 'the supervisor does not report %s unauthenticated, so an unauthenticated route is indistinguishable from an authenticated one' \
+			"$unauth")"
+	fi
+
+	[ "$found" -eq 0 ]
+}
