@@ -1625,6 +1625,57 @@ The substitute carries **no `nono_` prefix**. `M1b` recorded the sandbox holding
 
 **A `sed` plant needs a guard that the edit landed.** The `allow_vars` items in `lib/confinement.nix` are indented eight spaces, not ten; a pattern written for ten matched nothing, and the run would have reported a plant that changed no behaviour as a plant that bit nothing. The harness now aborts unless `git diff` mentions the string it meant to add.
 
+## M7b — Authenticating once serves every project, and every agent
+
+Measured on x86_64-linux with nono 0.74.0, against the shipped `.#confinement-claude-code` — which carries `network.credentials = ["anthropic"]` since `M7a`. Every arm ran a bash probe out of the substrate printing `env -0`, with the fake `$HOME`, the config root, the ambient `XDG_STATE_HOME` and the scratch checkouts as siblings under one `mktemp -d -p "$XDG_RUNTIME_DIR"`.
+
+### Both axes of Journey 5.1 already hold
+
+One fake `$HOME`, one config root, one shared ambient `XDG_STATE_HOME`, two unrelated checkouts as siblings under `work/`, and `ANTHROPIC_API_KEY=sk-real-canary-4711` in the **supervisor's** environment for all three arms. The second agent is stood in for by the shipped description with `jq '.meta.name = "second-agent"'`: the same `credentialServices`, a different name, and nothing about it reading the first agent's store.
+
+| Arm | Description | Project | `ANTHROPIC_API_KEY` in the child | Real value present |
+| --- | --- | --- | --- | --- |
+| alpha | shipped | `work/alpha` | `480dae4be5074f44…` | no |
+| beta | shipped | `work/beta` | `6032751251cb825d…` | no |
+| second | `second-agent` | `work/beta` | `e512dd0c86c0e03b…` | no |
+
+All three exit 0, `NONO_PROXY_TOKEN` holds the identical value in each, the three substitutes are **three distinct values**, no arm produced a `credential_not_found` warning, and each session's audit record reached only its own project.
+
+**Across projects holds because the login is the machine's, not the project's.** A second, unrelated checkout is authenticated with no further login, and nothing a project holds takes part in it.
+
+**Across agents holds by a simpler route than `D14` describes.** A second agent needs no login of its own and reads nothing of the first agent's: it declares the same service name in its own table entry and the supervisor mints it an independent substitute. There is no authenticating agent, and no dependency between agents at all. `D14`'s outcome survives; its mechanism — capture `claude-code`'s token flow, expose it to the other two — is withdrawn, the same way `M7a` withdrew `D1`'s fork. `M7b`'s second criterion goes with it.
+
+### Three of the six built-in services name an environment variable, and three do not
+
+All six declared at once, with no credential variable set: exit 0, `net proxy`, and a `Proxy credential warnings:` block carrying a `credential_not_found /<service>` line for **every** one. Only three of them say what to set.
+
+| Service | Variable it looks for |
+| --- | --- |
+| `anthropic` | `ANTHROPIC_API_KEY` |
+| `github` | `GITHUB_TOKEN` |
+| `gitlab` | `GITLAB_TOKEN` |
+| `openai`, `gemini`, `google-ai` | **none named** — the warning stops at "will be denied until the credential is available" |
+
+So at 0.74.0 three of the six cannot be fed the way `claude-code`'s is, and an agent needing one of them would have to bring a `custom_credentials` route of its own. That is `M8`'s problem and not this task's, because `opencode` and `pi` both address Anthropic. Each warning also carries keychain advice that only applies on macOS.
+
+### An unauthenticated route is observable, which is the control M7b asks for
+
+The same six declared, with only `ANTHROPIC_API_KEY` set: `ANTHROPIC_API_KEY` arrives as 64 hex and `GITHUB_TOKEN` and `GITLAB_TOKEN` **do not arrive at all**, with the warning block naming exactly those two. So the criterion's "a third identity that has not been authenticated must not work in the same session" is a single session's observation: the credential variable is absent and the route says so by name. `github` is the identity to use, because it is one of the three that names a variable.
+
+### A base URL is injected per declared route whether or not a credential was found
+
+The name delta against the shipped description, with six routes declared and nothing withdrawn: `ANTHROPIC_API_KEY`, `OPENAI_BASE_URL`, `GEMINI_BASE_URL`, `GITHUB_BASE_URL`, `GITLAB_BASE_URL` and **`GOOGLE-AI_BASE_URL`**. All the base URLs point at one shared loopback port, `http://127.0.0.1:<port>/<service>`.
+
+Two things follow. `check_r3`'s `routed` literal grows by a base URL per declared service, and by a credential variable per service that found one. And `GOOGLE-AI_BASE_URL` is **not a valid shell identifier**: `env -0` reports it, but no shell can reference it, so a service whose name carries a hyphen produces a variable the session cannot use.
+
+### The substitute is one token per session, not one per route
+
+`NONO_PROXY_TOKEN` held the same 64 hex as `ANTHROPIC_API_KEY` in every arm, with six routes declared as with one. `M7a` measured the equality; this adds that the token is the session's rather than the route's, so a second route would not yield a second value to compare.
+
+### Method note
+
+**A probe must write its dump inside the granted workdir.** The first harness wrote `env -0` to a path outside it: every arm exited 1 with no output, which reads exactly like the mechanism refusing to start rather than like a redirection being denied.
+
 ## M8e — Where each agent reads its declarative extensions from
 
 **Partial.** `opencode` is measured; `claude-code` and `pi` are not.

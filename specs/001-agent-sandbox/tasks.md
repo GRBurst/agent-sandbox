@@ -899,13 +899,25 @@ The full suite is `1 of 21 checks failed`, the one being `check_sc3`, the delibe
 
 Two axes in one scenario. Across projects is the original claim; across agents is [D14](plan.md#d14), and it is not a convenience — FR-6 and FR-3 together **exclude** the alternative, because letting `opencode` and `pi` read `claude-code`'s credential store would put a credential that works outside the boundary inside it, on a grant resting on convenience rather than structural impossibility.
 
-**RED**: `check_j5_1` authenticates in checkout A and asserts an authenticated state in checkout B, and for an agent that never authenticated.
+**RED**: `check_j5_1` puts one credential in the calling environment, then starts a session per checkout and per agent and asserts each is handed a substitute of its own with no login.
 
 - [ ] Check written and seen to FAIL
-- [ ] `credential_providers` captures the token flow and `credential_routes` exposes it to the session, so the other agents are pointed at the mediated route rather than at the first agent's store
+- [ ] Every agent in the table declares the service in its own entry, and each session is minted a substitute of its own — so no agent reads another's store, and the axis is asserted as a property over the table rather than against a named second agent. **The criterion was written as "`credential_providers` captures the token flow and `credential_routes` exposes it", and the measurement below withdraws that**, as `M7a` withdrew the same mechanism from [D1](plan.md#d1)
 - [ ] **Control**: a third identity that has *not* been authenticated must **not** work in the same session, so a route that authenticates everything cannot pass as a route that authenticates the right thing ([D9](plan.md#d9))
 - [ ] The tension with FR-4 is resolved explicitly: credentials are machine-scoped, all other agent state is project-scoped, and the plan says which is which
-- [ ] Violation planted (remove the route for the second agent), seen to FAIL, reverted, recorded in plan.md
+- [ ] Violation planted (empty one agent's `credentialServices`), seen to FAIL, reverted, recorded in plan.md
+
+**Measured before starting**, in [`research.md § M7b`](research.md#m7b--authenticating-once-serves-every-project-and-every-agent). Five findings, each of which changes the task.
+
+**Both axes already hold, so the only RED available at this layer is a planted one.** Two unrelated checkouts and two descriptions differing only in `meta.name`, one credential in the supervisor's environment: three sessions, three exits of 0, three **distinct** 64-hex substitutes, the real value absent from every one, no `credential_not_found` warning anywhere, and each session's audit record reaching only its own project.
+
+**Across agents holds by a simpler route than `D14` described, and the decision is corrected rather than worked around.** There is no authenticating agent and no dependency between agents: each declares the same service name in its own table entry and the supervisor mints it an independent substitute. That is why the second criterion is rewritten above, and why the plant is emptying an agent's `credentialServices` rather than removing a `credential_routes` entry that does not exist.
+
+**The control is a single session's observation.** With `anthropic` and `github` both declared and only `ANTHROPIC_API_KEY` set, `ANTHROPIC_API_KEY` arrives as 64 hex while `GITHUB_TOKEN` does not arrive at all, and the warning block names `github` by itself. `github` is the identity to use because it is one of only three built-in services that name an environment variable — `openai`, `gemini` and `google-ai` name none, so nothing in the calling environment can authenticate them at 0.74.0.
+
+**The across-agents axis is written as a property over `builtins.attrNames agents`, not against a second agent.** Only `claude-code` is in the table until `M8`, so a check naming a second agent would either block this task on `M8` or assert against a stand-in description that proves nothing about the table. The property grows on its own when `M8` lands and needs no edit here.
+
+**The layer moves from e2e to integration, and the reason is that nothing logs in any more.** `e2e` was chosen when authenticating meant a live OAuth exchange needing a real account. Authentication is now a variable in the calling environment, both axes were measured unattended above, and there is no `scripts/checks/e2e.sh` for the check to live in. Recorded in the plan's test-strategy row.
 
 ### M7c — Authentication failure is not a denial (Status: PENDING)
 
@@ -980,7 +992,9 @@ ______________________________________________________________________
 
 ## M8 — The remaining agents
 
-`claude-code` is already confined, from `M4b`. What is left is its own awkward corners, then the two agents that depend on it. The order is `claude-code` → `opencode` → `pi`, and it is the order [D14](plan.md#d14) forces rather than a preference.
+`claude-code` is already confined, from `M4b`. What is left is its own awkward corners, then the other two agents. The order is `claude-code` → `opencode` → `pi`, and `M7b` withdrew the reason [D14](plan.md#d14) gave for it: no agent takes its credential from another, so nothing here depends on `claude-code` beyond it being the one already confined and therefore the cheapest thing to generalise from.
+
+Each of the two new agents needs `credentialServices` in its table entry, and declaring a service adds two names to what crosses into every session of that agent — `<SERVICE>_API_KEY` or `<SERVICE>_TOKEN`, and `<SERVICE>_BASE_URL`. `check_r3`'s `routed` list is where those are written down, per [research.md § M7b](research.md#m7b--authenticating-once-serves-every-project-and-every-agent), so a service declared without that list growing fails it.
 
 The consumer's own authoring surface (FR-25) closes this group rather than opening it. It has to be enumerated per agent before it can be granted for any, so it depends on all three being confined — which is also why `M5f` keeps only the undeclared half, the half that needs no mechanism at all.
 
