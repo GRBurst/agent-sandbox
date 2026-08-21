@@ -985,19 +985,19 @@ The full suite is `1 of 23 checks failed`, the one being `check_sc3`, the delibe
 
 The full suite is `1 of 24 checks failed`, the one being `check_sc3`, the deliberate progress bar, now at 8 missing scenarios.
 
-### M7e — The toolchain survives interception (Status: PENDING)
+### M7e — The toolchain survives interception (Status: IMPLEMENTED)
 
 **Scenario**: Journey 6.1
 
-Shaped by `M1c`, and rewritten twice after the first two shapes were found to prove nothing. Interception is **per-destination and off by default** ([D12](plan.md#d12)): a plain-string destination is tunnelled untouched, and only a destination asked for in the form that inspects it causes the five trust-bundle variables to be exported. So an ordinary exchange succeeding is not evidence — it succeeds identically with interception off, because the system trust store is in the floor. Only the *difference* between trusting and not trusting is evidence.
+Shaped by `M1c`, and rewritten twice after the first two shapes were found to prove nothing. Interception is **per-destination and off by default** ([D12](plan.md#d12)): a plain-string destination is tunnelled untouched, and only a destination asked for in the form that inspects it causes the five trust-bundle variables to be exported. So an ordinary exchange succeeding is not evidence: what an unintercepted tool does depends on whether the host's own trust store is reachable from inside the substrate, which is a property of the machine rather than of the feature. Only the *difference* between trusting and not trusting is evidence.
 
 **RED**: `check_j6_1` in three arms, per [plan.md § check_j6_1](plan.md#check_j6_1-in-three-arms).
 
-- [ ] Arm 1, the mechanism engaged: `SSL_CERT_FILE`, `REQUESTS_CA_BUNDLE`, `NODE_EXTRA_CA_CERTS`, `CURL_CA_BUNDLE` and `GIT_SSL_CAINFO` are set in the child, and the file they name exists and parses as a certificate (FR-17)
-- [ ] Arm 2, the exchange did its work: the output is matched as a **shape** rather than pinned to a value
-- [ ] Arm 3, the negative control, in the same session: repeat with the trust bundle pointed at `/dev/null` and require failure with a certificate error
-- [ ] Arm 3 is **permanent** and lives inside the check, not planted and reverted, because the property under test *is* a difference — removing it would be a regression rather than a plant, which is why it is deliberately absent from the planted-violations table
-- [ ] Violation planted (ask for the destination as a plain-string destination instead), seen to FAIL **on arm 1**, reverted, recorded in plan.md
+- [x] Arm 1, the mechanism engaged: `SSL_CERT_FILE`, `REQUESTS_CA_BUNDLE`, `NODE_EXTRA_CA_CERTS`, `CURL_CA_BUNDLE` and `GIT_SSL_CAINFO` are set in the child, and the file they name exists and parses as a certificate (FR-17)
+- [x] Arm 2, the exchange did its work: the output is matched as a **shape** rather than pinned to a value
+- [x] Arm 3, the negative control, in the same session: repeat with the trust bundle pointed at `/dev/null` and require failure with a certificate error
+- [x] Arm 3 is **permanent** and lives inside the check, not planted and reverted, because the property under test *is* a difference — removing it would be a regression rather than a plant, which is why it is deliberately absent from the planted-violations table
+- [x] Violation planted (empty `credentialServices`, so the description asks for nothing to be inspected — the plain-string `allow_domain` this criterion first named does not exist here), seen to FAIL **on arm 1**, reverted, recorded in plan.md
 
 The exchange is credential-free and no requirement asks otherwise: `M1c` established that every store a credential could come from sits in a deny group the mechanism marks `required`, and authenticating the version-control toolchain is out of scope. FR-17 is about trust in the inspecting authority, and that is all this checks.
 
@@ -1010,6 +1010,26 @@ There is a second observable for arm 1, independent of the child's environment: 
 **The file is readable from inside, which the criterion needed and its location made doubtful.** The bundle is at `$XDG_STATE_HOME/nono/sessions/intercept-<pid>-<n>/intercept-ca.pem`, outside the project by [D13](plan.md#d13)'s design — yet the session reads it and it contains `BEGIN CERTIFICATE`. And the granted reach and the audit record's `tracked_paths` gain **nothing** but the project, so interception widens no reach and `check_j1_1` and `check_sc1` need no exception. The directory is deleted when the session ends, so arm 1 must read the bundle from inside rather than inspect it afterwards.
 
 A malformed `allow_domain` arm refuses to start — `Profile parse error: data did not match any variant of untagged enum AllowDomainEntry`, exit 1 — so getting the endpoint shape subtly wrong cannot produce a passing check.
+
+**Implementation.** No production change: the shipped description already asks for inspection, and the whole task is the check ([`research.md § M7e`](research.md#m7e--the-toolchain-survives-interception-and-nothing-else-would-carry-it)).
+
+`check_j6_1` runs one session and writes one probe into the granted workdir. The probe records the five variables, counts `BEGIN`/`END CERTIFICATE` in the bundle in pure bash — the intercept directory is deleted at session end, so the counting has to happen while the session is alive — and then runs `git ls-remote` twice against the same remote, once as the session was handed it and once with all five variables pointed at `/dev/null`. `git` comes out of the substrate, and it is the only ordinary tool in `sessionTools` that speaks HTTPS.
+
+Three things the task notes above did not predict.
+
+**The credential route is the switch.** `lib/confinement.nix` names no `allow_domain` at all, so the plain-string plant this task planned for has nothing to act on. Declaring `anthropic` is by itself enough to set all five variables and take the banner to `net proxy`, which means every session this environment ships is an intercepted one and FR-17 binds it today rather than conditionally.
+
+**`ca_env_vars` cannot withdraw trust.** Two attempts to plant through it failed. `[ ]` means the defaults, and a non-empty list means the defaults *plus* the names given — measured, after the built artefact was inspected to confirm the edit had landed rather than assuming the check was blind. Good for the guarantee, useless as a plant.
+
+**The host trust store does not rescue an unintercepted exchange here.** On NixOS `/etc/ssl/certs/ca-certificates.crt` resolves into `/nix/store`, and that path is not in the substrate's closure, so an unintercepted `git` fails with `unable to get local issuer certificate (20)` and pointing the variables at the system bundle fails the same way as pointing them at `/dev/null`. `M1c`'s claim that the real certificate "validates fine" is corrected in place. The three-arm design survives the correction, because which way that arm falls is a property of the host.
+
+The plant that was used is an empty `credentialServices`, and it bit in **four** places: no trust variables, `net outbound allowed`, an unreadable authority, and arm 2's exchange failing on the certificate. Arm 3 stayed quiet, correctly — it asserts a failure and the exchange fails either way, which is precisely why arm 2 is named as its positive control.
+
+"Parses as a certificate" is discharged in two halves, because the substrate carries no `openssl`: structurally at arm 1, where the delimiters must balance and there must be at least one, and semantically at arms 2 and 3, where a real TLS exchange either accepts the authority or reports that it cannot.
+
+The check needs the network, which no other check does. That is recorded in the plan's test-strategy row rather than left for a stranger to discover from a timeout.
+
+The full suite is `1 of 25 checks failed`, the one being `check_sc3`, the deliberate progress bar, now at 7 missing scenarios.
 
 ______________________________________________________________________
 

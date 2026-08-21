@@ -3066,3 +3066,202 @@ check_rep3() {
 
 	[ "$found" -eq 0 ]
 }
+
+# Journey 6.1 and FR-17. An ordinary tool's HTTPS exchange with the remote
+# succeeds while the session's traffic is being inspected.
+#
+# Three arms in one session, per plan.md § check_j6_1. The shape is forced by
+# D9: `git` exits 0 when trust propagated to it, and it would exit 0 again if
+# nothing were inspected at all, so one observation cannot carry a difference.
+#
+#   1. The mechanism engaged — the five trust-bundle variables are set, the
+#      file they name is readable from inside, and it holds whole PEM
+#      certificate blocks. Plus the banner's network line, which is an
+#      observable the child's environment cannot influence.
+#   2. The exchange did its work — `git ls-remote` against the remote, matched
+#      as a shape rather than pinned to a value, so it survives the remote
+#      moving on.
+#   3. The negative control, in the same session — the same exchange with the
+#      trust bundle pointed at /dev/null must fail, and fail with a
+#      certificate error rather than a confinement denial.
+#
+# Arm 3 is permanent and deliberately absent from plan.md's planted-violations
+# table: the property under test *is* the difference between arms 2 and 3, so
+# removing it would be a regression rather than a plant.
+#
+# "Parses as a certificate" is asserted structurally here and semantically by
+# the other two arms. There is no openssl in the substrate to parse it with,
+# and asking the tool that actually loads it is the better instrument anyway:
+# arm 3 shows what a file that is not a certificate produces — `error adding
+# trust anchors from file: /dev/null` — and arm 2 shows this one does not.
+#
+# The session is handed a credential because a real one has one. The exchange
+# itself is credential-free (M1c), and nothing below reads that value.
+check_j6_1() {
+	local agent=claude-code
+	# The project's own canonical remote (FR-19), so the exchange is with a
+	# host this repository already depends on rather than an arbitrary third
+	# party. It is the destination, never an expected answer.
+	local remote='https://github.com/GRBurst/agent-sandbox'
+	local outside home proj git_pkg rc found=0
+	local var value key answer
+	local readable=no begin=0 end=0 bytes=0
+	local trusted_rc=1 untrusted_rc=0
+	local FIXTURE_PROFILE FIXTURE_SUBSTRATE FIXTURE_BASH
+	local -a SESSION_ENV
+	local -a trust=(SSL_CERT_FILE REQUESTS_CA_BUNDLE NODE_EXTRA_CA_CERTS CURL_CA_BUNDLE GIT_SSL_CAINFO)
+	# Assigned rather than only declared, per check_j5_1.
+	local -a missing=()
+
+	session_fixture "$agent" || return 1
+	git_pkg=$(substrate_member "$FIXTURE_SUBSTRATE" git) || {
+		fail "the substrate for $agent provides no git, so the session has no ordinary tool to exchange with a remote"
+		return 1
+	}
+
+	outside=$(mktemp -d -p "${XDG_RUNTIME_DIR:-/tmp}" agent-sandbox-j6_1.XXXXXX)
+	# shellcheck disable=SC2064
+	trap "rm -rf '$outside'" RETURN
+
+	home="$outside/home"
+	proj="$outside/work/proj"
+	mkdir -p "$home" "$proj/harness"
+	session_env "$outside/state"
+
+	# Inside the granted workdir, per check_j5_1.
+	cat >"$proj/harness/probe-j6_1.sh" <<-'PROBE'
+		set -u
+		git=$1
+		out=$2
+		url=$3
+
+		: >"$out/trust.tsv"
+		for v in SSL_CERT_FILE REQUESTS_CA_BUNDLE NODE_EXTRA_CA_CERTS CURL_CA_BUNDLE GIT_SSL_CAINFO; do
+			printf '%s\t%s\n' "$v" "${!v-}" >>"$out/trust.tsv"
+		done
+
+		# Read from inside: the mechanism deletes the session directory the
+		# bundle lives in when the session ends, so there is nothing left to
+		# inspect afterwards.
+		readable=no
+		begin=0
+		end=0
+		bytes=0
+		if [ -n "${SSL_CERT_FILE-}" ] && [ -r "${SSL_CERT_FILE-}" ]; then
+			readable=yes
+			while IFS= read -r line || [ -n "$line" ]; do
+				bytes=$((bytes + ${#line} + 1))
+				case $line in
+				*'BEGIN CERTIFICATE'*) begin=$((begin + 1)) ;;
+				*'END CERTIFICATE'*) end=$((end + 1)) ;;
+				esac
+			done <"$SSL_CERT_FILE"
+		fi
+		printf 'readable\t%s\nbegin\t%s\nend\t%s\nbytes\t%s\n' \
+			"$readable" "$begin" "$end" "$bytes" >"$out/bundle.tsv"
+
+		"$git" ls-remote "$url" HEAD >"$out/trusted.out" 2>"$out/trusted.err"
+		printf '%s\n' "$?" >"$out/trusted.rc"
+
+		# Arm 3, in this same session: every variable the mechanism set, pointed
+		# somewhere that is not a certificate.
+		SSL_CERT_FILE=/dev/null REQUESTS_CA_BUNDLE=/dev/null NODE_EXTRA_CA_CERTS=/dev/null \
+			CURL_CA_BUNDLE=/dev/null GIT_SSL_CAINFO=/dev/null \
+			"$git" ls-remote "$url" HEAD >"$out/untrusted.out" 2>"$out/untrusted.err"
+		printf '%s\n' "$?" >"$out/untrusted.rc"
+	PROBE
+
+	env "${SESSION_ENV[@]}" "HOME=$home" "ANTHROPIC_API_KEY=sk-ant-real-canary-$RANDOM$RANDOM" \
+		"$(pinned_bin nono)/nono" run \
+		--profile "$FIXTURE_PROFILE" --workdir "$proj" --allow-cwd -- \
+		"$FIXTURE_BASH/bin/bash" "$proj/harness/probe-j6_1.sh" \
+		"$git_pkg/bin/git" "$proj/harness" "$remote" \
+		>"$outside/out" 2>"$outside/err" && rc=0 || rc=$?
+
+	if [ ! -s "$proj/harness/trust.tsv" ]; then
+		fail "$(printf 'the session observed nothing (exit %s), so no arm of this check ran:\n%s' \
+			"$rc" "$(cat "$outside/err")")"
+		return 1
+	fi
+
+	# Arm 1, the mechanism engaged, read out of the child's own environment.
+	while IFS=$'\t' read -r var value; do
+		[ -n "$value" ] || missing+=("$var")
+	done <"$proj/harness/trust.tsv"
+	if [ "${#missing[@]}" -gt 0 ]; then
+		found=1
+		fail "$(printf 'the session was handed no trust in the inspecting authority, so a tool that validates a certificate is broken by the interception: %s unset' \
+			"${missing[*]}")"
+	fi
+
+	# Bookkeeping: a loop that read fewer lines than there are variables would
+	# otherwise report every one of them present.
+	if [ "$(wc -l <"$proj/harness/trust.tsv")" -ne "${#trust[@]}" ]; then
+		found=1
+		fail "$(printf 'the probe reported on %s variable(s), not the %s this arm is about' \
+			"$(wc -l <"$proj/harness/trust.tsv")" "${#trust[@]}")"
+	fi
+
+	# The same arm from the supervisor's side, so a change in how the mechanism
+	# exports those five names does not take arm 1 down with it. The banner
+	# distinguishes a tunnel from an inspected destination in one word.
+	if ! grep -Eq 'net[[:space:]]+proxy' "$outside/err"; then
+		found=1
+		fail "$(printf 'the session reports no inspecting proxy, so there is no interception for a tool to survive: %s' \
+			"$(grep -E 'net[[:space:]]' "$outside/err" | head -n 1 || printf '(no network line in the banner)')")"
+	fi
+
+	while IFS=$'\t' read -r key value; do
+		case $key in
+		readable) readable=$value ;;
+		begin) begin=$value ;;
+		end) end=$value ;;
+		bytes) bytes=$value ;;
+		esac
+	done <"$proj/harness/bundle.tsv"
+
+	if [ "$readable" != yes ]; then
+		found=1
+		fail 'the authority the session is told to trust is not readable from inside it, so the trust it was handed is nominal'
+	elif [ "$begin" -lt 1 ] || [ "$begin" -ne "$end" ]; then
+		found=1
+		fail "$(printf 'the file the session is told to trust holds no whole certificate: %s BEGIN and %s END marker(s) in %s byte(s)' \
+			"$begin" "$end" "$bytes")"
+	fi
+
+	trusted_rc=$(cat "$proj/harness/trusted.rc")
+	untrusted_rc=$(cat "$proj/harness/untrusted.rc")
+	answer=$(cat "$proj/harness/trusted.out")
+
+	# Arm 2, the exchange. This is also arm 3's positive control (D9): without
+	# it, a session that could not reach the network at all would satisfy arm 3
+	# and prove nothing.
+	if [ "$trusted_rc" -ne 0 ]; then
+		found=1
+		fail "$(printf 'the exchange with the remote failed (exit %s) while the session was trusting the inspecting authority:\n%s' \
+			"$trusted_rc" "$(cat "$proj/harness/trusted.err")")"
+	elif [[ ! $answer =~ ^[0-9a-f]{40}[[:space:]]+HEAD$ ]]; then
+		# The shape, never the value: the remote moves on, and a check pinned
+		# to today's commit would fail on its own success.
+		found=1
+		fail "$(printf 'the exchange returned nothing of the shape a ref listing has: %s' "$answer")"
+	fi
+
+	# Arm 3, the permanent negative control.
+	if [ "$untrusted_rc" -eq 0 ]; then
+		found=1
+		fail 'the exchange succeeded with the trust bundle pointed at /dev/null, so arm 2 succeeding says nothing about trust having been propagated'
+	elif ! grep -Eqi 'certificate|trust anchor' "$proj/harness/untrusted.err"; then
+		found=1
+		fail "$(printf 'the exchange without the bundle failed for a reason that is not a certificate error, so the difference between the two arms is not the trust:\n%s' \
+			"$(cat "$proj/harness/untrusted.err")")"
+	elif grep -qF 'Permission denied' "$proj/harness/untrusted.err"; then
+		# The documented failure mode this journey exists for, inverted: a
+		# denial must not be what arm 3 is reading as a certificate error.
+		found=1
+		fail "$(printf 'the exchange without the bundle was refused by the confinement rather than by the certificate:\n%s' \
+			"$(cat "$proj/harness/untrusted.err")")"
+	fi
+
+	[ "$found" -eq 0 ]
+}

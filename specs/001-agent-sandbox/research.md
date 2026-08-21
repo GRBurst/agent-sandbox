@@ -115,7 +115,7 @@ CURL_CA_BUNDLE=…/intercept-ca.pem       GIT_SSL_CAINFO=…/intercept-ca.pem
 
 Five variables, one authority, minted per session — matching `ca_lifecycle: session`, "a per-run CA exposed through trust-bundle env vars". `GIT_SSL_CAINFO` is the load-bearing one for FR-17.
 
-**The consequence for `check_j6_1`, which is the whole point of recording this.** `plan.md` first specified it as "assert exit 0, which holds only if the interception CA reached `git`". That claim is false in both directions. `git` exits 0 when trust propagated, and it also exits 0 when nothing was inspected at all, because `/etc/ssl` and `/etc/pki` are in the bare floor and the real certificate validates fine. One observable, two opposite states of the feature, so the check would have passed with the feature deleted. **Trust propagation is only observable as a difference**, so the check must carry both sides — see `plan.md`'s entry for it.
+**The consequence for `check_j6_1`, which is the whole point of recording this.** `plan.md` first specified it as "assert exit 0, which holds only if the interception CA reached `git`". That claim does not hold, because what `git` does when nothing was inspected is a property of the **host**, not of the feature. `/etc/ssl` and `/etc/pki` are in the bare floor, so on a host where those directories hold real certificate files the exchange succeeds on the system trust store and exit 0 says nothing at all. `M7e` later measured the other case on the developing machine and found the opposite — see [`M7e`](#m7e--the-toolchain-survives-interception-and-nothing-else-would-carry-it). Either way one observable cannot tell the two states apart portably, and the check would be reading the host as if it were reading the feature. **Trust propagation is only observable as a difference**, so the check must carry both sides — see `plan.md`'s entry for it.
 
 ### Decision
 
@@ -1754,6 +1754,42 @@ Everything else is identical, `CLAUDE_CONFIG_DIR`, `CLAUDE_CODE_TMPDIR` and the 
 ### The state root is excluded, and the exclusion is D13's doing
 
 Every session appends an audit record and a session directory under `XDG_STATE_HOME`. That is the decision D13 asked for, so two authentications leaving two records there is the feature working. The comparison is over the project and over the environment; the state root cannot be in it.
+
+## M7e — The toolchain survives interception, and nothing else would carry it
+
+Measured on x86_64-linux, NixOS, nono 0.74.0, from a harness running `git` out of `.#substrate-claude-code` inside a session on the shipped `.#confinement-claude-code`. The destination is this repository's own canonical remote, `https://github.com/GRBurst/agent-sandbox`, used as somewhere to talk to and never as an expected answer. Two arms, one `jq` edit apart.
+
+### Interception is already on, and the difference is total
+
+| observable | shipped description | `del(.network.credentials)` |
+| --- | --- | --- |
+| the banner's network line | `net proxy` | `net outbound allowed` |
+| the five trust-bundle variables | all set, to one `intercept-ca.pem` | all `<unset>` |
+| that file, read from inside | 120 `BEGIN CERTIFICATE` blocks | unreadable |
+| `git ls-remote <remote> HEAD` | **exit 0**, a 40-hex object and `HEAD` | exit 128, `SSL certificate OpenSSL verify result: unable to get local issuer certificate (20)` |
+
+The first row is the finding that matters for the shape of the shipped environment: **the credential route is what switches interception on**, so a session that substitutes a credential is an intercepted session, and Journey 6 is not describing some future opt-in. `lib/confinement.nix` names no `allow_domain` at all, which is why `M7e`'s planted violation could not be the plain-string entry [`M7`](#m7--the-credential-surface-and-interception-measured-rather-than-reasoned) measured. The plant that carries the same meaning here is an empty `credentialServices`: the description asks for nothing to be inspected, and all four of arm 1's observables go with it.
+
+### The host trust store does not save an unintercepted exchange, on this host
+
+This corrects the claim in [`M1c`](#trust-in-the-inspecting-authority-does-reach-git--but-only-where-something-is-inspected) that `git` "exits 0 when nothing was inspected at all, because `/etc/ssl` and `/etc/pki` are in the bare floor and the real certificate validates fine". The directories are in the floor and the file passes a readability test, but on NixOS `/etc/ssl/certs/ca-certificates.crt` is a symlink into `/nix/store`, and the store path it resolves to is not in the session's substrate. Pointing the five variables at it produces `error adding trust anchors from file: /etc/ssl/certs/ca-certificates.crt`, the same shape of failure as pointing them at `/dev/null`.
+
+So on this machine exit 0 *would* have discriminated, and the three-arm design is not what saves the check here. It is still the right design, because which way the unintercepted arm falls is a property of the host's `/etc` and of the substrate's closure rather than of the feature, and a check that reads exit 0 alone is reading the host.
+
+### `ca_env_vars` is additive, so trust cannot be withdrawn from a description
+
+Two attempts to plant the violation by editing `network.tls_intercept.ca_env_vars` both failed, and the reason is worth recording because it is a property of the mechanism rather than an accident.
+
+| the description says | the child gets |
+| --- | --- |
+| `ca_env_vars = [ ]` | all five standard variables, set |
+| `ca_env_vars = [ "NONO_INTERCEPT_CA_UNUSED" ]` | all five, **plus** that name, all pointing at the same bundle |
+
+An empty list means "the defaults", and a non-empty one means "the defaults and also these". A description therefore cannot take the standard trust variables away, which is a good property — FR-17's guarantee is not something a consumer can switch off by mistake — and a bad one for anyone hunting a plant. The first attempt is also the case [`plan.md`](plan.md) warns about: the edit **did** land in the built artefact, so the artefact was inspected before the plant was believed inert.
+
+### The bundle has to be read from inside
+
+Confirming [`M7`](#the-trust-bundle-is-readable-from-inside-and-it-does-not-widen-the-reach) from the check's side: the intercept directory is gone once the session exits, so the probe counts `BEGIN CERTIFICATE` and `END CERTIFICATE` in pure bash while the session is alive and writes the counts out. There is no `openssl` in the substrate — the closure of `.#substrate-claude-code` has no `bin/openssl` — so "parses as a certificate" is asserted structurally at arm 1, by the delimiters balancing, and semantically at arms 2 and 3, where a real exchange either accepts the authority or does not.
 
 ## M8e — Where each agent reads its declarative extensions from
 
