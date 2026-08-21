@@ -1076,16 +1076,23 @@ Each of the two new agents needs `credentialServices` in its table entry, and de
 
 The consumer's own authoring surface (FR-25) closes this group rather than opening it. It has to be enumerated per agent before it can be granted for any, so it depends on all three being confined — which is also why `M5f` keeps only the undeclared half, the half that needs no mechanism at all.
 
-### M8a — Extract `mkConfinedAgent` (Status: PENDING)
+### M8a — Extract `mkConfinedAgent` (Status: IMPLEMENTED)
 
-A refactor, and therefore its own task per P6. No behaviour changes.
+A refactor, and therefore its own task per P6. No behaviour changes — and, as it turned out, no refactor either.
 
 **Scenario**: none — refactor.
 
-- [ ] `nix eval --json .#confinement.claude-code | jq -S .` captured before
-- [ ] The `claude-code`-specific wrapper generalised to `mkConfinedAgent name`
-- [ ] The same eval captured after; **the diff is empty**, which is the definition of preserved behaviour
-- [ ] `bash scripts/validate.sh` passes unchanged
+- [x] The reference agent's built description captured before, with `nix build --no-link --print-out-paths .#confinement-claude-code` and `jq -S`. The criterion first named `nix eval --json .#confinement.claude-code`, which does not exist: a description is a built artefact, not an evaluated attribute
+- [x] The wrapper generalised — **already was**. `lib/confined-agent.nix` has taken `name` and resolved it as `agents.${name} or (throw …)` since its first commit at `M4b`, so there was no `claude-code`-specific wrapper to extract from. The code calls it `mkEntryPoint` rather than the plan's `mkConfinedAgent`; [plan.md](plan.md) has been corrected to the name the code uses
+- [x] The same capture after; **the diff is empty**. With an empty production diff this is a tautology, so it is recorded as bookkeeping rather than as evidence
+- [x] The generality the refactor was for, measured rather than argued: a second agent added to `lib/agents.nix` and **nothing else touched** produced a description the mechanism validates, a substrate, and an entry point under the agent's own command name, while the reference agent's description kept the same store path. Reverted afterwards; the table below is in [research.md § M8a](research.md#m8a--the-refactor-that-had-already-happened)
+- [x] `bash scripts/validate.sh` passes unchanged — `1 of 27 checks failed`, the failure being `check_sc3`'s deliberate progress bar
+
+**Implementation.** The production diff is empty, and this time that is the whole finding rather than a side effect: the task planned an extraction that `M4b` had already performed. `git show 7e3aea8:lib/confined-agent.nix` settles it — the file was parameterised over `name` on the day it was written, because `M4b` needed the agent table to be the only place an agent is named.
+
+That leaves the criterion's own evidence worthless, since a diff across no change is empty by arithmetic. The replacement is the experiment the refactor was supposed to make possible: add an entry to the table and see whether a name the pipeline has never seen generates. It does — `nix build` produced `confinement-opencode`, `substrate-opencode` and `opencode` from one table entry, `nono profile validate` returned `Result: valid` on the generated description, the new agent's own `stateVars` appeared in `set_vars` beside the shared ones, and `confinement-claude-code` resolved to the identical store path it had before the second agent existed. That last one is what the empty diff was reaching for and could not express: adding an agent disturbs nothing about the agent already there.
+
+One observation banked for the rest of the group. Every integration check and three component checks hardcode `agent=claude-code`, which is right for a reference case but means the suite does not start exercising a second agent merely because the table grew. `check_j5_1` is the only check that derives its subjects from `builtins.attrNames agents`. `M8c` and `M8d` decide per property which of the others should follow it.
 
 ### M8b — `claude-code`'s subagent and lock fallbacks (Status: PENDING)
 

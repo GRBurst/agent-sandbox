@@ -56,8 +56,8 @@ Read these before writing anything. Do not skim `ai.nix`; it is the working prio
 | **P2** Test first, prove the check bites | **PASS** | `check_sc3` (scenario ↔ check bijection) goes red first, before any implementation exists. Every check below has a row in [Planted violations](#planted-violations), and every check whose observable is a *failure* carries a positive control in the same session per [D9](#d9), so the failure is attributable to the boundary rather than to a session that never started |
 | **P3** Scenarios are the success criteria | **PASS** | One check per scenario, the bijection asserted executably by `check_sc3` rather than by review. This row deliberately states no count: it read "20 scenarios, 20 checks" while the real figure was already 22, and Journey 8 has since made it 24. A number written here is a number that drifts, which is the whole reason the bijection is a check |
 | **P4** One step at a time | **PASS** | `tasks.md` is one scenario per task; the two tasks that risk the ~50-line ceiling (`M4a` pre-flight, `M7a` credential profile) are split at their natural seam |
-| **P5** Clean code invariants | **PASS** | `mkConfinedAgent`, `mkConfinementDescription`, `preflight_or_die` each do one thing. Comments record *why a path is not granted*: `$XDG_STATE_HOME/nono` (nono refuses overlapping grants), `$XDG_RUNTIME_DIR` (holds keyring and D-Bus), every host git configuration file (a directive in one runs a program inside the boundary — [D11](#d11)) |
-| **P6** Refactor as a separate phase | **PASS** | `M8a` is a pure refactor: extract `mkConfinedAgent` from the `claude-code`-specific wrapper. Preservation proven by `nix eval --json .#confinement.claude-code \| jq -S .` diffing empty across it |
+| **P5** Clean code invariants | **PASS** | `mkEntryPoint` (this row and the sketch below first called it `mkConfinedAgent`; the code that landed named it for what it produces), `mkConfinementDescription`, `preflight_or_die` each do one thing. Comments record *why a path is not granted*: `$XDG_STATE_HOME/nono` (nono refuses overlapping grants), `$XDG_RUNTIME_DIR` (holds keyring and D-Bus), every host git configuration file (a directive in one runs a program inside the boundary — [D11](#d11)) |
+| **P6** Refactor as a separate phase | **PASS, and the refactor turned out to be unnecessary** | `M8a` was planned as a pure refactor: extract `mkConfinedAgent` from the `claude-code`-specific wrapper. There was never a `claude-code`-specific wrapper to extract from — `lib/confined-agent.nix` took `name` and looked it up in the table from its first commit at `M4b`, so the extraction had already happened before the task that planned it. The command this row named, `nix eval --json .#confinement.claude-code \| jq -S .`, does not exist either: a description is a built artefact, read with `nix build .#confinement-<name>` and `jq -S`. What `M8a` did instead is prove the generality the refactor was for, by adding a second agent to the table and watching the whole pipeline generate for it with no edit anywhere else — see [research.md § M8a](research.md#m8a--the-refactor-that-had-already-happened) |
 | **P7** Ubiquitous language, modelled options | **PASS** | The spec's Vocabulary is used verbatim in Nix attribute names, shell function names and docs. A registry entry is a `submodule` with five typed fields, never `attrsOf str`. nono's boundary merge semantics are written down in [D4](#d4) because they are part of the contract |
 | **P8** Purity, effects at the boundary, idempotency | **PASS** | No `builtins.getEnv`, no `--impure`. Confinement descriptions name no parent and declare everything, so nothing is fetched from `registry.nono.sh` at run time and a description cannot inherit a grant a packaged one chooses to make — `M1e` found the mechanism ships no agent preset at all, only language runtimes, and that a description resolves identically whether or not it names the built-in floor. `NONO_NO_UPDATE_CHECK=1` is exported by the entry point so no background network call happens either — `M1e` observed that without it even `nono profile list` calls home, and `M3b` found the description structurally cannot carry it because the `NONO_*` prefix is reserved in `set_vars`. Rep1–Rep3 cover idempotency |
 | **P9** Explicit outcomes, no silent fallbacks | **PASS** | `set -euo pipefail` throughout. The pre-flight has **three** assertions, not one, so "nono failed to start" cannot be mistaken for "the child was denied". No bare `or`; the agent table is an `enum`-keyed attrset with an assertion on lookup failure |
@@ -259,7 +259,7 @@ Read these before writing anything. Do not skim `ai.nix`; it is the working prio
 │   ├── agents.nix                   new       the three agents: package, groups, state variables
 │   ├── leak-registry.nix            new       FR-3, the single file, expected empty
 │   ├── confinement.nix              new       mkConfinementDescription :: agent -> store path
-│   └── confined-agent.nix           new       mkConfinedAgent  :: agent -> writeShellApplication
+│   └── confined-agent.nix           new       mkEntryPoint     :: name -> writeShellApplication
 ├── scripts/
 │   ├── validate.sh                  new       FR-12, the only entry point
 │   └── checks/
@@ -423,7 +423,7 @@ Note the Landlock constraint: granting `$WORKDIR` recursively is safe only becau
 ### `lib/confined-agent.nix`
 
 ```nix
-# mkConfinedAgent ∷ name → writeShellApplication, /bin/${binary}
+# mkEntryPoint ∷ name → writeShellApplication, /bin/${binary}
 { pkgs, agentPkgs, agents, confinement }:
 name:
 let

@@ -1817,6 +1817,34 @@ An empty set is vacuous if nothing was traced, so the trace itself is asserted n
 
 The four signing failures recorded in [`D16`](plan.md#d16) came from the host's own `~/.gitconfig`. `GIT_CONFIG_GLOBAL` erases that file for the session, so those are the case FR-24 configures away rather than the case `R11` refuses. The demand `R11` needs has to be planted in the checkout's **own** `.git/config`, where nothing this environment sets can reach it — and that is precisely the property the plant below removes.
 
+## M8a — The refactor that had already happened
+
+`M8a` was planned as an extraction: generalise a `claude-code`-specific wrapper into `mkConfinedAgent name`. The premise is false. `git show 7e3aea8:lib/confined-agent.nix` — the file's first commit, at `M4b` — already opens `{ pkgs, agentPkgs, agents, confinement }: name:` and resolves the agent as `agents.${name} or (throw …)`. It was never specific to one agent, so there was nothing to extract, and `M8a`'s production diff is empty.
+
+The name differs from the plan's. The code calls it `mkEntryPoint`, in `flake.nix` and in the file's own docstring, because what it produces is the entry point rather than the agent. The plan has been corrected to that name rather than the code renamed to the plan's, since the code's name is the one three call sites already use.
+
+The command the criterion named does not exist either. There is no `confinement.claude-code` output: a description is a **built artefact**, so it is read with `nix build --no-link --print-out-paths .#confinement-claude-code` and `jq -S`, not with `nix eval`.
+
+### The empty diff is a tautology, so the property was measured instead
+
+With no production change, "the description is unchanged across the refactor" is true by arithmetic and proves nothing. What the refactor exists to buy is that a name the pipeline has never seen generates a working session, so that is what was measured: a second entry was added to `lib/agents.nix` and nothing else was touched.
+
+| Observation | Result |
+| --- | --- |
+| `nix eval .#agents --apply builtins.attrNames` | `["claude-code","opencode"]` |
+| `nix build .#confinement-opencode` | built, `meta.name = "opencode"`, `description = "agent-sandbox confinement for opencode"` |
+| `nix build .#substrate-opencode` | built — a closure of the new agent's own package, `filesystem.read` carrying 128 paths |
+| `nix build .#opencode` | built, `/bin/opencode`, the name taken from the package's `meta.mainProgram` |
+| the new agent's own `stateVars` | present in `set_vars` beside the shared `TMPDIR`, `XDG_*` and `GIT_CONFIG_*` |
+| `nono profile validate` on the generated description | `Result: valid`, `All 18 group references valid` — the same verdict the reference agent's gets |
+| `nix build .#confinement-claude-code` | the **same store path** as before the second agent existed |
+
+So the pipeline is general in the only sense that matters: one table entry produces a description the mechanism accepts, a substrate, and an entry point under the agent's own command name, and it does so without disturbing the agent already there. The entry was then reverted; `M8c` is where `opencode` arrives with the variables and the checks that make it real.
+
+### Every check names the reference agent, and that is a decision `M8c` inherits
+
+Worth writing down before the other agents land: `agent=claude-code` is hardcoded in three component checks and in every integration check. That is consistent with the spec making `claude-code` the reference case, and it is not a defect today. It does mean the suite will not exercise a second agent merely because the second agent exists — `check_state_vars` and the rest read the reference name, not the table. `check_j5_1` is the exception, and deliberately so: it derives its sessions from `builtins.attrNames agents`, so it is the one check that grows on its own. `M8c` and `M8d` have to decide, per property, which of the others should follow it rather than assuming they already do.
+
 ## M8e — Where each agent reads its declarative extensions from
 
 **Partial.** `opencode` is measured; `claude-code` and `pi` are not.
