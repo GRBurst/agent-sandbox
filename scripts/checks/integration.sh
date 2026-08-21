@@ -1703,3 +1703,199 @@ check_r10() {
 
 	[ "$found" -eq 0 ]
 }
+
+# Journey 2.1 — agent state lands in the project, and the home directory is
+# left as it was found.
+#
+# Two sessions, because the scenario has two halves that no single observable
+# covers.
+#
+# The first is the agent itself, so the state under test is state the agent
+# chose to write rather than state a probe was told to write. `plugin list`
+# writes its configuration file and a backup of it and needs no credentials,
+# which M6a measured; driving a conversation to get a write would add a
+# credential dependency to a check about the filesystem.
+#
+# The second is a probe, because the first cannot answer criteria 3 and 4. An
+# agent that writes nowhere near a relocated root leaves that root unobserved,
+# and M6a measured every one of them arriving `<unset>` in a session: the
+# devShell's redirection does not cross the boundary at all, because allow_vars
+# carries no XDG_* pattern. So each root the description names is read back from
+# inside the session and written to, one line per root, and the names come out
+# of the built description rather than being listed here — adding a root moves
+# the expected set with it.
+#
+# Control (D9), and first: the agent's own writes are found under the project.
+# "nothing landed in $HOME" is satisfied just as well by a session that wrote
+# nothing anywhere, or by one that never started, and both are what a broken
+# check looks like.
+check_j2_1() {
+	local agent=claude-code binary=claude
+	local entry outside home proj cfg state probe project registry rc
+	local root want got write entry_path covered found=0
+	local -a landed=() roots=() changed=()
+
+	session_fixture "$agent" || return 1
+	entry=$(pinned_bin "$binary") || return 1
+
+	# The fake home is outside the project and the project is its sibling, never
+	# beneath it: the description carries 48 $HOME-relative deny rules, and a
+	# granted directory under the home is unenforceable.
+	outside=$(mktemp -d -p "${XDG_RUNTIME_DIR:-/tmp}" agent-sandbox-j2_1.XXXXXX)
+	# shellcheck disable=SC2064
+	trap "rm -rf '$outside'" RETURN
+	home="$outside/home"
+	proj="$outside/proj"
+	cfg="$outside/cfg"
+	state="$outside/state"
+	mkdir -p "$home" "$proj" "$cfg"
+	session_env "$state"
+	project=$(cd "$proj" && pwd -P)
+
+	# The home directory already carries this agent's state, because that is the
+	# machine the scenario is about — a consumer who has run the agent before —
+	# and because an empty home cannot falsify anything. With nothing there, the
+	# agent's own fallback location does not exist, so a session that lost its
+	# relocation writes nowhere and the diff below stays empty for the wrong
+	# reason. Measured: the first draft used an empty home and its diff arm
+	# could not be made to fail by any plant.
+	mkdir -p "$home/.claude"
+	printf '{"installMethod":"prior"}\n' >"$home/.claude.json"
+
+	# Size and modification time alongside the path, so a file the session
+	# rewrites in place counts as a change rather than passing as unchanged.
+	# Every path, not only files, so a directory the session creates and leaves
+	# empty counts too.
+	find "$home" -printf '%p\t%s\t%T@\n' | sort >"$outside/before"
+
+	env "${SESSION_ENV[@]}" "HOME=$home" "XDG_CONFIG_HOME=$cfg" \
+		env -C "$proj" "$entry/$binary" plugin list \
+		>"$outside/agent.out" 2>"$outside/agent.err" && rc=0 || rc=$?
+	if [ "$rc" -ne 0 ]; then
+		fail "$(printf 'the agent did not start in the scratch project (exit %s):\n%s' \
+			"$rc" "$(tail -20 "$outside/agent.err")")"
+		return 1
+	fi
+
+	# The control. It accumulates rather than returning, because the violation
+	# this scenario is written against breaks the control and the subject at
+	# once: a state root dropped and its host fallback granted leaves nothing in
+	# the project *and* changes the home directory. A hard return here reported
+	# the control alone and left the louder half — the non-empty $HOME diff the
+	# criterion names — unobserved. Measured, not reasoned: the first draft
+	# returned, and the plant fired one message instead of two.
+	mapfile -t landed < <(find "$project/.agents" -type f 2>/dev/null | sort)
+	if [ "${#landed[@]}" -eq 0 ]; then
+		found=1
+		fail "the session wrote no state inside the project, so an empty home directory would prove nothing"
+	fi
+
+	# The scenario. The registry is subtracted rather than assumed empty, so an
+	# entry added later relaxes this comparison by exactly what it declares and
+	# by nothing else. $HOME is expanded because an entry names the variable
+	# while the diff carries the resolved path.
+	find "$home" -printf '%p\t%s\t%T@\n' | sort >"$outside/after"
+	registry=$(nix eval --json "$REPO_ROOT#leakRegistry" \
+		--apply "es: builtins.filter (e: builtins.elem \"$agent\" e.agents) es" |
+		jq -r '.[].path' | sed "s|\$HOME|$home|g")
+	while IFS=$'\t' read -r root _; do
+		[ -n "$root" ] || continue
+		covered=0
+		while IFS= read -r entry_path; do
+			[ -n "$entry_path" ] || continue
+			case "$root" in
+			"$entry_path" | "$entry_path"/*) covered=1 ;;
+			esac
+		done <<<"$registry"
+		if [ "$covered" -eq 0 ]; then
+			changed+=("$root")
+		fi
+	done < <(comm -13 "$outside/before" "$outside/after")
+
+	if [ "${#changed[@]}" -ne 0 ]; then
+		found=1
+		fail "$(printf 'the session changed the home directory outside the leak registry:\n%s' \
+			"$(printf '%s\n' "${changed[@]}")")"
+	fi
+
+	# Criterion 3. The roots come out of the description, so this cannot go stale
+	# against it, and the anti-vacuity guard is the point: a description that
+	# named no root at all would otherwise pass this arm in silence.
+	mapfile -t roots < <(jq -r '.environment.set_vars | keys[] | select(test("^XDG_|^TMPDIR$"))' \
+		"$FIXTURE_PROFILE" | sort)
+	if [ "${#roots[@]}" -eq 0 ]; then
+		fail "the description names no environment-resolved root, so there is nothing for a session to relocate"
+		return 1
+	fi
+
+	# Written inside the project on purpose: M5h measured that exec'ing a file
+	# outside the granted workdir gives exit 126 with no output, which is
+	# indistinguishable from the boundary working.
+	probe="$proj/probe-roots.sh"
+	cat >"$probe" <<-'PROBE'
+		for name in "$@"; do
+			value=${!name:-<unset>}
+			if [ "$value" = "<unset>" ]; then
+				printf 'ROOT :: %s :: <unset> :: unset\n' "$name"
+				continue
+			fi
+			if mkdir -p "$value/probe" 2>/dev/null; then
+				printf 'ROOT :: %s :: %s :: ok\n' "$name" "$value"
+			else
+				printf 'ROOT :: %s :: %s :: denied\n' "$name" "$value"
+			fi
+		done
+	PROBE
+
+	env "${SESSION_ENV[@]}" "HOME=$home" \
+		"$(pinned_bin nono)/nono" run \
+		--profile "$FIXTURE_PROFILE" \
+		--workdir "$proj" \
+		--allow-cwd \
+		-- "$FIXTURE_BASH/bin/bash" "$probe" "${roots[@]}" \
+		>"$outside/roots.out" 2>"$outside/roots.err" && rc=0 || rc=$?
+	if [ "$rc" -ne 0 ]; then
+		fail "$(printf 'the root probe did not run (exit %s):\n%s' \
+			"$rc" "$(tail -20 "$outside/roots.err")")"
+		return 1
+	fi
+
+	# Each root is asserted twice: the child resolved the value the description
+	# gave it, and that value is writable. The first without the second is a
+	# variable pointing somewhere the session cannot use, which is what an
+	# ancestor grant would hide and what M6a measured every $HOME-relative
+	# fallback doing.
+	for root in "${roots[@]}"; do
+		want=$(jq -r --arg k "$root" '.environment.set_vars[$k]' "$FIXTURE_PROFILE" |
+			sed "s|\$WORKDIR|$project|g")
+		got=$(sed -n "s/^ROOT :: $root :: \(.*\) :: .*$/\1/p" "$outside/roots.out")
+		write=$(sed -n "s/^ROOT :: $root :: .* :: \(.*\)$/\1/p" "$outside/roots.out")
+		if [ "$got" != "$want" ]; then
+			found=1
+			fail "$(printf 'the session resolved %s to %s, not to the %s the description names' \
+				"$root" "${got:-<absent from the probe>}" "$want")"
+		elif [ "$write" != ok ]; then
+			found=1
+			fail "$(printf 'the session cannot write to the %s it was pointed at: %s :: %s' \
+				"$root" "$want" "$write")"
+		fi
+	done
+
+	# Criterion 4, by observation. The supervisor resolves its own protected
+	# state root from the ambient value before the child's environment applies,
+	# so moving the child does not make the project ungrantable. Asserting that
+	# the two resolutions are independent means finding the supervisor's record
+	# under the ambient root and finding none under the child's — the plan calls
+	# this D13's load-bearing assumption and says to observe it rather than
+	# assume it.
+	if [ -z "$(find "$state/nono/audit" -mindepth 2 -maxdepth 2 -name session.json 2>/dev/null)" ]; then
+		found=1
+		fail "the supervisor kept no session record under the ambient state root, so nothing says the two resolutions are independent"
+	fi
+	if [ -n "$(find "$project/.agents/state" -name session.json 2>/dev/null)" ]; then
+		found=1
+		fail "the supervisor's own state followed the child's redirection into the project, which is the overlap that makes the project ungrantable"
+	fi
+
+	[ "$found" -eq 0 ]
+}

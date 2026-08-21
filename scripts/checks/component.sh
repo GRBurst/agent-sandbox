@@ -169,6 +169,28 @@ check_confinement_validates() {
 		fi
 	done < <(jq -r 'to_entries[] | [.key, .value] | @tsv' <<<"$want")
 
+	# M6a criterion 2. The property over the agent table rather than over each
+	# variable: anything that looks like a path must be under the working
+	# directory. A value with no separator in it is a setting rather than a
+	# location — DISABLE_AUTOUPDATER=1 is the shipped example — and is left
+	# alone, so this bites on a host absolute path and on a relative path
+	# without needing a list of which keys are paths.
+	while IFS=$'\t' read -r k v; do
+		[ -n "$k" ] || continue
+		case "$v" in
+		*/*)
+			# shellcheck disable=SC2016 # the literal nono expands, not a variable
+			case "$v" in
+			'$WORKDIR/'*) ;;
+			*)
+				printf 'the agent table points %s at %s, which is not under the working directory\n' "$k" "$v"
+				found=1
+				;;
+			esac
+			;;
+		esac
+	done < <(jq -r 'to_entries[] | [.key, .value] | @tsv' <<<"$want")
+
 	# FR-23 / D11. These two are the confinement's own, not the agent's: the
 	# toolchain is directed at configuration this environment wrote rather than
 	# merely denied, so its effective configuration is the same on every machine.
@@ -179,6 +201,40 @@ check_confinement_validates() {
 				found=1
 			}
 	done
+
+	# M6a criterion 3. Every root the devShell redirects for the developer is
+	# redirected for the session too. The developer's side is read out of the
+	# shell hook rather than listed here, so the two mirrors are compared against
+	# each other and a root added to one without the other fails.
+	#
+	# XDG_STATE_HOME is named as a literal because it is exactly the criterion:
+	# it is the one root the devShell cannot redirect, since nono anchors its own
+	# protected state root at the ambient value, and it is therefore the one a
+	# blanket redirection of "whatever the shell hook does" would leave behind.
+	local system hook name
+	local -a shell_roots=()
+	system=$(nix eval --impure --raw --expr builtins.currentSystem)
+	hook=$(nix eval --raw "$REPO_ROOT#devShells.$system.default.shellHook") || {
+		fail "the devShell hook does not evaluate"
+		return 1
+	}
+	mapfile -t shell_roots < <(grep -oE 'XDG_[A-Z_]+=' <<<"$hook" | tr -d '=' | sort -u)
+	if [ "${#shell_roots[@]}" -eq 0 ]; then
+		fail "parsed no XDG root out of the devShell hook; the hook and this check have drifted"
+		return 1
+	fi
+	for name in "${shell_roots[@]}"; do
+		jq -e --arg k "$name" 'has($k)' <<<"$got" >/dev/null ||
+			{
+				printf 'the devShell redirects %s but the session does not, so a tool honouring it writes outside the project\n' "$name"
+				found=1
+			}
+	done
+	jq -e 'has("XDG_STATE_HOME")' <<<"$got" >/dev/null ||
+		{
+			printf 'the session does not redirect XDG_STATE_HOME, the one root the devShell cannot redirect, so it is the one a blanket redirection leaves behind\n'
+			found=1
+		}
 
 	[ "$found" -eq 0 ]
 }

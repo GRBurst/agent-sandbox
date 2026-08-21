@@ -107,6 +107,27 @@ let
         (a.stateVars w)
         // substrateVars
         // {
+          # Journey 2.1. M6a measured every one of these arriving unset in a
+          # session, because allow_vars carries no XDG_* pattern and no TMPDIR:
+          # the devShell's redirection stops at the boundary. A tool honouring
+          # them therefore fell back under HOME and was denied — which is P9's
+          # visible failure, but it is not state landing in the project. TMPDIR
+          # was worse than a failure: /tmp is granted, so a tool falling back to
+          # it wrote outside the project and nothing reported that.
+          #
+          # XDG_STATE_HOME appears here and nowhere else because nono anchors
+          # its own protected state root at the *ambient* value and refuses to
+          # grant any path overlapping it. Redirecting the ambient one would
+          # make the project ungrantable; redirecting the child's does not (D13).
+          #
+          # No directory is created for these. A tool that does not create its
+          # own root failed under HOME before and fails under the project now.
+          TMPDIR = "${w}/.tmp";
+          XDG_CACHE_HOME = "${w}/.cache";
+          XDG_CONFIG_HOME = "${w}/.config";
+          XDG_DATA_HOME = "${w}/.local/share";
+          XDG_STATE_HOME = "${w}/.agents/state";
+
           # FR-23. The toolchain is pointed at configuration this environment
           # wrote rather than merely denied the host's, so its effective
           # configuration is the same on every machine instead of depending on

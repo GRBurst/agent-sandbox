@@ -137,6 +137,23 @@ Inside the project, that agent finds none of your `~/.config` settings, subagent
 This is a tracked violation of the constitution's "prefer the tool's own variable" rule, recorded as `C1` in the feature's plan, and it is kept only because `nono` has no variable of its own: pointed at a directory that does not exist it falls back to the host's `~/.config` silently, which would let host confinement descriptions decide what a confined session may reach.
 Extensions you authored yourself are meant to come with you, by declaring them once for the machine rather than by widening this; that is not built yet.
 
+**A confined session gets its own set, and none of the table above reaches it.**
+The variables in that table are the *shell's*, and the boundary passes almost nothing through: measured, a session inherits `HOME` and a handful of locale and terminal variables, and not one `XDG_*` root nor `TMPDIR`.
+So the session's redirection is declared in its confinement description instead, and is a superset of the shell's:
+
+| Variable | Resolves to |
+| --- | --- |
+| `TMPDIR` | `<project>/.tmp` |
+| `XDG_CACHE_HOME` | `<project>/.cache` |
+| `XDG_CONFIG_HOME` | `<project>/.config` |
+| `XDG_DATA_HOME` | `<project>/.local/share` |
+| `XDG_STATE_HOME` | `<project>/.agents/state` |
+
+Expect those directories to appear in your project the first time you start an agent, alongside `.agents/`, and add them to your `.gitignore`.
+`XDG_STATE_HOME` is on this list and not on the shell's, and the asymmetry is deliberate: the mechanism anchors its own supervisory state at whatever the *ambient* value names and refuses to grant any path overlapping it, so moving the shell's would make your checkout ungrantable while moving the session's does not.
+Without the redirection a tool honouring one of these roots resolves it under `$HOME` and is denied, which is visible and survivable — except for `TMPDIR`, which falls back to `/tmp`, and `/tmp` is writable inside a session.
+That one is the reason the list is five variables rather than one: a write outside your project that nothing reports, at a path every project shares.
+
 **There are two accepted leaks.**
 
 - `.envrc` calls `source_up_if_exists`, which reads a parent `.envrc` above the checkout.
@@ -184,7 +201,7 @@ The unit and component layers have no such dependency.
 
 It **exits non-zero today, by design**: `check_sc3` asserts a scenario-to-check bijection and is the feature's progress bar, so it fails until the last scenario in the spec has a check.
 A task is judged by whether its own check passes and whether the set `check_sc3` names shrinks by exactly the scenarios that task covers.
-Today's baseline is `1 of 18 checks failed`, that one being `check_sc3`, and the set it names is 14 scenarios long.
+Today's baseline is `1 of 19 checks failed`, that one being `check_sc3`, and the set it names is 13 scenarios long.
 
 ## Known drift
 
@@ -208,7 +225,8 @@ It is the natural input to the first spec.
 
 **State that still resolves into `$HOME`.**
 
-- `XDG_STATE_HOME` is not redirected, so a tool that honours it writes outside the checkout. `opencode` does: `opencode debug paths` reports its `state` root under `~/.local/state`. Inside a confined session the variable is not host-valued but **unset** — nothing in the description passes any `XDG_*` variable through — so such a tool falls back to the specification's own `$HOME/.local/state`, which the session denies, and it fails rather than relocating. The variable cannot simply join the table above, because the mechanism resolves its own protected state root from the ambient value; it has to be redirected for the session rather than for the shell. That the two resolutions are independent is now measured rather than assumed: a session whose description sets `XDG_STATE_HOME` under the project starts, writes there, and leaves the supervisor's audit record where it was.
+- **Inside a confined session, nothing does any more.** The session's description now names `TMPDIR` and four `XDG_*` roots including `XDG_STATE_HOME`, and each is observed resolving under the project and being writable there. What remains is the *shell's* `XDG_STATE_HOME`, which stays on the host and must: the mechanism resolves its own protected state root from that value and refuses to grant any path overlapping it, so redirecting it would make your checkout ungrantable. That the shell's and the session's resolutions are independent is measured, not assumed.
+- A tool that ignores its relocation variable is still unaccounted for, and that is by design rather than by omission: it resolves a path under `$HOME`, which the session denies, and it fails visibly. What no check covers is a tool that neither honours the variable nor writes under `$HOME` — one that hardcodes `/tmp`, say, which is writable inside a session because it is in the floor the mechanism grants every process.
 
 **Tools the environment does not provide.**
 

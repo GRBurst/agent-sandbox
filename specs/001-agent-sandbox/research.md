@@ -1392,6 +1392,33 @@ A probe script must live **inside the granted workdir**. Written to the scratch 
 
 The identity file `.agents/git/config` was **not** written by any of these runs, and that is an artefact of the developing environment rather than a defect. The wrapper copies it with `git config --global --get`, and this repository's own agent session is itself confined by an outer sandbox that denies `~/.gitconfig`, so both values come back empty and the wrapper correctly writes nothing. `check_r10` measures the copy against a planted `$HOME/.gitconfig` and is unaffected.
 
+### Every environment-resolved root arrives unset, and one of them fails *silently*
+
+A `bash` probe out of the substrate, in a shipped-description session with the fake `$HOME` and the scratch project as siblings:
+
+| observable | result |
+| --- | --- |
+| `TMPDIR`, `TMPPREFIX`, `XDG_CACHE_HOME`, `XDG_DATA_HOME`, `XDG_CONFIG_HOME`, `XDG_STATE_HOME`, `XDG_RUNTIME_DIR` | **all `<unset>`** |
+| `HOME` | the fake home, as `allow_vars` intends |
+| `mkdir -p $HOME/{.cache,.local/share,.config,.local/state}/probe` | **denied**, all four |
+| `mkdir -p /tmp/probe-$$` | **ok** |
+| `mkdir -p <proj>/{.cache,.local/share,.config,.agents/state,.tmp}/probe` | **ok**, all five |
+| the fake `$HOME` afterwards | empty |
+
+Three things follow. `D13`'s hole is wider than that decision states — *no* XDG root crosses, and neither does `TMPDIR`, so the devShell's redirection stops at the boundary entirely and the task's "not only the ones the devShell happens to redirect" turns out to mean *none of them*. Every `$HOME`-relative fallback is denied, which is **P9** working as designed. And `/tmp` **is writable** inside a session, because it is among the 33 system paths in the floor — so a tool falling back there because `TMPDIR` is unset writes outside the project, silently, at a path two projects share. That last one is the only hole here that no criterion had named, and it is the reason `TMPDIR` joins the four XDG keys rather than the state root going in alone.
+
+### A plant harness that reverts by `git checkout` will eat an uncommitted GREEN
+
+The first harness for this task reverted with `git checkout -- lib/agents.nix lib/confinement.nix lib/confined-agent.nix` from an `EXIT` trap. The GREEN change was not yet committed, so the trap discarded it along with the plant, and the next run measured a tree with no relocated roots at all and reported four coverage failures that had nothing to do with the plant. It is a false result that reads exactly like a true one. A harness must back the files up by copy and restore by copy, and this one now says so where the trap is set.
+
+### Two nono facts about granting the fallback, which the plant needs
+
+A grant naming a regular file is refused at startup: `nono: Configuration parse error: CLI path '<home>/.claude.json' is not a directory. Use --allow-file for single files.` And granting `$HOME/.claude` is not sufficient on its own, because `~/.claude.json` is a sibling rather than a child — which is why nono's own `nolabs-ai/claude` pack names `$HOME/.claude`, `$HOME/.claude.json` and `$HOME/.claude.json.lock` separately. A plant reproducing the leak needs both grants and both flags.
+
+### An empty fake home cannot demonstrate the leak, and the snapshot has to carry more than paths
+
+With an empty `$HOME`, dropping the relocation and granting the fallback still left the diff arm empty: the agent's fallback location did not exist, so it wrote nowhere and the arm passed for the wrong reason. Planting a prior installation — `$HOME/.claude` and a `$HOME/.claude.json` — is both the fix and the more honest Given, since a consumer adopting this environment has run the agent before. Under that fixture the leak the plant produces is a **single file rewritten in place**, so a snapshot of paths alone still reports no change. Both snapshots therefore carry size and mtime, `find "$home" -printf '%p\t%s\t%T@\n'`.
+
 ## M6b — Two concurrent projects share nothing
 
 Measured on x86_64-linux with nono 0.74.0 and `claude-code` 2.1.237, through the built entry point, with two `git init`ed checkouts, one fake `$HOME`, one config root and **one** ambient `XDG_STATE_HOME` shared between both — which is the arrangement a consumer is actually in, and the one spec Risk 16 is about. Both sessions were started with `&` and joined with `wait`, so they were genuinely concurrent rather than sequential.
