@@ -3565,3 +3565,170 @@ check_r11() {
 
 	[ "$found" -eq 0 ]
 }
+
+# Journey 2.1 for `opencode`, which M8c added to the agent table.
+#
+# The name is deliberately not a scenario identifier. `check_sc3` maps the
+# spec's scenarios onto checks named `check_j<n>_<m>`, `check_r<n>` and
+# `check_rep<n>`, and Journey 2.1 already has `check_j2_1`. A second check
+# claiming the same identifier would either collide or invent a scenario the
+# spec does not carry; this one extends the journey to the second agent
+# instead, and stays out of the bijection.
+#
+# What it asserts, and why in this shape:
+#
+#   * `opencode debug paths` is the agent's own answer about where it will
+#     write, so the roots are read from the agent rather than from the list of
+#     variables this environment set. M8c measured that eight of the nine
+#     follow the four `XDG_*` roots plus `TMPDIR`, which the confinement
+#     already places under the working directory, and that none of the 84
+#     `OPENCODE_*` names in the binary moves any of them. Asserting the
+#     variables would therefore assert this environment's own intent back at
+#     itself; asserting the agent's answer catches a root that stops following
+#     them.
+#
+#   * The ninth root, `home`, *is* `$HOME`. No variable relocates it, so it is
+#     asserted to lie outside the project and the home directory is required to
+#     come through the session unchanged — the same property `check_j2_1`
+#     asserts for the reference agent.
+#
+#   * `opencode providers list` names the environment variable it found and
+#     counts the credentials it has stored. M8c measured that this agent reads
+#     `ANTHROPIC_API_KEY` and `ANTHROPIC_BASE_URL` straight from its
+#     environment, which is exactly the pair the mediated route injects, so a
+#     session that is handed the route reports one environment variable and
+#     zero stored credentials. Zero stored is the half that matters for D14:
+#     the credential arrived by the route, not from a store this environment
+#     would have had to grant.
+check_opencode() {
+	local agent=opencode binary=opencode
+	local entry outside home proj cfg state project rc real
+	local root value homeroot='' found=0
+	local -a rooted=() strayed=() landed=() changed=()
+
+	session_fixture "$agent" || return 1
+	entry=$(pinned_bin "$binary") || return 1
+
+	# Sibling of the fake home, never beneath it: the description carries
+	# $HOME-relative deny rules, and a granted directory under the home is
+	# unenforceable.
+	outside=$(mktemp -d -p "${XDG_RUNTIME_DIR:-/tmp}" agent-sandbox-opencode.XXXXXX)
+	# shellcheck disable=SC2064
+	trap "rm -rf '$outside'" RETURN
+	home="$outside/home"
+	proj="$outside/proj"
+	cfg="$outside/cfg"
+	state="$outside/state"
+	mkdir -p "$home" "$proj" "$cfg"
+	session_env "$state"
+	project=$(cd "$proj" && pwd -P)
+
+	# The home already carries this agent's roots, for the reason `check_j2_1`
+	# records: with nothing there, a session that lost its relocation writes
+	# nowhere and the diff below stays empty for the wrong reason.
+	mkdir -p "$home/.config/opencode" "$home/.local/share/opencode"
+	printf '{}\n' >"$home/.config/opencode/opencode.json"
+
+	find "$home" -printf '%p\t%s\t%T@\n' | sort >"$outside/before"
+
+	# A credential in the calling environment, so the mediated route has
+	# something to substitute. The value is a canary: it must not survive into
+	# anything the session prints.
+	real="sk-ant-real-canary-$RANDOM$RANDOM"
+
+	env "${SESSION_ENV[@]}" "HOME=$home" "XDG_CONFIG_HOME=$cfg" "ANTHROPIC_API_KEY=$real" \
+		env -C "$proj" "$entry/$binary" debug paths \
+		>"$outside/paths.out" 2>"$outside/paths.err" && rc=0 || rc=$?
+	if [ "$rc" -ne 0 ]; then
+		fail "$(printf 'the agent did not answer where it writes (exit %s):\n%s' \
+			"$rc" "$(tail -20 "$outside/paths.err")")"
+		return 1
+	fi
+
+	# Two columns, name then absolute path, one root per line.
+	while read -r root value; do
+		[ -n "$value" ] || continue
+		if [ "$root" = home ]; then
+			homeroot=$value
+			continue
+		fi
+		case "$value" in
+		"$project"/*) rooted+=("$root") ;;
+		*) strayed+=("$root=$value") ;;
+		esac
+	done < <(grep -E '^[a-z]+[[:space:]]+/' "$outside/paths.out")
+
+	if [ "${#rooted[@]}" -eq 0 ]; then
+		found=1
+		fail "$(printf 'the agent reported no root under the project, so nothing was asserted:\n%s' \
+			"$(head -12 "$outside/paths.out")")"
+	fi
+	if [ "${#strayed[@]}" -gt 0 ]; then
+		found=1
+		fail "$(printf 'the agent will write outside the project:\n%s' \
+			"$(printf '%s\n' "${strayed[@]}")")"
+	fi
+
+	# The one root that is $HOME itself. It cannot be moved, so the assertion
+	# is that it stays outside the project rather than that it lands inside.
+	if [ -z "$homeroot" ]; then
+		found=1
+		fail 'the agent reported no home root, so the one root no variable can move went unobserved'
+	else
+		case "$homeroot" in
+		"$project" | "$project"/*)
+			found=1
+			fail "the agent's home root resolved inside the project ($homeroot), so this session proves nothing about a home it cannot reach"
+			;;
+		esac
+	fi
+
+	env "${SESSION_ENV[@]}" "HOME=$home" "XDG_CONFIG_HOME=$cfg" "ANTHROPIC_API_KEY=$real" \
+		env -C "$proj" "$entry/$binary" providers list \
+		>"$outside/providers.out" 2>"$outside/providers.err" && rc=0 || rc=$?
+	if [ "$rc" -ne 0 ]; then
+		found=1
+		fail "$(printf 'the agent could not report its providers (exit %s):\n%s' \
+			"$rc" "$(tail -20 "$outside/providers.err")")"
+	else
+		# The variable the mediated route injects, named by the agent itself.
+		if ! grep -qE 'Anthropic.*ANTHROPIC_API_KEY' "$outside/providers.out"; then
+			found=1
+			fail "$(printf 'the agent found no provider credential in its environment, so the mediated route did not reach it:\n%s' \
+				"$(cat "$outside/providers.out")")"
+		fi
+		# And nothing stored, which is the half D14 is about: the credential
+		# came from the route rather than from a store this environment would
+		# have had to grant. A non-zero count here would mean the session read
+		# an authentication file, and the only one on this machine belongs to
+		# the other agent.
+		if ! grep -q '0 credentials' "$outside/providers.out"; then
+			found=1
+			fail "$(printf 'the agent reported stored credentials, so it read an authentication store rather than taking the mediated route:\n%s' \
+				"$(cat "$outside/providers.out")")"
+		fi
+		if grep -qF "$real" "$outside/providers.out" "$outside/providers.err"; then
+			found=1
+			fail 'the credential the supervisor holds was printed by the session, so it crossed the boundary unsubstituted'
+		fi
+	fi
+
+	# The control: without state in the project, an unchanged home proves
+	# nothing. It accumulates rather than returning, because a lost relocation
+	# breaks the control and the subject at once.
+	mapfile -t landed < <(find "$project" -mindepth 1 2>/dev/null | sort)
+	if [ "${#landed[@]}" -eq 0 ]; then
+		found=1
+		fail "the session wrote nothing inside the project, so an unchanged home directory would prove nothing"
+	fi
+
+	find "$home" -printf '%p\t%s\t%T@\n' | sort >"$outside/after"
+	mapfile -t changed < <(comm -13 "$outside/before" "$outside/after" | cut -f1)
+	if [ "${#changed[@]}" -gt 0 ]; then
+		found=1
+		fail "$(printf 'the session changed the home directory:\n%s' \
+			"$(printf '%s\n' "${changed[@]}")")"
+	fi
+
+	[ "$found" -eq 0 ]
+}

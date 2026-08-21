@@ -1115,18 +1115,33 @@ The plant is the two-part one [plan.md](plan.md#planted-violations) already reco
 
 Two stale sentences were corrected in place while here: research.md's "the four `XDG_*` roots stay out of `set_vars`", which `M6a` contradicted, and plan.md's sketch comment promising that `M8b` would set the remaining ten.
 
-### M8c — `opencode` (Status: PENDING)
+### M8c — `opencode` (Status: IMPLEMENTED)
 
 **Scenario**: Journey 2.1 for `opencode`.
 
-- [ ] Its own variables used, never a blanket `XDG_DATA_HOME` (P1)
-- [ ] `opencode debug paths` is the observable, and **every** root it reports lands under `$WORKDIR`. Run inside the environment it already reports `state` under `$HOME`, which `M6a` fixes for the agent table; this task is where the claim is checked for `opencode` specifically, against the agent's own answer rather than against a list of variables
-- [ ] It takes its credential from the mediated route, and no grant on `claude-code`'s state is added to make it work ([D14](plan.md#d14))
-- [ ] Seen to FAIL before the fix
+- [x] **No variable of its own is needed, and the criterion asking for one had nothing to ask for.** Eight of the nine roots derive from the four `XDG_*` names plus `TMPDIR`, which `M6a` already places under the working directory; the ninth *is* `$HOME`, which no variable can move. None of the 84 `OPENCODE_*` names in the binary relocates a root. The one variable the entry does set, `OPENCODE_DISABLE_AUTOUPDATE`, is not a relocation at all
+- [x] `opencode debug paths` is the observable, and every root it reports but `home` is asserted under `$WORKDIR`, from the agent's own answer rather than from a list of variables. `home` is asserted to lie **outside** the project instead, because it is `$HOME`, and the session's denial is what keeps that honest
+- [x] It takes its credential from the mediated route, and no grant on `claude-code`'s state is added to make it work ([D14](plan.md#d14)) — `opencode providers list` names `ANTHROPIC_API_KEY` under its `Environment` block while reporting `0 credentials` in its store, and the two are asserted separately
+- [x] Seen to FAIL before the fix — two plants against `check_opencode`, and a third on the second agent's `stateVars` proving the generalised component check reaches it. All three recorded in [plan.md](plan.md#planted-violations)
 
-Two roots were measured to relocate cleanly and one not. `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, `XDG_CACHE_HOME` and `TMPDIR` are all honoured, and credentials are already separated from settings by directory: `auth.json` and `mcp-auth.json` sit under the data root with `opencode.db`, `storage` and `log`, while the config root holds only settings and extensions. `XDG_STATE_HOME` is honoured too — a probe pointing it at a scratch directory moved `state` there — which is why [D13](plan.md#d13)'s deliberate host value is a hole rather than a non-issue. Reading the binary for variable names yielded nothing, the bundle being compiled; occurrence has now failed to predict this agent's behaviour as often as it failed for `claude-code`.
+**Measured before starting.** Both of the premises this task was written on are false, in the same direction as `M8a`'s and `M8b`'s.
 
-`opencode`'s base URL is a config key rather than a variable — `provider.<id>.options.baseURL`, with config winning over the environment — so pointing it at the mediated route is a file this environment writes, not a variable it exports.
+- `opencode`'s base URL is **not** only a config key. The agent reads `ANTHROPIC_BASE_URL` and `ANTHROPIC_API_KEY` straight out of its environment, with the config key winning where it is set and the environment as the documented fallback — and that pair is exactly what the mediated route injects. So the entry declares `credentialServices = [ "anthropic" ]` and this environment writes no configuration file. `check_r3`'s routed list does not grow, because no new service is named.
+- Reading the binary was recorded as yielding nothing. It yields 84 distinct `OPENCODE_*` names — and not one of them moves a root. The conclusion survives; the reason for it was wrong.
+- Details in [research.md § M8c](research.md#m8c--opencode-needs-no-variable-of-its-own-and-takes-its-credential-from-the-environment).
+
+**Implementation.** The production diff is one table entry: `opencode` in `lib/agents.nix`, with `groups = [ ]`, `credentialServices = [ "anthropic" ]` and a single `stateVars` value. Everything else the agent needs was already there, which the flake confirmed by generating a description, a substrate and an entry point for it with no other edit.
+
+Two checks were involved and only one is new.
+
+- `check_opencode` at the integration layer, deliberately named outside the `check_(j<n>_<m>|r<n>|rep<n>)` pattern `check_sc3` scans, because Journey 2.1 already has `check_j2_1` and a second check claiming the same scenario would break the bijection rather than strengthen it. One session through the real entry point: the roots arm, the credential arm, a control that the project gained state, and the `$HOME` before-and-after diff.
+- `check_state_vars` was written at the unit layer and then **deleted**. `check_confinement_validates` already made that assertion, with the same separator rule and the same `DISABLE_AUTOUPDATER=1` example — but named one agent, so the plan's description of it as a property over the agent table was drift. The fix was to make the description true: it now loops `builtins.attrNames agents` and names the agent in every failure. That is the whole of `M8c`'s coverage for the second agent at that layer, and adding a second copy would have been the third copy AGENTS.md forbids.
+
+Two other checks needed no edit and cover `opencode` anyway. `check_j5_1` derives its subjects from the agent table, so it now runs two checkouts against two agents and asserts four pairwise-distinct substitutes. `check_confinement_validates` covers any entry the moment it lands.
+
+The second plant is worth recording for its surprise. Removing a root's relocation does not make `opencode` write to `$HOME` and get caught by the diff — it makes `opencode` die with `EACCES` before it can answer, because the fallback root is denied. For this agent relocation is load-bearing rather than tidying, and the failure mode is refusal rather than leakage: the mirror image of `claude-code`, which reached `$HOME` only once `M8b`'s plant also granted the fallback.
+
+Suite after the task: `1 of 28 checks failed`, the failure being `check_sc3`'s deliberate progress bar, now missing `j7_1 j8_1 r9 rep1 rep2`. `nix flake check` passes.
 
 ### M8d — `pi`, and pre-provisioned extensions (Status: PENDING)
 

@@ -56,30 +56,88 @@ manifest_denies() {
 
 check_confinement_validates() {
 	local found=0 lib=$REPO_ROOT/lib/confinement.nix
-	local profile tmp cfg store agent=claude-code
+	local profile tmp cfg store agent
+	local -a table=()
 
 	[ -f "$lib" ] || {
 		fail "lib/confinement.nix: no such file"
 		return 1
 	}
 
-	profile=$(confinement_profile "$agent") || {
-		fail "the confinement description for $agent does not build"
+	# Every assertion below is a property of a description rather than of one
+	# agent, so the set it runs over comes from the table. An entry added there
+	# is covered the moment it lands, which is what M8c needed and why it added
+	# no check of its own: the claim already existed and was being made about
+	# one name.
+	mapfile -t table < <(
+		nix eval --json "$REPO_ROOT#agents" --apply builtins.attrNames | jq -r '.[]'
+	)
+	if [ "${#table[@]}" -eq 0 ]; then
+		fail "the agent table names no agent, so this check would assert nothing"
 		return 1
-	}
+	fi
 
 	tmp=$(mktemp -d "$REPO_ROOT/.tmp/component.XXXXXX")
 	cfg=$tmp/config
 	# shellcheck disable=SC2064
 	trap "rm -rf '$tmp'" RETURN
 
+	# The store prefix and the devShell hook are the same for every agent, so
+	# they are resolved once. The prefix comes from Nix, because a check that
+	# spells it out would pass on a store mounted elsewhere.
+	store=$(nix eval --raw --impure --expr 'builtins.storeDir') || {
+		fail "the store prefix does not evaluate"
+		return 1
+	}
+
+	# M6a criterion 3. Every root the devShell redirects for the developer is
+	# redirected for the session too. The developer's side is read out of the
+	# shell hook rather than listed here, so the two mirrors are compared against
+	# each other and a root added to one without the other fails.
+	local system hook
+	local -a shell_roots=()
+	system=$(nix eval --impure --raw --expr builtins.currentSystem)
+	hook=$(nix eval --raw "$REPO_ROOT#devShells.$system.default.shellHook") || {
+		fail "the devShell hook does not evaluate"
+		return 1
+	}
+	mapfile -t shell_roots < <(grep -oE 'XDG_[A-Z_]+=' <<<"$hook" | tr -d '=' | sort -u)
+	if [ "${#shell_roots[@]}" -eq 0 ]; then
+		fail "parsed no XDG root out of the devShell hook; the hook and this check have drifted"
+		return 1
+	fi
+
+	for agent in "${table[@]}"; do
+		confinement_validates_one "$agent" "$tmp" "$cfg" "$store" || found=1
+	done
+
+	[ "$found" -eq 0 ]
+}
+
+# One agent's description, given the values check_confinement_validates resolved
+# once. Split out so the loop above reads as the property it is, and so a failure
+# names the agent it belongs to rather than leaving the reader to guess which
+# iteration spoke.
+#
+# shell_roots is read from the caller's scope: it is the same list for every
+# agent, and passing an array through positional parameters to say so would be
+# noise.
+confinement_validates_one() {
+	local agent=$1 tmp=$2 cfg=$3 store=$4
+	local found=0 profile
+
+	profile=$(confinement_profile "$agent") || {
+		fail "the confinement description for $agent does not build"
+		return 1
+	}
+
 	# nono's schema is the authority on shape, so nothing here restates it.
 	# --strict is used because it turns a deprecated-key warning into a failure,
 	# and a profile accepted with a warning nobody reads is the silent fallback
 	# P9 forbids.
-	if ! nono_hermetic "$cfg" profile validate --strict "$profile" >"$tmp/validate.out" 2>&1; then
+	if ! nono_hermetic "$cfg" profile validate --strict "$profile" >"$tmp/$agent.validate" 2>&1; then
 		printf 'the generated description for %s does not validate:\n' "$agent"
-		cat "$tmp/validate.out"
+		cat "$tmp/$agent.validate"
 		found=1
 	fi
 
@@ -87,9 +145,9 @@ check_confinement_validates() {
 	# exits 0; if that command ever stopped inspecting the file it would still
 	# exit 0 and this check would pass while asserting nothing. So a copy with
 	# one unresolvable group reference must be rejected.
-	jq '.groups.include += ["__no_such_group__"]' "$profile" >"$tmp/broken.json"
-	if nono_hermetic "$cfg" profile validate --strict "$tmp/broken.json" >/dev/null 2>&1; then
-		printf 'negative control absent: validate accepted a profile naming a group that does not exist, so its acceptance above proves nothing\n'
+	jq '.groups.include += ["__no_such_group__"]' "$profile" >"$tmp/$agent.broken.json"
+	if nono_hermetic "$cfg" profile validate --strict "$tmp/$agent.broken.json" >/dev/null 2>&1; then
+		printf 'negative control absent for %s: validate accepted a profile naming a group that does not exist, so its acceptance above proves nothing\n' "$agent"
 		found=1
 	fi
 
@@ -97,7 +155,7 @@ check_confinement_validates() {
 	# and one naming nothing resolve byte-identically, so naming it would imply
 	# an inheritance that does not happen.
 	if jq -e 'has("extends")' "$profile" >/dev/null; then
-		printf 'the description names a parent, but D10 says naming one implies an inheritance that does not happen\n'
+		printf "%s's description names a parent, but D10 says naming one implies an inheritance that does not happen\\n" "$agent"
 		found=1
 	fi
 
@@ -121,24 +179,17 @@ check_confinement_validates() {
 	# against the substrate this repository builds. Kept apart so that a substrate
 	# that silently empties fails here even though the grants and the derivation
 	# it came from would still agree with each other.
-	#
-	# The prefix comes from Nix, because a check that spells it out would pass on a
-	# store mounted elsewhere.
-	store=$(nix eval --raw --impure --expr 'builtins.storeDir') || {
-		fail "the store prefix does not evaluate"
-		return 1
-	}
 	jq -e --arg s "$store" \
 		'[.filesystem.read // []] | flatten | any(.[]; startswith($s + "/"))' \
 		"$profile" >/dev/null ||
 		{
-			printf 'filesystem.read carries nothing under %s, so the session cannot execute\n' "$store"
+			printf "%s's filesystem.read carries nothing under %s, so the session cannot execute\\n" "$agent" "$store"
 			found=1
 		}
 	jq -e --arg s "$store" '[.filesystem.read // [], .filesystem.allow // []] | flatten | index($s)' \
 		"$profile" >/dev/null &&
 		{
-			printf 'the store prefix %s is granted whole, and an allow-only rule on it subsumes every path beneath\n' "$store"
+			printf "%s grants the store prefix %s whole, and an allow-only rule on it subsumes every path beneath\\n" "$agent" "$store"
 			found=1
 		}
 
@@ -146,7 +197,7 @@ check_confinement_validates() {
 	# is no protection when the danger is that a directive in it runs a program
 	# inside the boundary.
 	if jq -e '.groups.include | index("git_config")' "$profile" >/dev/null; then
-		printf 'groups.include carries git_config, which D11 excludes\n'
+		printf "%s's groups.include carries git_config, which D11 excludes\\n" "$agent"
 		found=1
 	fi
 
@@ -164,7 +215,7 @@ check_confinement_validates() {
 	while IFS=$'\t' read -r k v; do
 		[ -n "$k" ] || continue
 		if [ "$(jq -r --arg k "$k" '.[$k] // "<absent>"' <<<"$got")" != "$v" ]; then
-			printf 'set_vars does not carry the agent table entry %s=%s\n' "$k" "$v"
+			printf "%s's set_vars does not carry the agent table entry %s=%s\\n" "$agent" "$k" "$v"
 			found=1
 		fi
 	done < <(jq -r 'to_entries[] | [.key, .value] | @tsv' <<<"$want")
@@ -183,7 +234,7 @@ check_confinement_validates() {
 			case "$v" in
 			'$WORKDIR/'*) ;;
 			*)
-				printf 'the agent table points %s at %s, which is not under the working directory\n' "$k" "$v"
+				printf 'the agent table points %s at %s for %s, which is not under the working directory\n' "$k" "$v" "$agent"
 				found=1
 				;;
 			esac
@@ -197,42 +248,28 @@ check_confinement_validates() {
 	for k in GIT_CONFIG_GLOBAL GIT_CONFIG_SYSTEM; do
 		jq -e --arg k "$k" 'has($k)' <<<"$got" >/dev/null ||
 			{
-				printf 'set_vars does not carry %s, so the version-control toolchain is undirected\n' "$k"
+				printf "%s's set_vars does not carry %s, so the version-control toolchain is undirected\\n" "$agent" "$k"
 				found=1
 			}
 	done
 
-	# M6a criterion 3. Every root the devShell redirects for the developer is
-	# redirected for the session too. The developer's side is read out of the
-	# shell hook rather than listed here, so the two mirrors are compared against
-	# each other and a root added to one without the other fails.
-	#
-	# XDG_STATE_HOME is named as a literal because it is exactly the criterion:
-	# it is the one root the devShell cannot redirect, since nono anchors its own
-	# protected state root at the ambient value, and it is therefore the one a
-	# blanket redirection of "whatever the shell hook does" would leave behind.
-	local system hook name
-	local -a shell_roots=()
-	system=$(nix eval --impure --raw --expr builtins.currentSystem)
-	hook=$(nix eval --raw "$REPO_ROOT#devShells.$system.default.shellHook") || {
-		fail "the devShell hook does not evaluate"
-		return 1
-	}
-	mapfile -t shell_roots < <(grep -oE 'XDG_[A-Z_]+=' <<<"$hook" | tr -d '=' | sort -u)
-	if [ "${#shell_roots[@]}" -eq 0 ]; then
-		fail "parsed no XDG root out of the devShell hook; the hook and this check have drifted"
-		return 1
-	fi
+	# M6a criterion 3, against the list the caller parsed out of the devShell
+	# hook. XDG_STATE_HOME is named as a literal because it is exactly the
+	# criterion: it is the one root the devShell cannot redirect, since nono
+	# anchors its own protected state root at the ambient value, and it is
+	# therefore the one a blanket redirection of "whatever the shell hook does"
+	# would leave behind.
+	local name
 	for name in "${shell_roots[@]}"; do
 		jq -e --arg k "$name" 'has($k)' <<<"$got" >/dev/null ||
 			{
-				printf 'the devShell redirects %s but the session does not, so a tool honouring it writes outside the project\n' "$name"
+				printf 'the devShell redirects %s but a %s session does not, so a tool honouring it writes outside the project\n' "$name" "$agent"
 				found=1
 			}
 	done
 	jq -e 'has("XDG_STATE_HOME")' <<<"$got" >/dev/null ||
 		{
-			printf 'the session does not redirect XDG_STATE_HOME, the one root the devShell cannot redirect, so it is the one a blanket redirection leaves behind\n'
+			printf 'a %s session does not redirect XDG_STATE_HOME, the one root the devShell cannot redirect, so it is the one a blanket redirection leaves behind\n' "$agent"
 			found=1
 		}
 

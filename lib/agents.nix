@@ -60,8 +60,11 @@ let
         type = types.functionTo (types.attrsOf types.str);
         description = ''
           The agent's state relocation, as a function of the working directory
-          placeholder. Every value must lie under it, which is FR-4 and what
-          `check_state_vars` asserts.
+          placeholder. No value may name a location outside it: a value that
+          carries a path lies under the placeholder, and a value that carries a
+          setting rather than a path carries no path separator at all. That is
+          FR-4, and `check_state_vars` asserts it over every entry in this
+          table rather than over a named one.
         '';
       };
     };
@@ -117,8 +120,12 @@ lib.mapAttrs (_: checkAgent) {
     #
     # No XDG_* variable appears, because M1g found the agent ignores all four
     # despite XDG_CONFIG_HOME occurring 26 times in the binary. Occurrence is
-    # not behaviour. The other candidate variables belong to M8b, which is where
-    # the subagent and lock fallbacks are observed.
+    # not behaviour. M8b drove the subagent and lock paths that a one-turn
+    # session never reaches and found the other ten still receive nothing, so
+    # they stay unset: setting one is not free. CLAUDE_JOB_DIR is an output the
+    # agent sets on itself and derives a job identity from, and
+    # CLAUDE_SECURESTORAGE_CONFIG_DIR falls back to the home directory when it
+    # is set empty while using the relocated root when it is unset.
     stateVars = w: {
       CLAUDE_CONFIG_DIR = "${w}/.agents/claude";
       CLAUDE_CODE_TMPDIR = "${w}/.agents/claude/tmp";
@@ -128,6 +135,39 @@ lib.mapAttrs (_: checkAgent) {
       # environment would be idempotent only there. An agent that updates itself
       # is not the agent this description was written against.
       DISABLE_AUTOUPDATER = "1";
+    };
+  };
+
+  opencode = {
+    package = agentPkgs: agentPkgs.opencode;
+
+    # Nothing a group grants is wanted here either, for D15's reason.
+    groups = [ ];
+
+    # The same service name as claude-code, and deliberately no more: M8c
+    # measured this agent reading ANTHROPIC_API_KEY and ANTHROPIC_BASE_URL
+    # straight out of its environment, which is exactly the pair the mediated
+    # route injects. Declaring the name here mints this agent a substitute of
+    # its own — check_j5_1 asserts the substitutes are distinct across the
+    # table — so nothing about it reads claude-code's state, and check_r3's
+    # list of routed names does not grow because no new service is named.
+    credentialServices = [ "anthropic" ];
+
+    # Almost empty, and that is the finding. M8c measured `opencode debug
+    # paths` reporting nine roots: eight are derived from the four XDG_* roots
+    # and TMPDIR, which the confinement already places under the working
+    # directory for every agent, and the ninth *is* $HOME, which no variable
+    # can move. So there is no opencode-specific relocation variable to set —
+    # of the 84 OPENCODE_* names in the binary, not one moves a root.
+    #
+    # OPENCODE_DISABLE_MODELS_FETCH and OPENCODE_DISABLE_LSP_DOWNLOAD are
+    # deliberately absent. They gate downloads that land in the project's own
+    # cache and bin roots, so they are not confinement's business, and setting
+    # a variable that changes nothing here is the fallacy M8b corrected.
+    stateVars = _w: {
+      # P8, for claude-code's reason: nix owns the version, and an agent that
+      # updates itself is not the agent this description was written against.
+      OPENCODE_DISABLE_AUTOUPDATE = "1";
     };
   };
 

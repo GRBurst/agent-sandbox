@@ -1903,6 +1903,73 @@ The per-project component is a digest of the configuration root, so two projects
 
 So the background service stays refused. The refusal is clean: `$HOME` is untouched, everything claude does manage to write stays under the relocated root, and the interactive and listing paths are unaffected. It is recorded as a known limitation rather than granted away, and `check_j2_1` deliberately does not assert the spawn's exit status — only that the attempt left its trace inside the boundary — so the check does not break on the day the mediation stops being recursive.
 
+## M8c — `opencode` needs no variable of its own, and takes its credential from the environment
+
+Measured against `opencode 1.18.18`, `/nix/store/na3vfbmg09qm2dyd622xnghnwrg1c91k-opencode-1.18.18`.
+Both of the premises `M8c` was written on turned out to be wrong, in the same direction as `M8a`'s and `M8b`'s: the task expected agent-specific work and the measurement found there was none to do.
+
+### Nine roots, and five variables that place eight of them
+
+`opencode debug paths` answers with nine roots and needs no terminal. Run twice — once with nothing but `$HOME` set, once with the four `XDG_*` roots and `TMPDIR` pointed into a scratch tree:
+
+| root | `$HOME` only | roots redirected |
+| --- | --- | --- |
+| `home` | `$HOME` | `$HOME` — **unchanged, because this root *is* `$HOME`** |
+| `data` | `$HOME/.local/share/opencode` | `$XDG_DATA_HOME/opencode` |
+| `log` | `$HOME/.local/share/opencode/log` | `$XDG_DATA_HOME/opencode/log` |
+| `repos` | `$HOME/.local/share/opencode/repos` | `$XDG_DATA_HOME/opencode/repos` |
+| `bin` | `$HOME/.cache/opencode/bin` | `$XDG_CACHE_HOME/opencode/bin` |
+| `cache` | `$HOME/.cache/opencode` | `$XDG_CACHE_HOME/opencode` |
+| `config` | `$HOME/.config/opencode` | `$XDG_CONFIG_HOME/opencode` |
+| `state` | `$HOME/.local/state/opencode` | `$XDG_STATE_HOME/opencode` |
+| `tmp` | `/tmp/opencode` | `$TMPDIR/opencode` |
+
+Eight of the nine follow the five roots `M6a` already placed under the working directory, so `opencode` needs no relocation variable of its own and the criterion asking for one had nothing to ask for.
+The ninth is `$HOME` itself, which no variable can move; the check asserts it lies *outside* the project instead, and the session's denial is what keeps it honest.
+
+The reach was confirmed by writing rather than by asking: `opencode models` creates `cache/opencode/models.json`, `config/opencode/opencode.jsonc`, `config/opencode/.gitignore`, `data/opencode/opencode.db{,-shm,-wal}`, `data/opencode/log/opencode.log` and `state/opencode/locks/<sha1>.lock/{heartbeat,meta.json}` — every one under a redirected root, with `$HOME` receiving nothing.
+
+`M8e` recorded that reading the binary for variable names "yielded nothing because the bundle is compiled". That is wrong: `strings` yields **84** distinct `OPENCODE_*` names, led by `OPENCODE_SERVER_PASSWORD`, `OPENCODE_CONFIG_DIR`, `OPENCODE_CONFIG_CONTENT`, `OPENCODE_CONFIG`, `OPENCODE_DISABLE_PROJECT_CONFIG`, `OPENCODE_PURE`, `OPENCODE_DB`.
+It is the conclusion that survives, by a different route: **not one of the 84 moves a root.** `OPENCODE_CONFIG_DIR` adds a directory to a search list rather than moving the config root. Occurrence still fails to predict behaviour; here it fails by naming a great deal that governs something other than location.
+
+### The base URL is a variable, and the route already exports it
+
+The task expected the mediated route to need a file this environment writes, via `provider.<id>.options.baseURL`. The agent reads both halves out of its environment:
+
+```js
+let q = pG(dG({ settingValue: Q.baseURL, environmentVariableName: "ANTHROPIC_BASE_URL" })) ?? "https://api.anthropic.com/v1"
+constructor({ baseURL: $ = z8("ANTHROPIC_BASE_URL"), apiKey: X = z8("ANTHROPIC_API_KEY") ?? null, … })
+```
+
+Config wins where it is set, the environment is the documented fallback, and the route injects exactly that pair. So `credentialServices = [ "anthropic" ]` on the entry is the whole of it, and no configuration file is written.
+
+`opencode providers list` is the observable, credential-free and terminal-free. Without a credential it reports the `auth.json` path and `0 credentials`. With one it reports `0 credentials` **and** a second block:
+
+```text
+┌  Environment
+●  Anthropic  ANTHROPIC_API_KEY
+└  1 environment variable
+```
+
+Both halves matter and the check asserts them separately: the `Environment` block is the credential arriving by the route, and `0 credentials` is nothing having been read from a store — which is D14's half, since a grant on the other agent's state is exactly what this is meant to rule out. An ANSI escape sits between `Anthropic` and the variable name, so the match has to be `Anthropic.*ANTHROPIC_API_KEY`.
+
+### One variable is set, and two that look free are not
+
+Three gates were decompiled and all three are real: `OPENCODE_DISABLE_AUTOUPDATE` returns early from the startup update check; `OPENCODE_DISABLE_MODELS_FETCH` gates both `ModelsDev.populate` and a background fetch repeating every 60 minutes; `OPENCODE_DISABLE_LSP_DOWNLOAD` sits beside `OPENCODE_DISABLE_EXTERNAL_SKILLS` in the same option record.
+
+Only the first is set, on `claude-code`'s P8 reasoning: Nix owns the version, and an agent that updates itself is not the agent this description was written against.
+The other two are deliberately left alone. What they gate lands in the project's own cache and bin roots, so neither is a confinement concern; they are FR-22 concerns belonging to the extension work. Setting them here would repeat exactly the fallacy `M8b` corrected — that a variable which changes nothing costs nothing.
+
+### The check that was needed already existed, for one agent
+
+`M8c` first added `check_state_vars` at the unit layer, asserting that every `stateVars` value lies under the working-directory placeholder. It was then deleted: `check_confinement_validates` already made that assertion, with the same separator rule and the same `DISABLE_AUTOUPDATER=1` example — but opened `local … agent=claude-code`, so the plan's description of it as "a property over the agent table" was drift.
+
+The fix was to make the description true rather than to add a second copy of it: the check now reads the table with `nix eval --json '#agents' --apply builtins.attrNames`, loops it, and names the agent in every failure. `opencode` is covered by construction, and `M8c` added no check of its own at that layer. The plant that proves it is planted on the second agent, which the check was never written for — see the planted-violations table.
+
+The two plants against `check_opencode` are recorded there too. The second is worth reading for its surprise: removing a root's relocation does not make `opencode` write to `$HOME`, it makes `opencode` die with `EACCES` before it can answer. Relocation for this agent is load-bearing rather than tidying, and its failure mode is refusal rather than leakage — the mirror image of `claude-code`, which reached `$HOME` only once the plant also granted the fallback.
+
+One misleading detail worth knowing when reading a failure: nono's epilogue said `No path denials were observed during this session. The failure may be unrelated to sandbox restrictions.` It was entirely related. The denial was an `openat` inside the agent's own error handling rather than a tracked path denial, so nono's own accounting did not see it.
+
 ## M8e — Where each agent reads its declarative extensions from
 
 **Partial.** `opencode` is measured; `claude-code` and `pi` are not.
@@ -1994,7 +2061,7 @@ Pointing the variable at a project path relocates it cleanly and creates the dir
 Inside a confined session the host path is denied instead, so the agent fails rather than relocating.
 `M6a` carries this.
 
-Reading the binary for variable names is not available for this agent: `strings -a` over the resolved `opencode` for `OPENCODE_[A-Z0-9_]+` yields nothing, because it is a compiled bun bundle.
+Reading the binary for variable names appeared not to be available for this agent, `strings -a` over the resolved `opencode` for `OPENCODE_[A-Z0-9_]+` seeming to yield nothing because it is a compiled bun bundle. [`M8c`](#m8c--opencode-needs-no-variable-of-its-own-and-takes-its-credential-from-the-environment) found otherwise — the bundle carries 84 distinct names — so the sentence stands only as a warning that none of them relocates a root, not as a claim that they are unreadable.
 
 ### Method notes
 
