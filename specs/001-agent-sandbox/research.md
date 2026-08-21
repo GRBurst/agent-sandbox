@@ -1353,6 +1353,45 @@ Every refusal check drives its sessions from the built description, so the descr
 
 Exec'ing the substrate's `bash` under `workdir.access = "none"` gives **exit 126**, with nono's note `The file may not have execute permission, or the sandbox may be blocking execution of binaries in that directory`. Its end-of-session summary still prints `No path denials were observed during this session. The failure may be unrelated to sandbox restrictions.` — the same unreliable self-report `M5b` recorded for a refused write, now for a refused exec, and a second reason no check reads that summary as evidence.
 
+## M6a — Agent state lands in the project
+
+Measured on x86_64-linux with nono 0.74.0 and `claude-code` 2.1.237, from inside the devShell, against the shipped `.#confinement-claude-code` and the shipped `.#claude` entry point. The fake `$HOME`, the ambient `XDG_STATE_HOME`, the config root and the scratch project were four siblings under `mktemp -d -p "$XDG_RUNTIME_DIR"`, so the project is never under the home.
+
+### Journey 2.1 already holds for this agent, so the RED has to be planted
+
+`claude plugin list` through the entry point, with the fake `$HOME` listed before and after:
+
+| Observed | |
+| --- | --- |
+| exit status | 0 |
+| `diff` of the fake `$HOME` before and after | **empty** |
+| what landed in the project | `.agents/claude/.claude.json` and `.agents/claude/backups/.claude.json.backup.<epoch-ms>` |
+
+So the scenario's `Then` and `And` both already hold, and the control the criteria ask for — the writes found where they were redirected to — is what makes the empty diff mean anything. `plugin list` is enough of a session to write state, needs no credentials, and finishes in about a second, so no conversation has to be driven to get a write.
+
+`.claude.json` is the file `M5f` saw `claude plugin init` create in a host home. Under `CLAUDE_CONFIG_DIR` it lands in the project instead, which is the redirection working rather than a second location.
+
+### D13's load-bearing assumption is true, and this is the observation `M6a` owes
+
+The question `D13` left open is whether the supervisor's own protected state root and the child's `XDG_STATE_HOME` resolve independently. Two arms, one description apart — `jq '.environment.set_vars.XDG_STATE_HOME = "$WORKDIR/.agents/state"'`:
+
+| Arm | Child's `XDG_STATE_HOME` | Child writes there | nono starts | Supervisor's audit record |
+| --- | --- | --- | --- | --- |
+| shipped | **`<unset>`** | denied | yes | under the ambient value |
+| `set_vars.XDG_STATE_HOME = "$WORKDIR/.agents/state"` | the expanded project path | **ok**, and the directory appears at `<project>/.agents/state/probe` | yes, no overlap complaint | under the ambient value |
+
+So the child can be moved into the granted workdir without making that workdir ungrantable: `$WORKDIR` expands in `set_vars`, no `Refusing to grant … overlaps protected nono state root` appears, and the supervisor went on writing its audit record under the ambient path in both arms. `M6a` can assert this by observation exactly as its criterion demands.
+
+### Inside a session the variable is *unset*, not host-valued, and that correction matters
+
+The handbook and `D13` both read as though a confined session inherits the host's `XDG_STATE_HOME`. It does not: `allow_vars` carries no `XDG_*` pattern, so the variable does not cross at all. A tool that honours XDG therefore falls back to the specification's default, `$HOME/.local/state`, which the session denies — the same failure `D13` predicts, reached by a different route. The distinction is not cosmetic: it means the fix is adding the key to `set_vars`, and that nothing has to be *removed* from `allow_vars` first.
+
+### Two traps that will otherwise cost a session
+
+A probe script must live **inside the granted workdir**. Written to the scratch directory beside the fake `$HOME` instead, every arm reported **exit 126** with no output — the same signature `M5h` produced by denying the workdir outright. A run that fails this way looks exactly like a boundary working.
+
+The identity file `.agents/git/config` was **not** written by any of these runs, and that is an artefact of the developing environment rather than a defect. The wrapper copies it with `git config --global --get`, and this repository's own agent session is itself confined by an outer sandbox that denies `~/.gitconfig`, so both values come back empty and the wrapper correctly writes nothing. `check_r10` measures the copy against a planted `$HOME/.gitconfig` and is unaffected.
+
 ## M8e — Where each agent reads its declarative extensions from
 
 **Partial.** `opencode` is measured; `claude-code` and `pi` are not.

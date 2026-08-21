@@ -787,6 +787,16 @@ ______________________________________________________________________
 - [ ] Violation planted (drop the state variable), seen to FAIL, reverted, recorded in plan.md
 - [ ] Violation planted (redirect every root **except** `state`), seen to FAIL, reverted, recorded in plan.md — a per-root check is the only kind that bites here, since a single blanket variable leaves exactly this hole
 
+**Measured before starting**, in [`research.md` § `M6a`](research.md#m6a--agent-state-lands-in-the-project). Four things this task can be written against rather than discover.
+
+The scenario already holds for `claude-code`, so the first criterion's FAIL has to be planted like every other in `M5`. `claude plugin list` through the entry point leaves the fake `$HOME` diff **empty** and lands `.agents/claude/.claude.json` plus a `backups/` copy inside the project. It needs no credentials and takes about a second, so no conversation has to be driven to produce a write.
+
+**`D13`'s load-bearing assumption is true, and the observation the fourth criterion asks for is available in two arms.** With `set_vars.XDG_STATE_HOME = "$WORKDIR/.agents/state"` the session starts, `$WORKDIR` expands, the child writes there, no overlap is complained about, and the supervisor still writes its audit record under the ambient value. The shipped arm is the same run without the key.
+
+**Inside a session the variable is `<unset>`, not host-valued.** `allow_vars` carries no `XDG_*` pattern, so a tool that honours XDG falls back to `$HOME/.local/state` and is denied there. The outcome `D13` predicts is right; the route is not. So the change is an addition to `set_vars` and nothing has to leave `allow_vars`.
+
+**Two traps.** A probe written outside the granted workdir gives **exit 126** with no output, which is indistinguishable from the boundary working — `M5h`'s signature. And the identity file `.agents/git/config` will not appear in a run made from this repository's own confined session, because the wrapper's `git config --global --get` is denied `~/.gitconfig` by the outer sandbox and correctly writes nothing; that is the developing environment, not a defect.
+
 ### M6b — Two concurrent projects share nothing (Status: PENDING)
 
 **Scenario**: Journey 3.1

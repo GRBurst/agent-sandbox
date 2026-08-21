@@ -86,6 +86,23 @@ type claude                 # a wrapper in the store, not the upstream binary
 The wrapper is the only entry point; the unconfined binary is reachable only by store path.
 If the host cannot enforce confinement the wrapper refuses to start the agent and exits 77, rather than running it unconfined.
 
+**A 77 does not always mean your kernel.**
+The mechanism reads `$XDG_CONFIG_HOME/nono/config.toml`, which the blanket puts *inside* the checkout, and it refuses to start when that file will not parse.
+So a checkout carrying a broken one produces the same exit status and the same "cannot confine" reading as a host that genuinely cannot.
+Look at `.config/nono/` before doubting the machine.
+The file cannot widen a session — `[extensions]` and `[overrides]` are parsed and ignored, measured — but it can stop one.
+
+**The first run writes the identity your commits carry.**
+The wrapper creates `.agents/git/config` if it is absent, copying `user.name` and `user.email` out of your host's global git configuration and nothing else from it.
+
+```sh
+cat .agents/git/config      # what this session commits as
+```
+
+Edit it and it is never rewritten, which is how a project gets an identity of its own.
+If your host has neither value the file is not written at all, and a commit fails with git's own `Please tell me who you are` rather than being made under a placeholder.
+Nothing else from your host git configuration is read: `GIT_CONFIG_GLOBAL` points at that file and `GIT_CONFIG_SYSTEM` at `/dev/null`, so a `core.hooksPath` or `credential.helper` in `~/.gitconfig` cannot direct a session.
+
 ## What the environment guarantees
 
 Every tool that would otherwise write into `$HOME` is pointed inside the checkout.
@@ -167,7 +184,7 @@ The unit and component layers have no such dependency.
 
 It **exits non-zero today, by design**: `check_sc3` asserts a scenario-to-check bijection and is the feature's progress bar, so it fails until the last scenario in the spec has a check.
 A task is judged by whether its own check passes and whether the set `check_sc3` names shrinks by exactly the scenarios that task covers.
-Today's baseline is `1 of 14 checks failed`, that one being `check_sc3`, and the set it names is 17 scenarios long.
+Today's baseline is `1 of 18 checks failed`, that one being `check_sc3`, and the set it names is 14 scenarios long.
 
 ## Known drift
 
@@ -181,7 +198,7 @@ It is the natural input to the first spec.
 
 **Isolation.**
 
-- Confinement is now observed rather than asserted, on both sides. `check_r6` proves the pre-flight refuses a host that cannot enforce it and `check_j1_1` compares a real session's granted reach against the project, the execution substrate and the leak registry; the refusal side is now checked too — `check_r1` reads a planted SSH key from inside a session and watches it fail, `check_r2` writes outside the project and watches the file not appear, `check_r3` puts an API-key canary in the host environment and proves it does not cross, and `check_r4` has a session rewrite the source of its own confinement and proves nothing widens until a human re-enters. Each of the four reads or writes something it *is* allowed in the same session, so a session that failed to start cannot pass.
+- Confinement is now observed rather than asserted, on both sides. `check_r6` proves the pre-flight refuses a host that cannot enforce it and `check_j1_1` compares a real session's granted reach against the project, the execution substrate and the leak registry; the refusal side is now checked too — `check_r1` reads a planted SSH key from inside a session and watches it fail, `check_r2` writes outside the project and watches the file not appear, `check_r3` puts an API-key canary in the host environment and proves it does not cross, `check_r4` has a session rewrite the source of its own confinement and proves nothing widens until a human re-enters, `check_r5` commits a confinement description to the checkout and proves the entry point does not read it, `check_r10` plants a host git configuration that runs a program and proves it neither crosses nor runs, and `check_j8_2` plants a whole host-global agent installation and compares the session's granted reach to the project, the substrate and the registry as a set. Each of them reads, writes or runs something it *is* allowed in the same session, so a session that failed to start cannot pass — and `check_controls` reads the suite's own text to keep it that way, because a refusal check whose control has been deleted goes on passing while proving nothing.
 - A session is granted the closure of what it runs, 128 store paths rather than the 67,000 the store holds, and the leak registry is now **empty**. What still has no check: history, cross-project state, and credentials beyond the environment channel `check_r3` covers.
 - **A grant on an exact path beats a `deny` the mechanism carries for it.** The five `required` deny groups, `deny_credentials` among them, are not a backstop behind the leak registry — a registry entry naming `$HOME/.ssh` would read the key, with the deny sitting beside the grant in the resolved manifest. A grant on an *ancestor* of denied paths is refused and the session does not start, but do not expect the message to say so: granting `$HOME` is refused first for overlapping nono's own protected state root, at a path that need not even exist, and the deny rules are never mentioned. So the registry's strictness is the whole of the guarantee.
 - **A confinement description written inside the project is one the mechanism will find, and what refuses it is a single command-line argument.** The blanket `XDG_CONFIG_HOME` puts nono's user profile directory inside the checkout, so a profile committed to a repository is listed by `nono profile list` and grants what it asks for the moment anything resolves it by name. The entry point passes `--profile <store path>` as an argument, and an argument beats `NONO_PROFILE`, which is why an untrusted checkout cannot grant itself paths. Nothing refuses the file itself.
@@ -191,7 +208,7 @@ It is the natural input to the first spec.
 
 **State that still resolves into `$HOME`.**
 
-- `XDG_STATE_HOME` is not redirected, so a tool that honours it writes outside the checkout. `opencode` does: `opencode debug paths` reports its `state` root under `~/.local/state`. Inside a confined session that path is denied, so the agent would fail rather than relocate — the worst of both. The variable cannot simply join the table, because the mechanism resolves its own protected state root from the ambient value; it has to be redirected for the session rather than for the shell.
+- `XDG_STATE_HOME` is not redirected, so a tool that honours it writes outside the checkout. `opencode` does: `opencode debug paths` reports its `state` root under `~/.local/state`. Inside a confined session the variable is not host-valued but **unset** — nothing in the description passes any `XDG_*` variable through — so such a tool falls back to the specification's own `$HOME/.local/state`, which the session denies, and it fails rather than relocating. The variable cannot simply join the table above, because the mechanism resolves its own protected state root from the ambient value; it has to be redirected for the session rather than for the shell. That the two resolutions are independent is now measured rather than assumed: a session whose description sets `XDG_STATE_HOME` under the project starts, writes there, and leaves the supervisor's audit record where it was.
 
 **Tools the environment does not provide.**
 
