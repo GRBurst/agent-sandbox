@@ -1451,7 +1451,23 @@ Each session leaves **three** records under `$XDG_STATE_HOME/nono/audit/*/sessio
 
 The `true` record is the pre-flight's enforceability probe and the `sh` record is raised alongside it; neither is granted a workdir, which is why both are one path short. `check_j1_1` selects "the one record whose `.command[0]` ends in `/bin/claude`" and requires exactly one, which is sound for a single session and **wrong for two** — two concurrent sessions leave two such records.
 
-A record carries no working directory. Its keys are `audit_attestation audit_event_count audit_integrity command ended executable_identity exit_code merkle_roots network_events session_id snapshot_count started tracked_paths`, and `.cwd`, `.workdir` and `.working_directory` are all absent. **So a two-session check must select by the project path appearing in `tracked_paths`**, and that is also the assertion it wants to make: the record naming `alpha` names no `beta` path and the record naming `beta` names no `alpha` path. Selecting by project and asserting on the project would be circular if the sets were built from the same source, so the check must require exactly one record per project first, then compare the two sets against each other.
+A record carries no working directory. Its keys are `audit_attestation audit_event_count audit_integrity command ended executable_identity exit_code merkle_roots network_events session_id snapshot_count started tracked_paths`, and `.cwd`, `.workdir` and `.working_directory` are all absent. So a record cannot be attributed to a session by any field it carries, and selecting by the project path in `tracked_paths` is the obvious substitute — which the plant below falsified. Selection has to be by the agent's own command, and the property has to be stated over the pair.
+
+### `$WORKDIR/..` is expanded and canonicalised, and it defeats selection by path
+
+The plant that grants a sibling checkout is one line: `allow = pathsWith "readwrite" ++ [ "$WORKDIR/.." ]`. The description carries the literal `"$WORKDIR/.."`, and nono resolves **and canonicalises** it — the banner's only non-store grant is `r+w <tmp>/work (dir)` and the audit record's only non-store `tracked_paths` entry is `<tmp>/work`, the parent, with neither project named.
+
+That is why `check_j3_1` cannot select its records by project path. Under the plant the selection found **0** records for each project and the check returned early on `expected exactly one session record naming alpha, found 0` — failing on its own bookkeeping before reaching its subject. A plant naming the sibling exactly would have broken it the other way, finding 2. So selection is by `.command[0] | endswith("/bin/claude")` requiring exactly two, which is path-independent, and the property is stated over the pair: each record reaches exactly one of the two checkouts and the two differ. **An ancestor counts as reaching**, since a grant that contains a checkout is as bad as one that names it.
+
+### The read-only arm fires one half and not the other
+
+Appending the same path to `read` rather than `allow` fires the reach assertion and leaves every cross-write assertion green. That is the measured reason both halves of FR-8 are asserted rather than one standing in for the other: a read grant on a sibling is a leak that no write attempt can observe.
+
+### Two method notes
+
+A jq `.` **rebinds after a `|`**. The ancestor clause was first written `any(.tracked_paths[]; . == $p or startswith($p + "/") or ($p | startswith(. + "/")))`, and inside that last parenthesis `.` is `$p`, so the clause compared `$p` against itself and never matched. It has to bind the element first: `. as $t | $t == $p or ($t | startswith($p + "/")) or ($p | startswith($t + "/"))`. The bug was silent — the plant still failed, on the other half, so only the message text (`reaches 0 of the two checkouts (none)`) gave it away.
+
+`v=$(<"$f" 2>/dev/null)` yields the empty string whatever the file holds. Bash's `$(<file)` fast path takes no additional redirection, so the added `2>/dev/null` turns it into an ordinary redirection-only command with no output.
 
 ## M7 — The credential surface, and interception measured rather than reasoned
 

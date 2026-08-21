@@ -1899,3 +1899,251 @@ check_j2_1() {
 
 	[ "$found" -eq 0 ]
 }
+
+# Journey 3.1 — two projects at once share nothing, which is FR-8.
+#
+# The two sessions are started with & and joined with wait, because the risk
+# this scenario is written against is contention: every supervised session
+# writes beneath one shared supervisory state directory, and a sequential pair
+# would never touch it at the same time. One fake $HOME, one config root and
+# one ambient XDG_STATE_HOME are shared between them on purpose — that is the
+# arrangement a consumer with two checkouts is actually in.
+#
+# Two rounds, because FR-8's two halves have no single observable. The agent
+# answers "share no agent state": it writes state of its own accord, so where
+# that lands is not something the check chose. It cannot answer "must not reach
+# each other's project directory", because an agent handed a grant it has no
+# use for does not exercise it — measured on M6a's plant A, where a granted
+# host path changed the reach set while the agent's own writes stayed put. So a
+# probe pair attempts the cross-project write the agent never would.
+#
+# The projects are siblings under a directory of their own rather than under
+# the temporary root, so the plant this check exists for — granting the parent
+# of the working directory, which is what a mistaken workspace-wide grant looks
+# like — reaches the other project and nothing else. With the fake home beside
+# them, that same grant would cover it and nono would refuse to start on
+# deny-overlap, and the plant would prove nothing.
+check_j3_1() {
+	local agent=claude-code binary=claude
+	local entry outside work home cfg state probe registry rc_a rc_b
+	local name other root canary_a canary_b entry_path covered record seen found=0
+	local -a landed=() changed=() records=() reached=()
+	local -A projects=()
+
+	session_fixture "$agent" || return 1
+	entry=$(pinned_bin "$binary") || return 1
+
+	outside=$(mktemp -d -p "${XDG_RUNTIME_DIR:-/tmp}" agent-sandbox-j3_1.XXXXXX)
+	# shellcheck disable=SC2064
+	trap "rm -rf '$outside'" RETURN
+	work="$outside/work"
+	home="$outside/home"
+	cfg="$outside/cfg"
+	state="$outside/state"
+	mkdir -p "$work/alpha" "$work/beta" "$home" "$cfg"
+	session_env "$state"
+	projects[alpha]=$(cd "$work/alpha" && pwd -P)
+	projects[beta]=$(cd "$work/beta" && pwd -P)
+
+	# Two checkouts, because that is the Given, and because the agent walks up
+	# to the worktree root when it looks for project-scoped extensions: two
+	# directories that were not repositories would share whatever ancestor the
+	# walk found instead.
+	for name in alpha beta; do
+		git init -q "${projects[$name]}" >/dev/null 2>&1 || {
+			fail "cannot make ${projects[$name]} a checkout, so the scenario's Given does not hold"
+			return 1
+		}
+		find "${projects[$name]}" -printf '%p\t%s\t%T@\n' | sort >"$outside/before.$name"
+	done
+	find "$home" -printf '%p\t%s\t%T@\n' | sort >"$outside/home.before"
+
+	# Genuinely concurrent, per the RED. Each status is collected separately so
+	# a pair where only one session survived cannot read as a pair that did not
+	# interfere.
+	env "${SESSION_ENV[@]}" "HOME=$home" "XDG_CONFIG_HOME=$cfg" \
+		env -C "${projects[alpha]}" "$entry/$binary" plugin list \
+		>"$outside/alpha.out" 2>"$outside/alpha.err" &
+	local pid_a=$!
+	env "${SESSION_ENV[@]}" "HOME=$home" "XDG_CONFIG_HOME=$cfg" \
+		env -C "${projects[beta]}" "$entry/$binary" plugin list \
+		>"$outside/beta.out" 2>"$outside/beta.err" &
+	local pid_b=$!
+	wait "$pid_a" && rc_a=0 || rc_a=$?
+	wait "$pid_b" && rc_b=0 || rc_b=$?
+
+	if [ "$rc_a" -ne 0 ] || [ "$rc_b" -ne 0 ]; then
+		fail "$(printf 'a concurrent session did not run: alpha exit %s, beta exit %s\n%s\n%s' \
+			"$rc_a" "$rc_b" "$(tail -10 "$outside/alpha.err")" "$(tail -10 "$outside/beta.err")")"
+		return 1
+	fi
+
+	# The control (D9), and it accumulates rather than returning: two sessions
+	# that each wrote nothing leave every project unchanged and would satisfy
+	# both halves below without either boundary having done anything.
+	for name in alpha beta; do
+		mapfile -t landed < <(find "${projects[$name]}/.agents" -type f 2>/dev/null | sort)
+		if [ "${#landed[@]}" -eq 0 ]; then
+			found=1
+			fail "$(printf 'the %s session wrote no state inside its own checkout, so an unchanged sibling proves nothing' "$name")"
+		fi
+	done
+
+	# Share no agent state. The two sessions had one home directory between
+	# them, so state that was not project-scoped would have collided there.
+	# The registry is subtracted rather than assumed empty, exactly as
+	# check_j2_1 does, so an entry added later relaxes this by what it declares.
+	find "$home" -printf '%p\t%s\t%T@\n' | sort >"$outside/home.after"
+	registry=$(nix eval --json "$REPO_ROOT#leakRegistry" \
+		--apply "es: builtins.filter (e: builtins.elem \"$agent\" e.agents) es" |
+		jq -r '.[].path' | sed "s|\$HOME|$home|g")
+	changed=()
+	while IFS=$'\t' read -r root _; do
+		[ -n "$root" ] || continue
+		covered=0
+		while IFS= read -r entry_path; do
+			[ -n "$entry_path" ] || continue
+			case "$root" in
+			"$entry_path" | "$entry_path"/*) covered=1 ;;
+			esac
+		done <<<"$registry"
+		if [ "$covered" -eq 0 ]; then
+			changed+=("$root")
+		fi
+	done < <(comm -13 "$outside/home.before" "$outside/home.after")
+	if [ "${#changed[@]}" -ne 0 ]; then
+		found=1
+		fail "$(printf 'two concurrent sessions shared state in the home directory, outside the leak registry:\n%s' \
+			"$(printf '%s\n' "${changed[@]}")")"
+	fi
+
+	# Neither reach includes the other. Selection is by the agent's own command
+	# and not by a project path, because a record carries no working directory
+	# and the grant this check exists to catch is an ancestor of both projects:
+	# selecting "the record naming alpha" then finds none, or finds both, and
+	# the check falls over on its own bookkeeping before reaching its subject.
+	# That is measured, not foreseen — the first plant did exactly this.
+	#
+	# Each session leaves three records, the pre-flight's enforceability probe
+	# and its companion alongside the agent's own, so the agent's two are the
+	# ones whose command is the agent. This runs before the probes, because a
+	# probe session leaves a record of its own and there would then be four.
+	records=()
+	while IFS= read -r entry_path; do
+		if jq -e --arg b "/bin/$binary" '.command[0] | endswith($b)' \
+			"$entry_path" >/dev/null 2>&1; then
+			records+=("$entry_path")
+		fi
+	done < <(find "$state/nono/audit" -mindepth 2 -maxdepth 2 -name session.json)
+	if [ "${#records[@]}" -ne 2 ]; then
+		fail "$(printf 'expected one session record per concurrent agent session, found %s' \
+			"${#records[@]}")"
+		return 1
+	fi
+
+	# A reach that contains a checkout is as bad as one that names it, so an
+	# ancestor counts as reaching it. The property is stated over the pair
+	# rather than per session — two records, each reaching exactly one of the
+	# two checkouts and between them both — because a record cannot be
+	# attributed to a session by any field it carries, and two sessions whose
+	# reach is indistinguishable is itself the failure.
+	seen=
+	for record in "${records[@]}"; do
+		reached=()
+		for name in alpha beta; do
+			if jq -e --arg p "${projects[$name]}" \
+				'any(.tracked_paths[]; . as $t | $t == $p or ($t | startswith($p + "/")) or ($p | startswith($t + "/")))' \
+				"$record" >/dev/null 2>&1; then
+				reached+=("$name")
+			fi
+		done
+		if [ "${#reached[@]}" -ne 1 ]; then
+			found=1
+			fail "$(printf 'a concurrent session reaches %s of the two checkouts (%s), not just its own: %s' \
+				"${#reached[@]}" "${reached[*]:-none}" \
+				"$(jq -r '[.tracked_paths[] | select(startswith("/nix/store") | not)] | join(" ")' "$record")")"
+			continue
+		fi
+		case " $seen " in
+		*" ${reached[0]} "*)
+			found=1
+			fail "$(printf 'both concurrent sessions reach the %s checkout and only it, so one of them reached the wrong project' \
+				"${reached[0]}")"
+			;;
+		esac
+		seen="$seen ${reached[0]}"
+	done
+
+	# The other project directory is unchanged. The agent cannot demonstrate
+	# this: it has no reason to write next door even when it may. So each
+	# session tries, concurrently, and the refusal is asserted from the host
+	# after both have exited — a denial reported from inside the sandbox is the
+	# sandbox's own account of itself, and M5b measured nono's summary claiming
+	# no denials for a write it had just refused.
+	canary_a="CROSS-CANARY-$RANDOM$RANDOM"
+	canary_b="CROSS-CANARY-$RANDOM$RANDOM"
+	for name in alpha beta; do
+		probe="${projects[$name]}/probe-cross.sh"
+		cat >"$probe" <<-'PROBE'
+			mine=$1
+			theirs=$2
+			canary=$3
+			if printf '%s\n' "$canary" >"$mine/own.txt" 2>/dev/null; then
+				printf 'OWN :: ok\n'
+			else
+				printf 'OWN :: denied\n'
+			fi
+			if printf '%s\n' "$canary" >"$theirs/crossed.txt" 2>/dev/null; then
+				printf 'CROSS :: ok\n'
+			else
+				printf 'CROSS :: denied\n'
+			fi
+		PROBE
+	done
+
+	env "${SESSION_ENV[@]}" "HOME=$home" \
+		"$(pinned_bin nono)/nono" run \
+		--profile "$FIXTURE_PROFILE" --workdir "${projects[alpha]}" --allow-cwd \
+		-- "$FIXTURE_BASH/bin/bash" "${projects[alpha]}/probe-cross.sh" \
+		"${projects[alpha]}" "${projects[beta]}" "$canary_a" \
+		>"$outside/cross.alpha.out" 2>"$outside/cross.alpha.err" &
+	pid_a=$!
+	env "${SESSION_ENV[@]}" "HOME=$home" \
+		"$(pinned_bin nono)/nono" run \
+		--profile "$FIXTURE_PROFILE" --workdir "${projects[beta]}" --allow-cwd \
+		-- "$FIXTURE_BASH/bin/bash" "${projects[beta]}/probe-cross.sh" \
+		"${projects[beta]}" "${projects[alpha]}" "$canary_b" \
+		>"$outside/cross.beta.out" 2>"$outside/cross.beta.err" &
+	pid_b=$!
+	wait "$pid_a" && rc_a=0 || rc_a=$?
+	wait "$pid_b" && rc_b=0 || rc_b=$?
+	if [ "$rc_a" -ne 0 ] || [ "$rc_b" -ne 0 ]; then
+		fail "$(printf 'a concurrent probe did not run: alpha exit %s, beta exit %s\n%s\n%s' \
+			"$rc_a" "$rc_b" "$(tail -10 "$outside/cross.alpha.err")" \
+			"$(tail -10 "$outside/cross.beta.err")")"
+		return 1
+	fi
+
+	for name in alpha beta; do
+		[ "$name" = alpha ] && other=beta || other=alpha
+		# The control for this half, and first: a probe that could not write
+		# even inside its own project would report the sibling denied for
+		# reasons that have nothing to do with the boundary between them.
+		if ! grep -qxF 'OWN :: ok' "$outside/cross.$name.out"; then
+			found=1
+			fail "$(printf 'the %s probe could not write inside its own checkout, so its refusal next door proves nothing' "$name")"
+			continue
+		fi
+		if ! grep -qxF 'CROSS :: denied' "$outside/cross.$name.out"; then
+			found=1
+			fail "$(printf 'the %s session wrote into the %s checkout' "$name" "$other")"
+		fi
+		if [ -e "${projects[$other]}/crossed.txt" ]; then
+			found=1
+			fail "$(printf 'the %s checkout gained a file written by the %s session: %s' \
+				"$other" "$name" "${projects[$other]}/crossed.txt")"
+		fi
+	done
+
+	[ "$found" -eq 0 ]
+}
