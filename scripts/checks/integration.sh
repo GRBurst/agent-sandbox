@@ -694,11 +694,28 @@ check_r3() {
 	local outside home scratch secret term arm description rc out err
 	local entry name pattern matched control found=0 env_pkg
 	local FIXTURE_PROFILE FIXTURE_SUBSTRATE FIXTURE_BASH
-	local -a SESSION_ENV crossed allowed declared unsanctioned leaked
+	local -a SESSION_ENV crossed allowed declared sanctioned unsanctioned leaked
 	# What nono sets in every session, whatever the description says: the
 	# rewritten PATH, the browser shim it interposes, and the path to the
 	# capability file it hands the child.
 	local -a injected=(PATH BROWSER NONO_CAP_FILE)
+
+	# What a credential route adds, measured in M7a: the credential and the
+	# mediated base URL the service policy names, the five trust bundles the
+	# interception it switches on needs, and the nine names that point a client
+	# at the proxy. These are written down rather than derived because they come
+	# out of the mechanism's own policy for a built-in service, not out of this
+	# repository's description -- the same reason `injected` above is a literal.
+	# The list is only consulted when the description asks for a route, so a
+	# session with no route still refuses every one of these names.
+	local -a routed=(
+		ANTHROPIC_API_KEY ANTHROPIC_BASE_URL
+		SSL_CERT_FILE REQUESTS_CA_BUNDLE NODE_EXTRA_CA_CERTS
+		CURL_CA_BUNDLE GIT_SSL_CAINFO
+		http_proxy HTTP_PROXY https_proxy HTTPS_PROXY
+		no_proxy NO_PROXY NONO_NO_PROXY NONO_PROXY_TOKEN
+		NODE_USE_ENV_PROXY
+	)
 
 	session_fixture "$agent" || return 1
 
@@ -728,7 +745,10 @@ check_r3() {
 
 	session_env "$outside/state"
 
-	jq '.environment.allow_vars += ["ANTHROPIC_API_KEY"]' \
+	# Two names granted, because M7a measured a credential route overriding an
+	# explicit grant on the name its service policy claims. Granting only that
+	# name would leave the arm asserting nothing it could ever see.
+	jq '.environment.allow_vars += ["ANTHROPIC_API_KEY", "MOCK_UNROUTED_KEY"]' \
 		"$FIXTURE_PROFILE" >"$scratch/granted.json"
 
 	for arm in shipped granted; do
@@ -737,7 +757,8 @@ check_r3() {
 		out="$scratch/env-$arm.bin"
 		err="$scratch/err-$arm.txt"
 
-		env "${SESSION_ENV[@]}" "HOME=$home" "TERM=$term" "ANTHROPIC_API_KEY=$secret" \
+		env "${SESSION_ENV[@]}" "HOME=$home" "TERM=$term" \
+			"ANTHROPIC_API_KEY=$secret" "MOCK_UNROUTED_KEY=$secret" \
 			"$(pinned_bin nono)/nono" run \
 			--profile "$description" --workdir "$REPO_ROOT" --allow-cwd -- \
 			"$env_pkg/bin/env" -0 >"$out" 2>"$err" && rc=0 || rc=$?
@@ -760,11 +781,18 @@ check_r3() {
 		mapfile -t allowed < <(jq -r '.environment.allow_vars[]' "$description")
 		mapfile -t declared < <(jq -r '.environment.set_vars | keys[]' "$description")
 
+		# A route's names are sanctioned only where the description asks for a
+		# route, so a session with none still refuses every one of them.
+		sanctioned=("${allowed[@]}" "${declared[@]}" "${injected[@]}")
+		if [ "$(jq -r '.network.credentials // [] | length' "$description")" -gt 0 ]; then
+			sanctioned+=("${routed[@]}")
+		fi
+
 		unsanctioned=()
 		for entry in "${crossed[@]}"; do
 			name=${entry%%=*}
 			matched=0
-			for pattern in "${allowed[@]}" "${declared[@]}" "${injected[@]}"; do
+			for pattern in "${sanctioned[@]}"; do
 				# Unquoted on purpose: allow_vars carries globs, LC_* among them.
 				# shellcheck disable=SC2053
 				if [[ $name == $pattern ]]; then
@@ -784,12 +812,22 @@ check_r3() {
 		fi
 
 		if [ "$arm" = granted ]; then
-			# Control 2. The probe can see such a value when the boundary lets
-			# it through, so the shipped arm's absence is the boundary's doing.
-			if ! grep -qaFx "ANTHROPIC_API_KEY=$secret" <(printf '%s\n' "${crossed[@]}"); then
+			# Control 2. The probe can see a host value when the boundary lets it
+			# through, so the shipped arm's absence is the boundary's doing. The
+			# name is one no service policy claims, because the one that is
+			# claimed cannot demonstrate this -- see the assertion below.
+			if ! grep -qaFx "MOCK_UNROUTED_KEY=$secret" <(printf '%s\n' "${crossed[@]}"); then
 				found=1
-				fail "$(printf 'the session cannot see ANTHROPIC_API_KEY even when the boundary allows it (exit %s):\n%s' \
+				fail "$(printf 'the session cannot see a host value even when the boundary allows it (exit %s):\n%s' \
 					"$rc" "$(cat "$err")")"
+			fi
+
+			# And the property that control cost us, asserted rather than lost:
+			# on a name a credential route claims, the route wins over an
+			# explicit grant, so FR-6 does not rest on the grant being withheld.
+			if grep -qaFx "ANTHROPIC_API_KEY=$secret" <(printf '%s\n' "${crossed[@]}"); then
+				found=1
+				fail 'an explicit grant on a routed name let the host credential through, so the route is a filter a widening can get behind'
 			fi
 			continue
 		fi
@@ -2144,6 +2182,198 @@ check_j3_1() {
 				"$other" "$name" "${projects[$other]}/crossed.txt")"
 		fi
 	done
+
+	[ "$found" -eq 0 ]
+}
+
+# Journey 4.1: every credential value a confined session can read is a
+# substitute. The strongest observable in the spec, and the one with the
+# sharpest vacuity hazard — a session handed no credential at all satisfies
+# "every readable value is a substitute" perfectly — which is why the control
+# comes first and asserts that a credential arrived (D9).
+#
+# What "the user has authenticated once on the machine" looks like here is the
+# real value in the supervisor's own environment. On Linux there is no
+# keychain, so that is the store, and M7a measured nono reading it there and
+# never handing it to the child.
+#
+# Four sessions, because the scenario has two halves and one of them needs a
+# control of its own:
+#   ctrl  — the real value handed through under a name no nono service policy
+#           claims, the probe writing its environment into its own project.
+#           The positive control on the observation itself: it establishes that
+#           the probe reports values faithfully and that the project-tree
+#           search finds the canary when the canary is there.
+#   live  — the shipped description, the same probe. The substitute-form half.
+#   agent — the real entry point in the live project, so SC-6 has agent state
+#           actually written to a checkout to search rather than an empty tree.
+#   again — a second live session, for the per-session property.
+check_j4_1() {
+	local agent=claude-code binary=claude
+	local outside home cfg live ctrl entry_dir env_pkg description proj arm
+	local real value entry first second found=0 rc
+	local FIXTURE_PROFILE FIXTURE_SUBSTRATE FIXTURE_BASH
+	local -a SESSION_ENV crossed carriers
+
+	session_fixture "$agent" || return 1
+	entry_dir=$(pinned_bin "$binary") || return 1
+	env_pkg=$(substrate_member "$FIXTURE_SUBSTRATE" env) || {
+		fail "the substrate for $agent provides no env, so the session cannot print its own environment"
+		return 1
+	}
+
+	outside=$(mktemp -d -p "${XDG_RUNTIME_DIR:-/tmp}" agent-sandbox-j4_1.XXXXXX)
+	# shellcheck disable=SC2064
+	trap "rm -rf '$outside'" RETURN
+
+	home="$outside/home"
+	cfg="$outside/cfg"
+	live="$outside/work/live"
+	ctrl="$outside/work/ctrl"
+	mkdir -p "$home" "$cfg" "$live" "$ctrl"
+	session_env "$outside/state"
+
+	# Per run, and shaped like the real thing, so a substring match against it
+	# is a match against something a provider would have accepted.
+	real="sk-ant-real-canary-$RANDOM$RANDOM"
+
+	# The probe writes its own environment into its own project, so one
+	# invocation answers both "what did the child see" and "what is now at rest
+	# in the checkout". Builtins and the substrate's own env only, per check_r1:
+	# PATH is inherited whole, so a name resolved inside the session can land on
+	# a binary the session may not read.
+	cat >"$live/probe-env.sh" <<-'PROBE'
+		"$1" -0 >"$2"
+	PROBE
+	cp "$live/probe-env.sh" "$ctrl/probe-env.sh"
+
+	# The ctrl arm hands the real value through under a name nono's anthropic
+	# policy does not claim, which is the only way to watch the probe read a
+	# real credential out: M7a measured the route overriding allow_vars for the
+	# name it does claim, so granting that name would yield the substitute too.
+	jq '.environment.allow_vars += ["MOCK_UNROUTED_KEY"]' \
+		"$FIXTURE_PROFILE" >"$outside/ctrl.json"
+
+	for arm in ctrl live; do
+		case $arm in
+		ctrl)
+			proj=$ctrl
+			description="$outside/ctrl.json"
+			;;
+		live)
+			proj=$live
+			description=$FIXTURE_PROFILE
+			;;
+		esac
+
+		env "${SESSION_ENV[@]}" "HOME=$home" \
+			"ANTHROPIC_API_KEY=$real" "MOCK_UNROUTED_KEY=$real" \
+			"$(pinned_bin nono)/nono" run \
+			--profile "$description" --workdir "$proj" --allow-cwd -- \
+			"$FIXTURE_BASH/bin/bash" "$proj/probe-env.sh" \
+			"$env_pkg/bin/env" "$proj/env.bin" \
+			>"$outside/out.$arm" 2>"$outside/err.$arm" && rc=0 || rc=$?
+		printf '%s\n' "$rc" >"$outside/rc.$arm"
+	done
+
+	# The control, and first (D9). Without it, "the live session saw a
+	# substitute rather than the real value" is a claim about a probe that may
+	# be unable to see anything at all.
+	if [ ! -s "$ctrl/env.bin" ]; then
+		fail "$(printf 'the control session printed no environment (exit %s), so the live session observes nothing:\n%s' \
+			"$(cat "$outside/rc.ctrl")" "$(cat "$outside/err.ctrl")")"
+		return 1
+	fi
+	mapfile -d '' -t crossed <"$ctrl/env.bin"
+	value=
+	for entry in "${crossed[@]}"; do
+		[ "${entry%%=*}" = MOCK_UNROUTED_KEY ] && value=${entry#*=}
+	done
+	if [ "$value" != "$real" ]; then
+		fail 'the probe cannot read a real credential even when the boundary hands it one, so the live session proves nothing'
+		return 1
+	fi
+	# And the search SC-6 rests on must be able to find one.
+	if ! grep -rqlF "$real" "$ctrl" 2>/dev/null; then
+		fail 'the project-tree search cannot find a credential that is demonstrably at rest in a checkout'
+		return 1
+	fi
+
+	if [ ! -s "$live/env.bin" ]; then
+		fail "$(printf 'the session printed no environment (exit %s):\n%s' \
+			"$(cat "$outside/rc.live")" "$(cat "$outside/err.live")")"
+		return 1
+	fi
+	mapfile -d '' -t crossed <"$live/env.bin"
+	value=
+	for entry in "${crossed[@]}"; do
+		[ "${entry%%=*}" = ANTHROPIC_API_KEY ] && value=${entry#*=}
+	done
+
+	# The vacuity control: a credential reached the session at all.
+	if [ -z "$value" ]; then
+		fail 'the session was handed no credential, so every readable value being a substitute holds vacuously'
+		return 1
+	fi
+
+	# The scenario. Asserted as a form rather than as "it differs from the real
+	# value", because a truncation differs too and still authenticates.
+	if [[ ! $value =~ ^[0-9a-f]{64}$ ]]; then
+		found=1
+		fail "$(printf 'the credential the session can read is not of the substitute form: %s character(s), not 64 lowercase hex' \
+			"${#value}")"
+	fi
+	# The carriers are named rather than printed, per check_r3: printing them
+	# would put the credential and the whole environment in the suite's output.
+	carriers=()
+	for entry in "${crossed[@]}"; do
+		[[ $entry == *"$real"* ]] && carriers+=("${entry%%=*}")
+	done
+	if [ "${#carriers[@]}" -gt 0 ]; then
+		found=1
+		fail "$(printf 'the real credential is readable inside the session, carried by: %s' "${carriers[*]}")"
+	fi
+
+	# SC-6, over the whole checkout rather than the agent's own state. The agent
+	# runs first so there is state to search; the probe's own artifacts are
+	# removed before the search, because they are this check's leavings rather
+	# than the session's, and the environment they hold is already asserted
+	# above.
+	env "${SESSION_ENV[@]}" "HOME=$home" "XDG_CONFIG_HOME=$cfg" \
+		"ANTHROPIC_API_KEY=$real" \
+		env -C "$live" "$entry_dir/$binary" plugin list \
+		>"$outside/out.agent" 2>"$outside/err.agent" || true
+	rm -f "$live/env.bin" "$live/probe-env.sh"
+	if grep -rqlF "$real" "$live" 2>/dev/null; then
+		found=1
+		fail "$(printf 'the real credential is at rest inside the project directory: %s' \
+			"$(grep -rlF "$real" "$live" 2>/dev/null | tr '\n' ' ')")"
+	fi
+
+	# Per session, which is more than FR-6 asks for and cheap to establish: a
+	# substitute copied out of one session is not even the string the next one
+	# sees.
+	first=$value
+	env "${SESSION_ENV[@]}" "HOME=$home" "ANTHROPIC_API_KEY=$real" \
+		"$(pinned_bin nono)/nono" run \
+		--profile "$FIXTURE_PROFILE" --workdir "$ctrl" --allow-cwd -- \
+		"$FIXTURE_BASH/bin/bash" "$ctrl/probe-env.sh" \
+		"$env_pkg/bin/env" "$ctrl/again.bin" \
+		>/dev/null 2>&1 || true
+	second=
+	if [ -s "$ctrl/again.bin" ]; then
+		mapfile -d '' -t crossed <"$ctrl/again.bin"
+		for entry in "${crossed[@]}"; do
+			[ "${entry%%=*}" = ANTHROPIC_API_KEY ] && second=${entry#*=}
+		done
+	fi
+	if [ -z "$second" ]; then
+		found=1
+		fail 'a second session was handed no credential, so the substitute cannot be shown to be per session'
+	elif [ "$second" = "$first" ]; then
+		found=1
+		fail 'two sessions were handed the same substitute, so one copied out of a session stays valid in the next'
+	fi
 
 	[ "$found" -eq 0 ]
 }

@@ -55,6 +55,13 @@ let
 
     groups.include = a.groups;
 
+    # FR-6. The supervisor holds the real credential and the session holds a
+    # substitute of its own, per session — so a value copied out of a session
+    # authenticates nowhere, including in the next session of the same project.
+    # M7a measured the route overriding an explicit `allow_vars` grant on the
+    # same name, so this is not a filter that a widening could get behind.
+    network.credentials = a.credentialServices;
+
     # What is granted is the project, and whatever the registry justifies.
     #
     # What is NOT granted, and why (P5):

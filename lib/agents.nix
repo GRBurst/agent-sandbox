@@ -44,6 +44,18 @@ let
           here asked for.
         '';
       };
+      credentialServices = mkOption {
+        type = types.listOf types.str;
+        description = ''
+          Credential routes to enable by name, mediated by the supervisor.
+          Names, not definitions: M7a measured the mechanism shipping a policy
+          for six providers, so the upstream, the injected header and the
+          endpoint policy come from it rather than from here, and a name it
+          does not know is refused before a session starts with the list of the
+          ones it does. What reaches the session is a per-session substitute;
+          the real value stays with the supervisor, which is FR-6.
+        '';
+      };
       stateVars = mkOption {
         type = types.functionTo (types.attrsOf types.str);
         description = ''
@@ -91,6 +103,13 @@ lib.mapAttrs (_: checkAgent) {
     # daemon. FR-23 wants the toolchain pointed at configuration this
     # environment wrote, which the confinement does with GIT_CONFIG_GLOBAL.
     groups = [ ];
+
+    # M7a measured this one line doing the whole of Journey 4.1: the real value
+    # is read by the supervisor out of its own environment, and the session sees
+    # 64 hex characters that are not it. `credential_providers` was the shape D1
+    # first chose, and it is withdrawn — its phantom exists only once a live
+    # token exchange has been captured, so nothing unattended can exercise it.
+    credentialServices = [ "anthropic" ];
 
     # M1g set these by observation, not by documentation. Thirteen variables
     # were candidates and ten received nothing; these three carry the whole of

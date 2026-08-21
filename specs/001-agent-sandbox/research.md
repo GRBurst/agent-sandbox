@@ -1556,13 +1556,50 @@ Three things follow that the plan did not know.
 
 **The substitute is per session.** Two identical runs gave `2bd2c52f…` and `1b48ba31…`, so a substitute copied out of one session is not even the string the next session sees — a stronger property than FR-6 asks for, and one `check_j4_1` can assert cheaply.
 
-### The route injects two variables, and `check_r3` has to learn about them
+### The route injects sixteen variables, and `check_r3` has to learn about them
 
-`check_r3` asserts that every name crossing into a session is matched by an `allow_vars` pattern, is a key of `set_vars`, or is one of nono's three own injects — `PATH`, `BROWSER` and `NONO_CAP_FILE`. Enabling the route adds **two more**: `ANTHROPIC_API_KEY` and `ANTHROPIC_BASE_URL`. Neither is in `allow_vars` (`ANTHROPIC_API_KEY` deliberately is not, per FR-5) and neither is in `set_vars`, so the check fails the moment the route ships.
+`check_r3` asserts that every name crossing into a session is matched by an `allow_vars` pattern, is a key of `set_vars`, or is one of nono's three own injects — `PATH`, `BROWSER` and `NONO_CAP_FILE`. Enabling the route takes a session from 24 names crossing to 40, withdrawing none. The first arms of this section reported the addition as **two**, `ANTHROPIC_API_KEY` and `ANTHROPIC_BASE_URL`, because those were the only names the probe asked about; a full `env -0` diff, taken before the check was written, says sixteen:
+
+| group | names |
+| --- | --- |
+| the credential | `ANTHROPIC_API_KEY`, `ANTHROPIC_BASE_URL` |
+| the trust bundle | `SSL_CERT_FILE`, `REQUESTS_CA_BUNDLE`, `NODE_EXTRA_CA_CERTS`, `CURL_CA_BUNDLE`, `GIT_SSL_CAINFO` |
+| the proxy | `http_proxy`, `HTTP_PROXY`, `https_proxy`, `HTTPS_PROXY`, `no_proxy`, `NO_PROXY`, `NONO_NO_PROXY`, `NONO_PROXY_TOKEN`, `NODE_USE_ENV_PROXY` |
+
+None is in `allow_vars` (`ANTHROPIC_API_KEY` deliberately is not, per FR-5) and none is in `set_vars`, so the check fails the moment the route ships. **The lesson is about the instrument rather than about nono**: a probe that prints the variables it was told to look for cannot report the ones nobody thought of, and the whole environment was available for the asking.
 
 For a route defined in our own description the names would be derivable, from `credential_routes[].env_var` and `.base_url_env_var` or from a `custom_credentials` entry's `env_var`. For a **built-in** service they are not: they live in nono's `network-policy.json`, and the description says only `"anthropic"`. Reading them back out of the session's resolved capability manifest was tried and does not work either — `NONO_CAP_FILE` is a 44 KiB JSON document, but it is written progressively and a probe reading it from inside the session gets an unterminated object (`Unfinished JSON term at EOF`), so it is not a usable source. What the manifest *did* answer is that the real canary is absent from it.
 
-So the two names have to be written down, and that is the one place a literal is the criterion: the assertion is precisely "these two names arrive because this repository enabled this route, and no third one does". A third appearing is a change in nono worth failing over, which is the same argument the check already makes for `PATH`, `BROWSER` and `NONO_CAP_FILE`.
+So the names have to be written down, and that is the one place a literal is the criterion: the assertion is precisely "these sixteen names arrive because this repository enabled this route, and no seventeenth does". A seventeenth appearing is a change in nono worth failing over, which is the same argument the check already makes for `PATH`, `BROWSER` and `NONO_CAP_FILE`. The list is consulted only for an arm whose description asks for a route, so a session with no route is still held to the narrower set.
+
+### The substitute is the session's own proxy token, and the route switches interception on
+
+`NONO_PROXY_TOKEN` holds the **identical** 64 hex characters as `ANTHROPIC_API_KEY`, and the same string appears as the password in `http_proxy=http://nono:<that value>@127.0.0.1:<port>`, alongside `ANTHROPIC_BASE_URL=http://127.0.0.1:<port>/anthropic`, `NO_PROXY=localhost,127.0.0.1` and `NODE_USE_ENV_PROXY=1`. So the substitute is not a minted stand-in for the credential at all — it is the ticket that authenticates the child to its own supervisor, handed over under the name the client expects a key in. That is a stronger property than FR-6 asks for and it explains why it is per session: it is scoped to a proxy that stops existing when the session does.
+
+The five trust-bundle variables point at `$XDG_STATE_HOME/nono/sessions/intercept-<pid>-<n>/intercept-ca.pem`, and the banner reads `net proxy` with `mode supervised (proxy, supervisor)` rather than `net outbound allowed`. **The shipped description asks for no inspected destination** — it has no `allow_domain` at all — so `D12`'s "interception is off by default" holds only of the `allow_domain` half. A credential route turns inspection on because it has to mediate, which is corrected in [`D12`](plan.md#d12) and changes `M7e`'s plant.
+
+### The route overrides `allow_vars`, which is what broke `check_r3`'s control
+
+Four arms of a full `env -0`, one description edit apart, with `ANTHROPIC_API_KEY=HOST-SECRET-…` in the supervisor's environment throughout:
+
+| arm | names crossing | `ANTHROPIC_API_KEY` in the child | host secret present |
+| --- | --- | --- | --- |
+| shipped | 24 | `<unset>` | no |
+| `network.credentials = ["anthropic"]` | 40 | 64 hex | no |
+| `allow_vars += ["ANTHROPIC_API_KEY"]` | 25 | the host secret | **yes** |
+| both | 40 | 64 hex, a different value | no |
+
+The last row is the finding: an explicit grant on the name the route claims does not get the host value through. So the mediation is not a filter a widening can get behind — but it also means `check_r3`'s granted arm could no longer demonstrate what its control existed to demonstrate, since the one name it granted was the one name the route overrides. The rework grants a second name no service policy claims and asserts both halves: the unclaimed canary crosses with its host value, so default-deny is what withholds things; and the claimed one does not, so the route beats the grant. Replacing the control outright would have lost the second property.
+
+`check_r3`'s R3 assertion itself survived untouched, because `M5c` wrote it against the canary's **value** rather than against the name `ANTHROPIC_API_KEY` being absent, on the stated grounds that M7 would plausibly set a credential under that very name. It did.
+
+### What the plants say, including the one that says nothing
+
+Withdrawing the route and allowing the host name through fires three of `check_j4_1`'s assertions at once — the form, the leak, and the per-session property, since two sessions handed the same host value get the same string — and takes `check_r3` with it on both its R3 assertion and the routed-name one. SC-6's project-tree search does **not** fire: the value crossed in the environment and nothing wrote it at rest, so the environment half and the at-rest half are independent and that plant exercises only the first.
+
+Adding the grant while leaving the route in place is **inert**: `13 checks passed`. That is the suite-level confirmation of the table above, and it is why the new `check_r3` assertion is falsifiable only by removing the route.
+
+No component-layer assertion was added. `check_j4_1` does not read the route out of the description — it asserts the substitute's form directly — so withdrawing the route is caught at the integration layer, unlike `M6a`'s third plant where the integration check read its own expectation from the description and only a component-layer mirror could see the hole.
 
 ### `credential_providers` is the wrong mechanism here, and two arms say why
 
@@ -1583,6 +1620,10 @@ The substitute carries **no `nono_` prefix**. `M1b` recorded the sandbox holding
 ### Method note
 
 `env VAR=VAL … cmd` stops treating arguments as assignments at the first one that is not `VAR=VAL`, so every flag goes after the command name. And a probe that reads `NONO_CAP_FILE` with a `while IFS= read -r` loop gets a truncated document; if the manifest is ever needed, it has to be read after the session rather than during it.
+
+**A plant harness must not nest `direnv exec .`.** A harness run as `direnv exec . bash .tmp/plant.sh` cannot call `direnv exec . bash scripts/validate.sh` from inside itself: the inner call dies with `.envrc is blocked. Run \`direnv allow\` to approve its content`and the layer produces no output whatsoever, which reads exactly like a layer that found nothing to say. It is already inside the environment, so it calls`bash scripts/validate.sh\` directly.
+
+**A `sed` plant needs a guard that the edit landed.** The `allow_vars` items in `lib/confinement.nix` are indented eight spaces, not ten; a pattern written for ten matched nothing, and the run would have reported a plant that changed no behaviour as a plant that bit nothing. The harness now aborts unless `git diff` mentions the string it meant to add.
 
 ## M8e — Where each agent reads its declarative extensions from
 
