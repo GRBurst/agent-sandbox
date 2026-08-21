@@ -1752,7 +1752,10 @@ check_r10() {
 # chose to write rather than state a probe was told to write. `plugin list`
 # writes its configuration file and a backup of it and needs no credentials,
 # which M6a measured; driving a conversation to get a write would add a
-# credential dependency to a check about the filesystem.
+# credential dependency to a check about the filesystem. It is joined by a
+# subagent listing and a background spawn, because spec Risk 12 names the
+# subagent and lock paths as the ones that resolve the configuration root a
+# second time, and a one-turn session never reaches them.
 #
 # The second is a probe, because the first cannot answer criteria 3 and 4. An
 # agent that writes nowhere near a relocated root leaves that root unobserved,
@@ -1771,7 +1774,7 @@ check_j2_1() {
 	local agent=claude-code binary=claude
 	local entry outside home proj cfg state probe project registry rc
 	local root want got write entry_path covered found=0
-	local -a landed=() roots=() changed=()
+	local -a landed=() roots=() changed=() spawned=()
 
 	session_fixture "$agent" || return 1
 	entry=$(pinned_bin "$binary") || return 1
@@ -1813,6 +1816,54 @@ check_j2_1() {
 		fail "$(printf 'the agent did not start in the scratch project (exit %s):\n%s' \
 			"$rc" "$(tail -20 "$outside/agent.err")")"
 		return 1
+	fi
+
+	# The subagent path, which spec Risk 12 names and a one-turn session never
+	# reaches. `plugin list` above resolves the configuration root once; a
+	# background agent resolves it again from a spawned process, and M8b found
+	# the spawn carrying `CLAUDE_CONFIG_DIR` forward through
+	# `CLAUDE_CODE_SESSION_KIND=bg` while a second expression in the same binary
+	# falls back to `$HOME/.claude` whenever that variable is absent.
+	#
+	# Listing first, because it is the half that must succeed: it is
+	# credential-free and needs no terminal, both measured, so a non-zero exit
+	# here is the environment breaking the agent rather than the agent declining
+	# to run.
+	env "${SESSION_ENV[@]}" "HOME=$home" "XDG_CONFIG_HOME=$cfg" \
+		env -C "$proj" "$entry/$binary" agents --json --all \
+		>"$outside/agents.out" 2>"$outside/agents.err" && rc=0 || rc=$?
+	if [ "$rc" -ne 0 ]; then
+		found=1
+		fail "$(printf 'the agent could not list its subagent sessions inside the session (exit %s):\n%s' \
+			"$rc" "$(tail -20 "$outside/agents.err")")"
+	# The answer is taken from the first line that opens an array rather than
+	# from the whole capture, because the supervisor's own credential warning
+	# shares the stream — measured, and it is the supervisor talking, not the
+	# agent, so treating it as part of the answer would fail a working session.
+	elif ! sed -n '/^\[/,$p' "$outside/agents.out" |
+		jq -e 'type == "array"' >/dev/null 2>&1; then
+		found=1
+		fail "$(printf 'the subagent listing did not answer with a session array, so the path was not exercised:\n%s' \
+			"$(head -5 "$outside/agents.out")")"
+	fi
+
+	# Then the spawn itself. Its exit status is deliberately not asserted: the
+	# background service binds an AF_UNIX socket under a hardcoded /tmp path
+	# that no description here grants, so today it is refused, and pinning
+	# either outcome would make this check fail the day that changes. What is
+	# asserted is the part the scenario owns — that reaching for a background
+	# agent writes where this environment put the root and nowhere else, which
+	# the $HOME diff below covers, and that the spawn path was reached at all,
+	# which the daemon's own files under the project prove.
+	env "${SESSION_ENV[@]}" "HOME=$home" "XDG_CONFIG_HOME=$cfg" \
+		env -C "$proj" "$entry/$binary" --bg 'list the files here' \
+		>"$outside/bg.out" 2>"$outside/bg.err" </dev/null || true
+
+	mapfile -t spawned < <(find "$project/.agents/claude" -maxdepth 1 -name 'daemon*' 2>/dev/null | sort)
+	if [ "${#spawned[@]}" -eq 0 ]; then
+		found=1
+		fail "$(printf 'asking for a background agent left no trace under the relocated root, so the subagent path was never entered:\n%s' \
+			"$(tail -10 "$outside/bg.err")")"
 	fi
 
 	# The control. It accumulates rather than returning, because the violation

@@ -1094,14 +1094,26 @@ That leaves the criterion's own evidence worthless, since a diff across no chang
 
 One observation banked for the rest of the group. Every integration check and three component checks hardcode `agent=claude-code`, which is right for a reference case but means the suite does not start exercising a second agent merely because the table grew. `check_j5_1` is the only check that derives its subjects from `builtins.attrNames agents`. `M8c` and `M8d` decide per property which of the others should follow it.
 
-### M8b — `claude-code`'s subagent and lock fallbacks (Status: PENDING)
+### M8b — `claude-code`'s subagent and lock fallbacks (Status: IMPLEMENTED)
 
 **Scenario**: Journey 2.1 extended — spec Risk 12: `CLAUDE_CONFIG_DIR` has documented fallbacks in subagent and lock paths, and `M1g` counted thirteen candidate variables rather than one.
 
-- [ ] `check_j2_1` extended to exercise a **subagent** run, not only a plain session
-- [ ] Every variable `M1g` found to govern something is set, and any it found to be documented but absent from the binary is **not** set — `M1d` found one of those on `pi`, and setting it would look like coverage while doing nothing
-- [ ] Any surviving fallback path is either confined by other means or becomes a registry entry with both justification fields
-- [ ] Seen to FAIL before the fix
+- [x] `check_j2_1` extended to exercise a **subagent** run, not only a plain session
+- [x] Every variable `M1g` found to govern something is set, and the ten it found inert stay **unset** — measured again through the subagent and background paths, where they are still inert, and setting one turned out not to be free
+- [x] Any surviving fallback path is either confined by other means or becomes a registry entry with both justification fields — every one resolves under `$HOME`, which the description grants nothing of, so it is the first branch, and the plant proves it rather than arguing it
+- [x] Seen to FAIL before the fix
+
+**Measured before starting.** Recorded in [research.md § M8b](research.md#m8b--the-subagent-and-lock-paths-and-why-the-background-service-stays-refused). Three findings changed the shape of the task.
+
+The first is that a subagent path exists that this suite can drive unattended: `claude agents --json` needs neither a credential nor a terminal, and `claude --bg '<task>' </dev/null` is the real spawn. The second is that the background service listens on a socket under `/tmp`, at a path the payload hardcodes and derives as `sha256(configRoot)[0:8]`, so no relocation variable moves it — the session is denied the `bind` and the `connect` and times out. Granting it would mean a recursively writable directory outside the project for a daemon that outlives the session, so it stays refused and is recorded in the handbook as a limitation. The third is that `M1g`'s "the cost of setting a variable that governs nothing is zero" is false: `CLAUDE_JOB_DIR` is an *output* whose basename claude reads back as a job identity, and `CLAUDE_SECURESTORAGE_CONFIG_DIR` set to the empty string falls back to `$HOME/.claude` while unset uses the relocated root. The ten inert variables therefore stay unset, and the criterion's "documented but absent from the binary" half does not arise here — all thirteen are present in 2.1.237, which was `pi`'s case in `M1d`, not claude's.
+
+**Implementation.** The production diff is empty for the third time in this feature. The task was framed as "set the rest of the variables", and the measurement withdrew the reason to; what it left is a check that reaches the paths the variables were supposed to protect.
+
+`check_j2_1` gained two invocations between the `plugin list` arm and the control, so that the existing `$HOME` before-and-after diff covers all three without being rewritten. `agents --json --all` must exit 0 and answer with a JSON array — taken from the first line that opens one, because the supervisor's own `Credential not found` warning shares the stream and treating it as part of the answer failed a working session on the first run. The `--bg` spawn's exit status is deliberately **not** asserted, with the reason in a comment: the socket is refused today, and pinning either outcome would break the check the day the mediation stops being recursive. What is asserted is that the attempt left `daemon*` entries under the relocated root, which is the anti-vacuity guard — a spawn that never started would leave none.
+
+The plant is the two-part one [plan.md](plan.md#planted-violations) already records for this check, and it bit in **three** places: the new background arm first (`asking for a background agent left no trace under the relocated root`), then the control, then the home diff — which named `.claude/daemon/control.key`, `.claude/daemon.log`, `.claude/jobs` and two telemetry files, the daemon state escaping to the home directory rather than staying in the project. That is exactly the fallback spec Risk 12 describes, caught by the arm this task added. Reverted; suite back to `1 of 27 checks failed`, the deliberate `check_sc3` progress bar, and `nix flake check` passes.
+
+Two stale sentences were corrected in place while here: research.md's "the four `XDG_*` roots stay out of `set_vars`", which `M6a` contradicted, and plan.md's sketch comment promising that `M8b` would set the remaining ten.
 
 ### M8c — `opencode` (Status: PENDING)
 

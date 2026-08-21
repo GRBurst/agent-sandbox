@@ -300,9 +300,13 @@ The sketch below is the table's final shape, not its first one. `M3b` wrote only
     binary    = "claude";
     groups    = [ ];                            # the substrate is derived, not inherited (D18)
     # M1g observed which of the thirteen candidates govern: three do, and
-    # together they cover the whole default home layout. The rest are set by
-    # M8b for the paths a one-turn session never reaches. XDG_* is absent
-    # because M1g found claude ignores it entirely, despite the strings count.
+    # together they cover the whole default home layout. M8b then reached the
+    # paths a one-turn session never does — a subagent listing and a background
+    # spawn — and found the other ten still receive nothing, so they stay
+    # unset: setting one is not free, because CLAUDE_JOB_DIR is an output the
+    # agent writes for itself and CLAUDE_SECURESTORAGE_CONFIG_DIR falls back to
+    # the home when set empty. XDG_* is absent because M1g found claude ignores
+    # it entirely, despite the strings count.
     stateVars = w: {
       CLAUDE_CONFIG_DIR             = "${w}/.agents/claude";
       CLAUDE_CODE_TMPDIR            = "${w}/.agents/claude/tmp";

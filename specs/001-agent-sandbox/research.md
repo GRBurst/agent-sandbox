@@ -540,7 +540,7 @@ The control fixes the default precisely. With nothing set, claude created `$HOME
 
 All four `XDG_*` roots received nothing, which falsifies the inference drawn above from `XDG_CONFIG_HOME`'s 26 `strings` occurrences. The only thing that wrote into the relocated `XDG_CONFIG_HOME` was **the mechanism itself**, laying down `nono/profiles` and `nono/profile-drafts` — a supervisor artefact, from outside the boundary, not the agent's. That the shipped `claude` package grants `$HOME/.cache/claude` says what its author expected, not what the binary does.
 
-This is the third time in this feature that occurrence has failed to predict behaviour, after `pi`'s documented-but-absent override in `M1d` and the substitution premise `M1b` falsified. The four `XDG_*` roots stay out of `set_vars`, consistent with D13 and with plan.md's reasoning that a host-pointing `XDG_*` merely relocates the failure.
+This is the third time in this feature that occurrence has failed to predict behaviour, after `pi`'s documented-but-absent override in `M1d` and the substitution premise `M1b` falsified. That claude ignores the four `XDG_*` roots is a fact about claude, not a reason to leave them unset: `M6a` later put all five of `TMPDIR`, `XDG_CACHE_HOME`, `XDG_CONFIG_HOME`, `XDG_DATA_HOME` and `XDG_STATE_HOME` under `$WORKDIR` in `set_vars`, because they are the *shared* roots every agent and every session tool reads, and pointing them at the host would merely relocate the failure. The finding here is narrower than the sentence this replaces: relocating the `XDG_*` roots does nothing for `claude` in particular, so `claude`'s own containment rests entirely on the three variables that do govern.
 
 ### The credential rests inside the configuration root, so relocation alone cannot satisfy FR-7
 
@@ -1844,6 +1844,64 @@ So the pipeline is general in the only sense that matters: one table entry produ
 ### Every check names the reference agent, and that is a decision `M8c` inherits
 
 Worth writing down before the other agents land: `agent=claude-code` is hardcoded in three component checks and in every integration check. That is consistent with the spec making `claude-code` the reference case, and it is not a defect today. It does mean the suite will not exercise a second agent merely because the second agent exists — `check_state_vars` and the rest read the reference name, not the table. `check_j5_1` is the exception, and deliberately so: it derives its sessions from `builtins.attrNames agents`, so it is the one check that grows on its own. `M8c` and `M8d` have to decide, per property, which of the others should follow it rather than assuming they already do.
+
+## M8b — The subagent and lock paths, and why the background service stays refused
+
+Spec Risk 12 names the subagent and lock paths as the ones that resolve the configuration root a second time, and `M1g` had only ever driven a one-turn session. This is what the paths beyond it do.
+
+### A subagent path exists that needs no credential and no terminal
+
+`claude agents --json` is documented as "Print active sessions (interactive and background) as a JSON array and exit (for scripting; does not require a TTY)", and it behaves that way: exit 0 and `[]` with an empty throwaway home, with or without the confinement, with or without a key. `claude -p --bg` is refused by claude itself, with a message that explains the conflict rather than a stack trace. `claude --bg '<task>' </dev/null` is the real spawn, and unconfined it exits 0 without a credential and without a terminal.
+
+Relocated, the background spawn writes all of this under `$CLAUDE_CONFIG_DIR` and nothing at all into `$HOME`:
+
+| what appears | where |
+| --- | --- |
+| `.claude.json`, `backups/` | the relocated root |
+| `daemon/auth/<id>.tokens.json`, `daemon/control.key`, `daemon/dispatch`, `daemon/roster.json` | the relocated root |
+| `daemon.lock`, `daemon.log`, `daemon.status.json` | the relocated root |
+| `jobs/<id>/state.json`, `jobs/<id>/tmp` | the relocated root |
+
+### The ten silent variables stay silent, and setting them is not free
+
+Eight of the ten candidates `M1g` found inert — `CLAUDE_TMPDIR`, `CLAUDE_PROJECT_DIR`, `CLAUDE_SECURESTORAGE_CONFIG_DIR`, `CLAUDE_CODE_PLUGIN_CACHE_DIR`, `CLAUDE_CODE_PLUGIN_SEED_DIR`, `CLAUDE_CODE_ADDITIONAL_DIR`, `CLAUDE_SKILL_DIR`, `CLAUDE_CODE_DEBUG_LOGS_DIR` — were each pointed at an empty scratch directory of its own and a background spawn plus a session listing were run. **Every one received zero entries.** `$HOME` and `XDG_CONFIG_HOME` stayed empty. The paths a one-turn session never reaches still route everything through the configuration root.
+
+That settles the question `M1g` left open, and settles it the other way. `M1g` wrote that "the cost of setting a variable that governs nothing is zero and the cost of missing one is an escape", and both halves are wrong here:
+
+- **`CLAUDE_JOB_DIR` is an output, not an input.** Claude sets it itself when it spawns a background session — `{...e.env, CLAUDE_CODE_SESSION_KIND: "bg", CLAUDE_BG_BACKEND: "daemon", CLAUDE_JOB_DIR: t}` — and `dk()` derives a **job identity** from its basename, ungated by the background-session test that guards most other readers. Setting it from outside hands the agent a fabricated identity for a job that does not exist.
+- **`CLAUDE_SECURESTORAGE_CONFIG_DIR` is worse set than unset.** `mK()` reads `let e = env.CLAUDE_SECURESTORAGE_CONFIG_DIR; if (e !== void 0) return (e || join(homedir(), ".claude")); return Tn()`. Unset, it uses the relocated root. Set to the empty string, it falls back to the home. A variable whose *presence* switches on a home fallback is not free.
+
+So the ten stay unset, and the criterion's other half — "any it found documented but absent from the binary is not set" — does not arise for `claude-code`: all thirteen candidates are present in the 2.1.237 payload. That was `pi`'s case in `M1d`.
+
+### The surviving fallbacks all point at the home, which is already denied
+
+The payload resolves the configuration root a second time in several places, and every one of them falls back to the home rather than to the relocated root:
+
+| expression | fallback |
+| --- | --- |
+| `sQo()`, the IDE lock search list | starts at `join(configRoot, "ide")` and, **when `CLAUDE_CONFIG_DIR` is set**, *appends* `join(homedir(), ".claude", "ide")` |
+| `Kt()`, the subprocess session mirror | `join(CLAUDE_CONFIG_DIR ?? join(homedir(), ".claude"), "projects")` |
+| `Bqy()` | `join(CLAUDE_CONFIG_DIR \|\| homedir(), ".claude<suffix>.json")` |
+| `zRy()` | `SELF_HOSTED_RUNNER_HOST_CONFIG_DIR \|\| CLAUDE_CONFIG_DIR \|\| join(homedir(), ".claude")` |
+
+Relocation *adds* the first of these rather than removing it. That is the shape spec Risk 12 warned about, and it is why the criterion asks for each surviving fallback to be either confined by other means or registered. Here it is the first: the built description carries only `allow` and `read` under `filesystem`, and no string anywhere in it matches `\.claude`, so every one of these paths is denied by the boundary itself. No registry entry is warranted — but the argument is worth nothing unless the check proves it, which is what the extended `check_j2_1` and its plant do.
+
+Contention was measured too, since a lock is the one thing that might reach for a different directory under pressure: eight concurrent `claude agents --json` runs against one relocated root left `$HOME` **completely empty**, produced no stderr at all, and left no surviving `*lock*` or `ide` entry anywhere. `.claude.json.lock` is transient and lives under the configuration root.
+
+### The background service is refused, and the grant that would allow it costs too much
+
+Inside the confinement, `claude --bg` fails — exit 1 after the 45-second timeout, with `Couldn't reach the background service`. Nono's epilogue names the cause exactly: `IPC denial: 448 Unix socket operations blocked`, on `connect` and `bind` against `/tmp/cc-daemon-1000/<hash>/control.sock`.
+
+The path is hardcoded in the payload:
+
+```js
+// /tmp is fixed; only Termux differs, and TMPDIR is never consulted
+join("/tmp", `cc-daemon-${uid}`, sha256(resolve(configRoot)).slice(0, 8))
+```
+
+The per-project component is a digest of the configuration root, so two projects do not collide and FR-8 is not at risk from sharing. But the directory is outside the project, and nono's own help gives the reason not to grant it: `--allow-unix-socket-bind` "implies `--allow` on the parent directory so the kernel can create the socket file", and `--allow-unix-socket-dir-bind` is "non-recursive on macOS and future Linux AF_UNIX mediation; **current Linux Landlock filesystem fallback is recursive**". Granting it would put a recursively writable directory outside the project into the reach, for a daemon that outlives the session — which is the precise shape FR-2's equality-not-containment and the registry's justification fields exist to refuse.
+
+So the background service stays refused. The refusal is clean: `$HOME` is untouched, everything claude does manage to write stays under the relocated root, and the interactive and listing paths are unaffected. It is recorded as a known limitation rather than granted away, and `check_j2_1` deliberately does not assert the spawn's exit status — only that the attempt left its trace inside the boundary — so the check does not break on the day the mediation stops being recursive.
 
 ## M8e — Where each agent reads its declarative extensions from
 
