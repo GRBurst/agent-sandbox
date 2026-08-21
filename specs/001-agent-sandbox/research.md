@@ -1719,6 +1719,42 @@ The valid-token arm cannot be in the check, so the check cannot show a provider 
 - **`/etc/shadow` is the wrong target for the denial half.** It is `0640 root:shadow`, so it says `Permission denied` outside the sandbox too. The file has to be one the harness made world-readable.
 - The proxy resets the connection after the body, so the reader appends `cat: -: Connection reset by peer` to what it captured.
 
+## M7d — What a second authentication changes, and what it does not
+
+Measured on x86_64-linux with nono 0.74.0, against the shipped `.#confinement-claude-code`. Two authentications in one scratch project, each one the entry point followed by an `env -0` dump out of a session, with a *different* canary in the calling environment each time, against one shared `$HOME` and one shared state root.
+
+### There is no login to run twice, so "authenticate again" is the value supplied again
+
+`M7b` established that nothing logs in: the credential is a value in the supervisor's environment and the session is handed a substitute. Repeating that is repeating the supply. The second authentication deliberately supplies a **different** canary, because a real second login would mint a new token — so anything that remembers which login produced the state shows up as a difference rather than being masked by using the same value twice.
+
+### The entry point writes one file, and writes it the same way both times
+
+| Where | After the first authentication | After the second |
+| --- | --- | --- |
+| the project | `.agents/`, `.agents/git/`, `.agents/git/config` | byte-identical, by sha256 |
+| `$HOME` | nothing beyond what the harness planted | nothing |
+| `CLAUDE_CONFIG_DIR` | not created | not created |
+
+`claude --version` exits 0 in about a second and creates no agent configuration at all. The only thing authentication leaves at rest is FR-23's create-if-absent copy of the git identity, and its content does not depend on the run that wrote it.
+
+### Five values are session-scoped, and nothing else varies
+
+Of the 42 environment entries that cross, exactly these differ between the two sessions:
+
+| Value | Carried by |
+| --- | --- |
+| the 64-hex substitute | `ANTHROPIC_API_KEY`, `NONO_PROXY_TOKEN`, `http_proxy`, `HTTP_PROXY`, `https_proxy`, `HTTPS_PROXY` |
+| the loopback authority `127.0.0.1:<ephemeral port>` | `ANTHROPIC_BASE_URL` and the four proxy variables |
+| the interception session directory | `SSL_CERT_FILE`, `REQUESTS_CA_BUNDLE`, `NODE_EXTRA_CA_CERTS`, `CURL_CA_BUNDLE`, `GIT_SSL_CAINFO` |
+| the browser shim directory | `BROWSER`, and one `PATH` element |
+| the capability file | `NONO_CAP_FILE` |
+
+Everything else is identical, `CLAUDE_CONFIG_DIR`, `CLAUDE_CODE_TMPDIR` and the proxy exemptions included. Each of the five is a property of *a session* rather than of *an authentication*, so a check for Rep3 masks them and compares what is left. Masking with a long unique string taken from that session's own dump, rather than with a fragment like a bare port number, is what stops the mask from erasing more than it was aimed at.
+
+### The state root is excluded, and the exclusion is D13's doing
+
+Every session appends an audit record and a session directory under `XDG_STATE_HOME`. That is the decision D13 asked for, so two authentications leaving two records there is the feature working. The comparison is over the project and over the environment; the state root cannot be in it.
+
 ## M8e — Where each agent reads its declarative extensions from
 
 **Partial.** `opencode` is measured; `claude-code` and `pi` are not.

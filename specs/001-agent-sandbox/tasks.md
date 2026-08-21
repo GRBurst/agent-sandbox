@@ -958,15 +958,32 @@ The full suite is `1 of 22 checks failed`, the one being `check_sc3`, the delibe
 
 The full suite is `1 of 23 checks failed`, the one being `check_sc3`, the deliberate progress bar, now at 9 missing scenarios.
 
-### M7d — Authenticating twice is harmless (Status: PENDING)
+### M7d — Authenticating twice is harmless (Status: IMPLEMENTED)
 
 **Scenario**: Rep3
 
 **RED**: `check_rep3` authenticates twice and compares the resulting state.
 
-- [ ] Check written and seen to FAIL
-- [ ] **Control**: the state compared is non-empty and contains the captured credential, so two absent states cannot pass as two indistinguishable ones ([D9](plan.md#d9))
-- [ ] Violation planted (authentication records the session it ran in), seen to FAIL, reverted, recorded in plan.md
+- [x] Check written and seen to FAIL
+- [x] **Control**: the state compared is non-empty and contains the captured credential, so two absent states cannot pass as two indistinguishable ones ([D9](plan.md#d9))
+- [x] Violation planted (authentication records the session it ran in), seen to FAIL, reverted, recorded in plan.md
+
+**Measured before starting** ([`research.md § M7d`](research.md#m7d--what-a-second-authentication-changes-and-what-it-does-not)). Two authentications in one project, each the entry point followed by an environment dump, with a different canary in the calling environment each time.
+
+- **The entry point writes one file, `.agents/git/config`, and writes it identically both times.** `claude --version` creates no agent configuration at all, and the fake `$HOME` gains nothing. So the at-rest half of the state is already indistinguishable, by sha256.
+- **Five values are session-scoped and nothing else varies**, out of 42 crossed entries: the substitute, the loopback authority, the interception session directory, the browser shim directory and the capability file. Each is a property of a session rather than of an authentication, so they are masked and the rest compared.
+- **The state root cannot be in the comparison.** [D13](plan.md#d13) has nono append an audit record and a session directory per session, which is the feature working.
+
+**Implementation.** The production diff is empty again; the task is the check, plus two file-level helpers, `project_state_manifest` and `env_dump_value`.
+
+- **"Authenticate again" is the value supplied again**, deliberately a *different* one. `M7b` established that nothing logs in, so repeating the login is repeating the supply — and a real second login would mint a new token, so using the same canary twice would mask exactly the dependence the scenario asks about.
+- **Each authentication is observed twice**, once at rest and once in the environment, because the two halves of the state are not readable from a single vantage point.
+- **The whole environment is compared**, not a credential-shaped subset: the scenario does not get to choose which variables count. What makes that tractable is that each mask is a long unique string taken from that session's own dump, never a fragment like a bare port.
+- **The at-rest half is content-addressed** — `find` piped through `sha256sum` — so a file rewritten with identical bytes is the same state, and the check's own probe directory is pruned because [`research.md § M7b`](research.md#m7b--authenticating-once-serves-every-project-and-every-agent) requires it to sit inside the granted workdir.
+- **The control is that both halves are non-empty in the right way**: each normalized environment must carry the exact line `ANTHROPIC_API_KEY=<substitute>`, and each manifest must carry `./.agents/git/config`. A guard on the two raw substitutes being different keeps the masking from being a way to erase the difference rather than normalize it.
+- **The planted RED bit in one place**, the at-rest half. A file written under the project cannot show up in a crossed environment — which is the argument for asserting both halves rather than either alone.
+
+The full suite is `1 of 24 checks failed`, the one being `check_sc3`, the deliberate progress bar, now at 8 missing scenarios.
 
 ### M7e — The toolchain survives interception (Status: PENDING)
 

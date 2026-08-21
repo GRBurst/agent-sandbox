@@ -2815,3 +2815,254 @@ check_r8() {
 
 	[ "$found" -eq 0 ]
 }
+
+# The state a session left inside the project, content-addressed, so a file
+# rewritten with the same bytes is the same state while a file recording which
+# session wrote it is not. The harness's own scratch is pruned: the probe script
+# and its dump live inside the granted workdir, per research.md § M7b, and are
+# this check's residue rather than the environment's.
+project_state_manifest() {
+	local root=$1 path
+	(
+		cd "$root" || exit 1
+		find . -mindepth 1 -path ./harness -prune -o -print | sort | while IFS= read -r path; do
+			if [ -d "$path" ]; then
+				printf 'dir   %s\n' "$path"
+			elif [ -f "$path" ]; then
+				printf 'file  %s  %s\n' "$(sha256sum <"$path" | cut -d' ' -f1)" "$path"
+			else
+				printf 'other %s\n' "$path"
+			fi
+		done
+	)
+}
+
+# One variable's value out of an `env -0` dump, by name.
+env_dump_value() {
+	local file=$1 name=$2 entry
+	local -a entries=()
+	mapfile -d '' -t entries <"$file"
+	for entry in "${entries[@]}"; do
+		if [ "${entry%%=*}" = "$name" ]; then
+			printf '%s' "${entry#*=}"
+			return 0
+		fi
+	done
+	return 1
+}
+
+# Rep3: authenticating twice is harmless.
+#
+# There is no login to run twice. M7b measured the whole of "this machine is
+# authenticated" to be a value in the calling environment: nothing logs in, and
+# the supervisor mints a substitute from that value for each session it starts.
+# So "authenticate again" is that value being supplied again — and a second
+# login yields a *new* token, which is why the second authentication here
+# carries a different one. That is what the second canary is for: anything in
+# the resulting state that depended on which login produced it would differ
+# between the two, and the comparison below would say so.
+#
+# Each authentication is observed twice, because the state has two halves and
+# neither is readable from the other's session. The entry point a user types is
+# what leaves state at rest, and `claude --version` is the whole of a start —
+# the wrapper's own writes happen and the agent exits in about a second, as
+# check_r5 also relies on. A probe session started from the same description is
+# what the state handed to the agent is read out of.
+#
+# "Indistinguishable" is then asserted as: the two environments are identical
+# once the values the supervisor mints per session are replaced by what they
+# are. The *whole* environment rather than a credential-shaped subset of it,
+# because the scenario does not get to choose which variables count. Measured,
+# the only entries that differ between two sessions are the substitute, the
+# loopback authority it is served on, the interception session directory, the
+# browser shim and the capability file — every one of them session-scoped by
+# D14's own table — so a release that made anything else vary per session is
+# something this check should notice rather than tolerate. Each mask is a long
+# unique string taken out of that session's own dump, never a fragment like a
+# bare port number that could match somewhere else in it.
+#
+# The state root is deliberately not compared. nono writes an audit record per
+# session there by design (D13), outside every project, so two authentications
+# must differ there and a check that compared it would be asserting the opposite
+# of the decision.
+check_rep3() {
+	local agent=claude-code entry=claude credvar=ANTHROPIC_API_KEY
+	local outside home proj cfg entry_dir env_pkg dump
+	local real value authority rc i k entry found=0
+	local FIXTURE_PROFILE FIXTURE_SUBSTRATE FIXTURE_BASH
+	local -a SESSION_ENV
+	# Assigned rather than only declared, per check_j5_1: `local -a` leaves an
+	# array unset, and `${#arr[@]}` on an unset name is an error under `set -u`.
+	local -a crossed=() needles=() masks=() tokens=()
+
+	session_fixture "$agent" || return 1
+
+	# The flake attribute of an entry point is the binary's name, not the
+	# agent's, as recorded on check_r4.
+	entry_dir=$(pinned_bin "$entry") || {
+		fail "the entry point $entry does not build"
+		return 1
+	}
+	env_pkg=$(substrate_member "$FIXTURE_SUBSTRATE" env) || {
+		fail "the substrate for $agent provides no env, so a session cannot print its own environment"
+		return 1
+	}
+
+	outside=$(mktemp -d -p "${XDG_RUNTIME_DIR:-/tmp}" agent-sandbox-rep3.XXXXXX)
+	# shellcheck disable=SC2064
+	trap "rm -rf '$outside'" RETURN
+
+	# Outside the project, per check_r1. The config root is the entry point's
+	# own requirement: it creates $XDG_CONFIG_HOME rather than defaulting it.
+	home="$outside/home"
+	proj="$outside/work/proj"
+	cfg="$outside/cfg"
+	mkdir -p "$home" "$proj/harness" "$cfg"
+
+	# A host identity, so the entry point's create-if-absent copy (FR-23) has
+	# something to write and the at-rest half has something to compare. Without
+	# it the entry point writes nothing at all and two empty manifests would
+	# match for the wrong reason — which the control below is what catches.
+	printf '[user]\n\tname = Rep3 Person\n\temail = rep3@example.invalid\n' \
+		>"$home/.gitconfig"
+
+	session_env "$outside/state"
+	cat >"$proj/harness/probe-env.sh" <<-'PROBE'
+		"$1" -0 >"$2"
+	PROBE
+
+	for i in 1 2; do
+		# Distinct per authentication, and shaped like the real thing: a second
+		# login does not hand back the first login's token.
+		real="sk-ant-real-canary-$i-$RANDOM$RANDOM"
+
+		# The start a user performs, in the project, through the entry point.
+		(
+			cd "$proj" || exit 1
+			env "${SESSION_ENV[@]}" "HOME=$home" "XDG_CONFIG_HOME=$cfg" \
+				"$credvar=$real" \
+				"$entry_dir/$entry" --version
+		) >"$outside/entry.$i.out" 2>"$outside/entry.$i.err" && rc=0 || rc=$?
+		if [ "$rc" -ne 0 ]; then
+			found=1
+			fail "$(printf 'authentication %s started no session through the entry point (exit %s), so there is no state it produced:\n%s' \
+				"$i" "$rc" "$(tail -n 5 "$outside/entry.$i.err")")"
+			continue
+		fi
+
+		# The same description, with a shell in it, so the state the agent is
+		# handed can be read.
+		dump="$proj/harness/env.$i.bin"
+		env "${SESSION_ENV[@]}" "HOME=$home" "XDG_CONFIG_HOME=$cfg" \
+			"$credvar=$real" \
+			"$(pinned_bin nono)/nono" run \
+			--profile "$FIXTURE_PROFILE" --workdir "$proj" --allow-cwd -- \
+			"$FIXTURE_BASH/bin/bash" "$proj/harness/probe-env.sh" \
+			"$env_pkg/bin/env" "$dump" \
+			>"$outside/probe.$i.out" 2>"$outside/probe.$i.err" && rc=0 || rc=$?
+		if [ ! -s "$dump" ]; then
+			found=1
+			fail "$(printf 'authentication %s printed no environment (exit %s), so it observes nothing:\n%s' \
+				"$i" "$rc" "$(tail -n 5 "$outside/probe.$i.err")")"
+			continue
+		fi
+		mapfile -d '' -t crossed <"$dump"
+
+		needles=()
+		masks=()
+
+		value=$(env_dump_value "$dump" "$credvar") || value=
+		if [ -z "$value" ]; then
+			found=1
+			fail "$(printf 'authentication %s handed the session no credential, so there is no authenticated state to compare' "$i")"
+			continue
+		fi
+		if [[ ! $value =~ ^[0-9a-f]{64}$ ]]; then
+			found=1
+			fail "$(printf 'the credential authentication %s handed the session is not of the substitute form: %s character(s), not 64 lowercase hex' \
+				"$i" "${#value}")"
+		fi
+		tokens+=("$value")
+		needles+=("$value")
+		masks+=('<substitute>')
+
+		# The loopback authority the substitute is served on, masked as a unit
+		# rather than by its port, which is short enough to occur elsewhere.
+		if value=$(env_dump_value "$dump" ANTHROPIC_BASE_URL) && [ -n "$value" ]; then
+			authority=${value#*://}
+			authority=${authority%%/*}
+			needles+=("$authority")
+			masks+=('<loopback-authority>')
+		fi
+		# The interception session directory (M7e's subject) and the browser
+		# shim are per-session directories under stable parents, so the
+		# directory is what is masked and the file name is still compared.
+		if value=$(env_dump_value "$dump" SSL_CERT_FILE) && [ -n "$value" ]; then
+			needles+=("$(dirname -- "$value")")
+			masks+=('<intercept-session>')
+		fi
+		if value=$(env_dump_value "$dump" BROWSER) && [ -n "$value" ]; then
+			needles+=("$(dirname -- "$value")")
+			masks+=('<browser-shim>')
+		fi
+		if value=$(env_dump_value "$dump" NONO_CAP_FILE) && [ -n "$value" ]; then
+			needles+=("$value")
+			masks+=('<capability-file>')
+		fi
+
+		for entry in "${crossed[@]}"; do
+			for ((k = 0; k < ${#needles[@]}; k++)); do
+				entry=${entry//"${needles[k]}"/${masks[k]}}
+			done
+			printf '%s\n' "$entry"
+		done | sort >"$outside/state.$i"
+
+		project_state_manifest "$proj" >"$outside/at-rest.$i"
+	done
+
+	# Bookkeeping, so an authentication that fell out of the loop early cannot
+	# leave the comparison below reading one state twice or none at all.
+	if [ "${#tokens[@]}" -ne 2 ]; then
+		fail "$(printf '%s of 2 authentications produced a state, so there is no second one to be indistinguishable from' \
+			"${#tokens[@]}")"
+		return 1
+	fi
+
+	# The control (D9), and first: both halves are non-empty and the
+	# authenticated one carries the credential, so two absent states cannot pass
+	# as two indistinguishable ones.
+	for i in 1 2; do
+		if ! grep -qFx "$credvar=<substitute>" "$outside/state.$i"; then
+			found=1
+			fail "$(printf 'the state authentication %s produced does not carry the captured credential, so comparing it to the other proves nothing' "$i")"
+		fi
+		if ! grep -qF '  ./.agents/git/config' "$outside/at-rest.$i"; then
+			found=1
+			fail "$(printf 'authentication %s left nothing at rest in the project, so two at-rest states matching compares nothing' "$i")"
+		fi
+	done
+
+	# And the masking is a reduction rather than a no-op: the substitute is
+	# minted per session (check_j5_1), so if these two were equal the states
+	# would match for a reason this scenario does not claim.
+	if [ "${tokens[0]}" = "${tokens[1]}" ]; then
+		found=1
+		fail 'both authentications were handed the same substitute, so the two states are equal before anything is masked'
+	fi
+
+	# The scenario. Both halves, because neither implies the other: an
+	# environment that varied per login would leave the project untouched, and a
+	# record of which session authenticated would leave the environment alone.
+	if ! diff -q "$outside/state.1" "$outside/state.2" >/dev/null; then
+		found=1
+		fail "$(printf 'authenticating a second time produced a different authenticated state:\n%s' \
+			"$(diff -- "$outside/state.1" "$outside/state.2" || true)")"
+	fi
+	if ! diff -q "$outside/at-rest.1" "$outside/at-rest.2" >/dev/null; then
+		found=1
+		fail "$(printf 'authenticating a second time left different state at rest inside the project:\n%s' \
+			"$(diff -- "$outside/at-rest.1" "$outside/at-rest.2" || true)")"
+	fi
+
+	[ "$found" -eq 0 ]
+}
