@@ -1532,6 +1532,58 @@ The intercept directory is also **removed when the session ends**: `find "$XDG_S
 
 `nix build .#nono` is the way to reach the pinned supervisor from a harness; `substrate_member`'s loop over `store-paths` testing `[ -x "$p/bin/bash" ]` is the way to reach a `bash`, and a name regex is not, because the `-doc` output sorts first and carries no `bin/`.
 
+## M7a — A readable credential is a substitute
+
+Measured on x86_64-linux with nono 0.74.0, against the shipped `.#confinement-claude-code`, from harnesses that ran a bash probe out of the substrate and printed `VAR :: <name> :: <value|<unset>>` for `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_BASE_URL`, `CLAUDE_CODE_API_BASE_URL` and `NONO_CAP_FILE`. Each arm is one `nono run --profile <file> --workdir <scratch project> --allow-cwd`, with the fake `$HOME`, the ambient `XDG_STATE_HOME` and the config root as siblings of the project under `$XDG_RUNTIME_DIR`.
+
+### The arrangement is one line, and it is nono's own built-in route
+
+`network.credentials = [ "anthropic" ]` and nothing else. `anthropic` is one of six service names nono ships in its `network-policy.json` — the others are `gemini`, `github`, `gitlab`, `google-ai` and `openai` — so the upstream, the injected header and the endpoint policy are all nono's rather than ours.
+
+| Arm | `network.credentials` | supervisor's `ANTHROPIC_API_KEY` | child's `ANTHROPIC_API_KEY` | child's `ANTHROPIC_BASE_URL` | banner |
+| --- | --- | --- | --- | --- | --- |
+| A | absent | unset | `<unset>` | `<unset>` | `net outbound allowed` |
+| I | `["anthropic"]` | unset | `<unset>` | `http://127.0.0.1:35467/anthropic` | `net proxy`, plus a `credential_not_found` warning |
+| J | `["anthropic"]` | `sk-real-canary-4711` | `6b0edabc…5a0adb8d` (64 hex) | `http://127.0.0.1:45233/anthropic` | `net proxy` |
+
+Arm J is Journey 4.1 in one invocation. The real value is in the supervisor's environment, which is what "the user has authenticated once on the machine" looks like on Linux where there is no keychain; the session reads a **64-lowercase-hex substitute** in its place; and the real value appears **nowhere** in the child's environment, nowhere in the resolved capability manifest the session can read, and nowhere in the project directory afterwards — all three searched for the canary string, all three absent.
+
+Three things follow that the plan did not know.
+
+**No `custom_credentials`, no `credential_capture` and no `credential_providers` are needed.** The elaborate surface `M7` measured is for services nono does not ship a policy for. For the one agent this feature has, the arrangement is a single service name, and `D1`'s "the leak registry stays empty provided `credential_key` resolves through `env://` or `cmd://`" is satisfied without writing a `credential_key` at all.
+
+**A missing credential is loud, and the session still starts.** Arm I prints `Credential not found for route 'anthropic' — managed-credential requests on this route will be denied until the credential is available. Looked for env var 'ANTHROPIC_API_KEY' (not set).` both as a `Proxy credential warnings:` block and as a `credential_not_found /anthropic` line in the capability banner. That is P9's visible failure arriving from the mechanism, and it is also the observable `M7c` needs for R8: an authentication failure that names itself and is nothing like a path denial. The message's keychain advice is macOS-specific and misleading on Linux, which is worth a line in the handbook.
+
+**The substitute is per session.** Two identical runs gave `2bd2c52f…` and `1b48ba31…`, so a substitute copied out of one session is not even the string the next session sees — a stronger property than FR-6 asks for, and one `check_j4_1` can assert cheaply.
+
+### The route injects two variables, and `check_r3` has to learn about them
+
+`check_r3` asserts that every name crossing into a session is matched by an `allow_vars` pattern, is a key of `set_vars`, or is one of nono's three own injects — `PATH`, `BROWSER` and `NONO_CAP_FILE`. Enabling the route adds **two more**: `ANTHROPIC_API_KEY` and `ANTHROPIC_BASE_URL`. Neither is in `allow_vars` (`ANTHROPIC_API_KEY` deliberately is not, per FR-5) and neither is in `set_vars`, so the check fails the moment the route ships.
+
+For a route defined in our own description the names would be derivable, from `credential_routes[].env_var` and `.base_url_env_var` or from a `custom_credentials` entry's `env_var`. For a **built-in** service they are not: they live in nono's `network-policy.json`, and the description says only `"anthropic"`. Reading them back out of the session's resolved capability manifest was tried and does not work either — `NONO_CAP_FILE` is a 44 KiB JSON document, but it is written progressively and a probe reading it from inside the session gets an unterminated object (`Unfinished JSON term at EOF`), so it is not a usable source. What the manifest *did* answer is that the real canary is absent from it.
+
+So the two names have to be written down, and that is the one place a literal is the criterion: the assertion is precisely "these two names arrive because this repository enabled this route, and no third one does". A third appearing is a change in nono worth failing over, which is the same argument the check already makes for `PATH`, `BROWSER` and `NONO_CAP_FILE`.
+
+### `credential_providers` is the wrong mechanism here, and two arms say why
+
+The plan's `D1` assigns `claude-code` the OAuth branch, `credential_providers` + `credential_routes`. Measured, that branch is real but not usable for this feature:
+
+- The shape is exacting. `token_endpoints` items are **objects**, not URLs — `["https://platform.claude.com/v1/oauth/token"]` gives `Profile parse error: invalid type: string …, expected struct CredentialProviderTokenEndpoint` and exit 1. The accepted form is `{host, path, response_fields}`, `response_fields` an array of `{path, kind?}` with `minItems 1`. A malformed credential arrangement therefore **refuses to start rather than starting inert**, which is a good property and the opposite of the command-line `--credential` form.
+- With a correct provider and route, `ANTHROPIC_BASE_URL` is set but **`ANTHROPIC_API_KEY` stays `<unset>`** and the banner stays `net outbound allowed`. The phantom exists only once a token exchange has actually been captured, so **the OAuth branch cannot be exercised unattended**, and a check written against it would assert "every readable value is a substitute" over an empty set of readable values. That is the vacuity the plan's own control exists to prevent.
+- It cannot be mocked either. `token_endpoints[].host` must be HTTPS — `http://127.0.0.1:8099` gives `Profile parse error: credential_providers.mock.token_endpoints[0].host '…' must use https` — so a loopback token server is not available, and there is no way to produce a capture without the real provider.
+
+A `credential_store` of kind `file_json` pointing inside the project (`$WORKDIR/.agents/claude/.credentials.json`, `phantom_fields` naming `claudeAiOauth.accessToken`) *is* accepted, and nono creates the parent directory. That is worth remembering for `M7b`, because it is the mechanism that would put phantoms rather than real tokens into the agent's own credential file — which is where SC-6 bites hardest.
+
+### Two more findings about the description form
+
+A service name in `network.credentials` with no matching definition is **refused**: `Configuration parse error: Unknown credential service '__bogus__'. Available: ["anthropic", "gemini", "github", "gitlab", "google-ai", "openai"]`, exit 1. That **corrects `M7a`'s third criterion**, which was written from the measurement that `nono run --credential __bogus__` exits 0 and yields an unauthenticated session. The command-line form is silent; the description form is not. So an arrangement that lives in the description gets P9's visible failure from the mechanism, and the wrapper needs no validation of its own — the criterion is met by not using the flag.
+
+The substitute carries **no `nono_` prefix**. `M1b` recorded the sandbox holding a phantom `nono_<64 hex>`; what a proxy credential route hands the child is bare 64 hex. The prefixed form presumably belongs to `credential_providers` phantoms, which no arm here got far enough to see.
+
+### Method note
+
+`env VAR=VAL … cmd` stops treating arguments as assignments at the first one that is not `VAR=VAL`, so every flag goes after the command name. And a probe that reads `NONO_CAP_FILE` with a `while IFS= read -r` loop gets a truncated document; if the manifest is ever needed, it has to be read after the session rather than during it.
+
 ## M8e — Where each agent reads its declarative extensions from
 
 **Partial.** `opencode` is measured; `claude-code` and `pi` are not.

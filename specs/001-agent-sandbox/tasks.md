@@ -857,7 +857,7 @@ Gated on `M1b` and `M1g`. [D1](plan.md#d1) resolved to the branch where the real
 
 - [ ] Check written and seen to FAIL
 - [ ] **Control**: the real value is present in the supervisor's store in the same run, so a run in which no credential was captured at all cannot pass as one where the substitution held ([D9](plan.md#d9))
-- [ ] The wrapper validates the credential service name itself, because `nono run --credential __bogus__` exits 0 and yields an unauthenticated session rather than an error (P9)
+- [ ] The credential service name is validated before a session starts, so a typo cannot yield a silently unauthenticated session (P9). **The criterion was written as "the wrapper validates it itself", and the measurement below withdraws that**: the command-line `--credential` form is silent, but a name in the description is refused with the list of available services, so the requirement is met by putting the arrangement in the description and never using the flag
 - [ ] SC-6 is asserted over the whole project directory rather than only the agent's own state: a value that authenticates from outside the boundary, at rest anywhere inside the checkout, fails the check
 - [ ] The live-rejection half is recorded in the coverage gap, not silently skipped
 - [ ] The registry stays empty; if `M1g` found a path that forces an entry, it carries both justification fields
@@ -867,7 +867,15 @@ Gated on `M1b` and `M1g`. [D1](plan.md#d1) resolved to the branch where the real
 
 - `CustomCredentialDef` requires only `upstream`, but **`env_var` becomes required as soon as `credential_key` is a URI manager reference** — `op://`, `bw://`, `apple-password://`, `file://`, `cmd://` — and is derived only for `env://`. So the arrangement's shape is decided by which scheme the credential comes from, and `env://` is the one that needs no second field.
 - `credential_key` is mutually exclusive with `auth`, `aws_auth` and `spiffe`.
-- A bogus service name still exits 0 at 0.74.0, with nothing in either stream naming it. The third criterion above is therefore live, and not an artefact of the 0.73.0 it was first measured against.
+- A bogus service name on the **command line** still exits 0 at 0.74.0, with nothing in either stream naming it, so that half of `M1b`'s finding survives.
+
+**Measured for this task**, in [`research.md § M7a`](research.md#m7a--a-readable-credential-is-a-substitute). Five findings, each of which changes what this task builds:
+
+- **The arrangement is one line**: `network.credentials = [ "anthropic" ]`, one of six service names nono ships a policy for. With the real value in the supervisor's environment the child reads a **64-lowercase-hex substitute** in `ANTHROPIC_API_KEY`, the banner says `net proxy`, and the canary appears in neither the child's environment, nor the resolved capability manifest, nor the project directory afterwards. No `custom_credentials`, no `credential_capture` and no `credential_providers` are needed, and the registry stays empty without a `credential_key` being written at all.
+- **`credential_providers` cannot be used here**, which withdraws half of [D1](plan.md#d1). With a correct provider and route the base URL is mediated but the phantom does not exist until a token exchange has been captured, so the OAuth branch **cannot be exercised unattended** and a check written against it would assert the substitute property over an empty set. It cannot be mocked either, because `token_endpoints[].host` must be HTTPS.
+- **A missing credential is loud and the session still starts** — `Credential not found for route 'anthropic' … Looked for env var 'ANTHROPIC_API_KEY' (not set)`, as both a warning block and a `credential_not_found` line in the capability banner. That is P9 arriving from the mechanism, and it is also the observable `M7c` needs. Its keychain advice is macOS-specific and misleading on Linux.
+- **The substitute is per session**, so a value copied out of one session is not even the string the next session sees.
+- **The route injects two variables**, `ANTHROPIC_API_KEY` and `ANTHROPIC_BASE_URL`, and `check_r3` fails the moment it ships. For a built-in service the names are nono's rather than ours and are not derivable from the description, and the session's capability manifest is unreadable from inside, so the two names must be written down — the one place here where the literal *is* the criterion, exactly as `PATH`, `BROWSER` and `NONO_CAP_FILE` already are in that check.
 
 ### M7b — Authenticating once serves every project, and every agent (Status: PENDING)
 
