@@ -808,6 +808,14 @@ The scenario already holds for `claude-code`, so the first criterion's FAIL has 
 - [ ] **Control**: each session's write into its *own* checkout is present afterwards, so two sessions that both did nothing cannot pass as two sessions that did not interfere ([D9](plan.md#d9))
 - [ ] Violation planted (grant the sibling checkout), seen to FAIL, reverted, recorded in plan.md
 
+**Measured before starting**, recorded under [`M6b`](research.md#m6b--two-concurrent-projects-share-nothing). Three things.
+
+**Journey 3.1 already holds, run genuinely concurrently.** Two `git init`ed checkouts, one fake `$HOME`, one config root and **one** shared ambient `XDG_STATE_HOME` — the arrangement a consumer is actually in — both started with `&` and joined with `wait`. Both exited 0; each project gained only its own `.agents/claude/.claude.json` and a timestamped backup; each other's diff was empty in both directions; the fake `$HOME` diff was empty; neither session's stderr named the other's path; and each granted reach carried exactly one project, its own. So the only RED available here is a planted one, as with every task in `M5`.
+
+**Risk 16's two premises come apart, and only one of them is real.** The shared supervisory state directory exists and is contended for — `$XDG_STATE_HOME/nono/audit/ledger.lock` is created, so nono guards the shared ledger rather than assuming one writer. The loopback port the risk also names was **not observed at all**: no port appears in either session's output and nothing matching `lock|contend|busy|port|address in use|conflict|retry` was printed by either. The check should assert the outcome the risk is about rather than instrument a port that may not exist.
+
+**`check_j1_1`'s selection idiom does not carry over, and the correction is this task's first design decision.** Each session leaves **three** audit records, not one: `true` and `sh` — the pre-flight's enforceability probe and its companion, each carrying the 128 store paths and no workdir — and the agent itself, carrying 129. So "the one record whose `.command[0]` ends in `/bin/claude`" is two records once there are two sessions. A record carries no working directory either: its keys are `audit_attestation audit_event_count audit_integrity command ended executable_identity exit_code merkle_roots network_events session_id snapshot_count started tracked_paths`, with no `cwd`, `workdir` or `working_directory`. **The selection must therefore be by the project path in `tracked_paths`** — require exactly one record per project, then compare the two sets against each other, so the assertion is a comparison between the two sessions rather than a restatement of how each was found.
+
 ______________________________________________________________________
 
 ## M7 — Credentials

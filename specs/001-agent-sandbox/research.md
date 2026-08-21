@@ -1392,6 +1392,40 @@ A probe script must live **inside the granted workdir**. Written to the scratch 
 
 The identity file `.agents/git/config` was **not** written by any of these runs, and that is an artefact of the developing environment rather than a defect. The wrapper copies it with `git config --global --get`, and this repository's own agent session is itself confined by an outer sandbox that denies `~/.gitconfig`, so both values come back empty and the wrapper correctly writes nothing. `check_r10` measures the copy against a planted `$HOME/.gitconfig` and is unaffected.
 
+## M6b — Two concurrent projects share nothing
+
+Measured on x86_64-linux with nono 0.74.0 and `claude-code` 2.1.237, through the built entry point, with two `git init`ed checkouts, one fake `$HOME`, one config root and **one** ambient `XDG_STATE_HOME` shared between both — which is the arrangement a consumer is actually in, and the one spec Risk 16 is about. Both sessions were started with `&` and joined with `wait`, so they were genuinely concurrent rather than sequential.
+
+### Journey 3.1 already holds, and nothing contended
+
+| Observable | Result |
+| --- | --- |
+| Both exit statuses | `0` and `0` |
+| Each project's diff | its own `.agents/claude/.claude.json` and one timestamped backup, and nothing else |
+| The other project's diff | empty, in both directions |
+| The fake `$HOME` diff | empty |
+| Either project's path in the other session's stderr | absent, in both directions |
+| Anything matching `lock|contend|busy|port|address in use|conflict|retry` in either stderr | nothing |
+| Granted reach, non-store lines | `r+w <root>/alpha (dir)` for one and `r+w <root>/beta (dir)` for the other, plus the 34 system/group paths and `net outbound allowed` — neither names the other |
+
+So both halves of FR-8 hold as shipped, and `M6b` is another task whose only available RED is a planted one.
+
+**Risk 16's two premises come apart.** The shared supervisory state directory is real — `$XDG_STATE_HOME/nono/` gained `audit/`, `sessions/` and, notably, **`audit/ledger.lock`**, so nono guards the shared ledger with a lock rather than assuming one writer. The loopback port the risk also names was **not observed**: nothing in either session's output mentions a port, and two concurrent sessions produced no contention message of any kind. The risk should be narrowed to what was measured rather than left as written.
+
+### Three audit records per session, so `check_j1_1`'s selection idiom does not carry over
+
+Each session leaves **three** records under `$XDG_STATE_HOME/nono/audit/*/session.json`, not one:
+
+| `.command[0]` | `.tracked_paths` |
+| --- | --- |
+| `true` | 128 — the store only |
+| `sh` | 128 — the store only |
+| `/nix/store/…-claude-code-2.1.237/bin/claude` | 129 — the store plus the one project |
+
+The `true` record is the pre-flight's enforceability probe and the `sh` record is raised alongside it; neither is granted a workdir, which is why both are one path short. `check_j1_1` selects "the one record whose `.command[0]` ends in `/bin/claude`" and requires exactly one, which is sound for a single session and **wrong for two** — two concurrent sessions leave two such records.
+
+A record carries no working directory. Its keys are `audit_attestation audit_event_count audit_integrity command ended executable_identity exit_code merkle_roots network_events session_id snapshot_count started tracked_paths`, and `.cwd`, `.workdir` and `.working_directory` are all absent. **So a two-session check must select by the project path appearing in `tracked_paths`**, and that is also the assertion it wants to make: the record naming `alpha` names no `beta` path and the record naming `beta` names no `alpha` path. Selecting by project and asserting on the project would be circular if the sets were built from the same source, so the check must require exactly one record per project first, then compare the two sets against each other.
+
 ## M8e — Where each agent reads its declarative extensions from
 
 **Partial.** `opencode` is measured; `claude-code` and `pi` are not.
