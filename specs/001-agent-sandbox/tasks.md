@@ -1033,7 +1033,7 @@ The full suite is `1 of 25 checks failed`, the one being `check_sc3`, the delibe
 
 ______________________________________________________________________
 
-### M7f — A commit needs no key (Status: PENDING)
+### M7f — A commit needs no key (Status: IMPLEMENTED)
 
 **Scenario**: Journey 6.2, R11
 
@@ -1045,14 +1045,26 @@ Unsigned commits are the default, and a key that is genuinely needed arrives fro
 
 **RED**: `check_j6_2` and `check_r11`, in one session, each the other's control ([D9](plan.md#d9)).
 
-- [ ] `check_j6_2`: a commit made inside the session exists afterwards, carries no signature, and the configuration this environment wrote is confirmed not to ask for one (FR-24)
-- [ ] `check_r11`: in a checkout whose *own* configuration demands a signature, the commit fails, the message names the key material that could not be reached, and no commit object was created
-- [ ] The two run in the same session and stand as each other's control — `check_r11`'s failure is attributable to the demand only because `check_j6_2` committed successfully beside it
-- [ ] Neither check grants a key store, and this task leaves the leak registry unchanged; `check_sc1` is re-run to prove it
-- [ ] `bash scripts/validate.sh --layer integration` passes
-- [ ] Violations planted for both checks, seen to FAIL, reverted, recorded in plan.md
+- [x] `check_j6_2`: a commit made inside the session exists afterwards, carries no signature, and the configuration this environment wrote is confirmed not to ask for one (FR-24)
+- [x] `check_r11`: in a checkout whose *own* configuration demands a signature, the commit fails, the message names the key material that could not be reached, and no commit object was created
+- [x] The two run in the same session and stand as each other's control — `check_r11`'s failure is attributable to the demand only because `check_j6_2` committed successfully beside it
+- [x] Neither check grants a key store, and this task leaves the leak registry unchanged; `check_sc1` is re-run to prove it
+- [x] `bash scripts/validate.sh --layer integration` passes
+- [x] Violations planted for both checks, seen to FAIL, reverted, recorded in plan.md
 
 Where a consumer does want signatures, the route is the forwarded socket [D16](plan.md#d16) names, supplied at invocation under FR-15. This task does not build that route: it fixes the default and makes the refusal legible. Building it is a new feature number, not an extension of this one.
+
+**Measured before starting.** Recorded in [research.md § M7f](research.md#m7f--a-commit-needs-no-key-and-the-demand-for-one-survives-while-the-key-does-not). The prediction above held: an ordinary commit in a session succeeds unsigned with no override — exit 0, a 40-hex object, zero `gpgsig` headers, `%G?` reporting `N` — and `git config --get commit.gpgsign` exits 1, so the file this environment writes does not ask for a signature. A demand set in the checkout's own `.git/config` refuses at exit 128 with nothing left behind. Two things the task text did not predict. The **ssh signing format is unusable as the subject**: it refuses too, but its message is `could not create temporary file: No such file or directory`, which names no key material and reads as the checkout being unwritable — the exact confusion R11 exists to prevent — so the check demands a signature the ordinary way. And `gpg` is denied at **execve**, not at `openat`, so `trace_denials` never sees it; that is not a hole, because J6.2's third `Then` under Landlock *is* an empty denial set.
+
+**Implementation.** The production diff is empty again: the mechanism was already shipped in `lib/confinement.nix`, and the whole task is the two checks plus a helper.
+
+`commit_session` runs both arms in **one** session and hands each check the same output, which is what makes them each other's control rather than two checks that happen to agree. The plain arm's success is what attributes the demand arm's refusal to the demand; the demand arm's refusal is what keeps the plain arm's empty denial set from being vacuous — a session that reached nowhere would also have denied nothing. `check_r11` asserts its control *first* and returns immediately if it fails, because everything below it is about a failure.
+
+The message is matched for what it **names** — `sign` together with `gpg|key` — rather than for a string one toolchain version emits. A host with no signing program at all says `cannot run gpg` instead of `cannot exec 'gpg': Permission denied`; both name the material and both say the data went unsigned, and that is the property FR-16 asks for.
+
+Both plants bit. `commit.gpgsign = true` in the file the entry point writes broke the default keyless commit, and it also fired `check_r11`'s control in the control's own words — a refusal proves nothing once the ordinary commit fails beside it, which is the control working rather than collateral. The plan's plant for `check_r11` was **not realisable**: granting a key store cannot make the demanded signature succeed when there is no `gpg` in the substrate at all. The plant that does bite is the temptation FR-24 has to resist — `GIT_CONFIG_COUNT`/`GIT_CONFIG_KEY_0`/`GIT_CONFIG_VALUE_0` in `set_vars` forcing `commit.gpgsign = false`, which outranks even the checkout's own file, and the commit then succeeds. The row is rewritten in [plan.md](plan.md#planted-violations) with that reason, as `M7e`'s was.
+
+The leak registry is untouched, and `check_sc1` passes. The suite reports `1 of 27 checks failed`, the failure being `check_sc3`'s deliberate progress bar, now down to five missing scenarios: `j7_1 j8_1 r9 rep1 rep2`. `nix flake check` passes.
 
 ______________________________________________________________________
 

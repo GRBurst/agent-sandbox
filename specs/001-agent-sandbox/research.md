@@ -1791,6 +1791,32 @@ An empty list means "the defaults", and a non-empty one means "the defaults and 
 
 Confirming [`M7`](#the-trust-bundle-is-readable-from-inside-and-it-does-not-widen-the-reach) from the check's side: the intercept directory is gone once the session exits, so the probe counts `BEGIN CERTIFICATE` and `END CERTIFICATE` in pure bash while the session is alive and writes the counts out. There is no `openssl` in the substrate — the closure of `.#substrate-claude-code` has no `bin/openssl` — so "parses as a certificate" is asserted structurally at arm 1, by the delimiters balancing, and semantically at arms 2 and 3, where a real exchange either accepts the authority or does not.
 
+## M7f — A commit needs no key, and the demand for one survives while the key does not
+
+Measured in one session against the shipped `.#confinement-claude-code`, in a scratch checkout the real entry point had configured, with `git` and `strace` taken from the substrate.
+
+| Arm | Result |
+| --- | --- |
+| ordinary commit, nothing demands a signature | exit **0**, HEAD a 40-hex object, `gpgsig` header count **0**, `git log -1 --format=%G?` = `N` |
+| the same checkout asked `git config --get commit.gpgsign` | prints nothing, exits **1** — the configuration this environment wrote does not ask for a signature |
+| checkout whose own `.git/config` sets `commit.gpgsign = true` | exit **128**, `git rev-list --count --all` = **0**, no HEAD. Message: `fatal: cannot exec 'gpg': Permission denied` / `error: gpg failed to sign the data:` / `fatal: failed to write commit object` |
+| the same, plus `gpg.format = ssh` and a `user.signingkey` outside the boundary | exit 128 and 0 objects as well, but the message is only `error: could not create temporary file: No such file or directory` |
+| `git config --list --show-origin --show-scope` inside the session | two scopes only: `global file:<project>/.agents/git/config` carrying the two identity keys, and `local file:.git/config` |
+
+### The ssh signing format is not legible, so the check does not use it
+
+Both signing formats refuse, and both leave nothing behind, so either would satisfy the first and third `Then`. Only the OpenPGP one satisfies the second: its message names `gpg` and says the data went unsigned, while the ssh one names a temporary file and would be read as the checkout being unwritable — which is the exact confusion `R11` exists to prevent. The check demands a signature the ordinary way and asserts the message names the act and the material, matching `sign` together with `gpg|key` rather than a string one version of the toolchain happens to emit: a host carrying no signing program at all says `cannot run gpg` instead, and that is the same refusal.
+
+### The denial is an `execve`, so the trace is empty and that is the assertion
+
+`gpg` is refused when it is executed, not when a file is opened, so `trace_denials` — which reads `openat` — sees nothing of it. That is not a gap: `J6.2`'s third `Then` is that nothing outside the session's reach was read in order to produce the commit, and under Landlock that is exactly an empty denial set. The paths the ordinary commit opened outside the project and the store were `/dev/null` (the `GIT_CONFIG_SYSTEM` redirection), `/etc/gitattributes` and `/etc/localtime`, all inside the granted reach.
+
+An empty set is vacuous if nothing was traced, so the trace itself is asserted non-empty first. It is vacuous in a second way if the session never reaches outside at all, and the answer to that is the other arm: the same session, in the same run, does reach for a signing program outside the boundary and is refused. The two arms are each other's control, which is why they share a session rather than being written twice.
+
+### The historical failures were the global file, not this
+
+The four signing failures recorded in [`D16`](plan.md#d16) came from the host's own `~/.gitconfig`. `GIT_CONFIG_GLOBAL` erases that file for the session, so those are the case FR-24 configures away rather than the case `R11` refuses. The demand `R11` needs has to be planted in the checkout's **own** `.git/config`, where nothing this environment sets can reach it — and that is precisely the property the plant below removes.
+
 ## M8e — Where each agent reads its declarative extensions from
 
 **Partial.** `opencode` is measured; `claude-code` and `pi` are not.

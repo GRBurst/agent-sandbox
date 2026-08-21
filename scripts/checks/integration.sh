@@ -3265,3 +3265,252 @@ check_j6_1() {
 
 	[ "$found" -eq 0 ]
 }
+
+# One session, two commits, so that each is the other's control (D9).
+#
+# Journey 6.2 and R11 differ in exactly one thing — whether the checkout's own
+# configuration demands a signature — and neither is evidence on its own. A
+# session that cannot commit at all satisfies R11's refusal, and a session that
+# read no configuration whatever satisfies Journey 6.2's success. Running both
+# commits in one session is what makes the difference attributable to the
+# demand, so the two checks share this helper rather than each building a
+# session of its own.
+#
+# The checkout is one this environment configured: the entry point runs first
+# and writes `.agents/git/config` out of the host identity (FR-23), which is
+# what gives either commit an author at all.
+#
+# The demand is planted in the checkout's own `.git/config` and nowhere else.
+# A demand written to the host's global file is erased by GIT_CONFIG_GLOBAL
+# (D11), so a check that planted it there would watch the commit succeed and
+# report a refusal it never provoked.
+#
+# Sets ARMS_PROJ to the project the session ran in, and leaves the session's
+# own report in $outside/probe.out.
+commit_session() {
+	local outside=$1
+	local agent=claude-code binary=claude
+	local entry home proj cfg gitdir git strace rc
+	local FIXTURE_PROFILE FIXTURE_SUBSTRATE FIXTURE_BASH
+	local -a SESSION_ENV
+
+	entry=$(pinned_bin "$binary")
+	session_fixture "$agent" || return 1
+	gitdir=$(substrate_member "$FIXTURE_SUBSTRATE" git) || {
+		fail "the substrate for $agent provides no git, so there is no commit to make"
+		return 1
+	}
+	git="$gitdir/bin/git"
+	strace=$(substrate_member "$FIXTURE_SUBSTRATE" strace) || {
+		fail "the substrate for $agent provides no strace, so what the commit reached for cannot be observed"
+		return 1
+	}
+
+	# A sibling of the fake home rather than a directory inside it: the
+	# description carries $HOME-relative deny rules, and nono refuses to start
+	# on a workdir that overlaps one.
+	home="$outside/home"
+	proj="$outside/proj"
+	cfg="$outside/cfg"
+	mkdir -p "$home" "$cfg" "$proj/plain" "$proj/demand"
+
+	printf '[user]\n\tname = Commit Person %s\n\temail = commit-%s@example.invalid\n' \
+		"$RANDOM" "$RANDOM" >"$home/.gitconfig"
+
+	session_env "$outside/state"
+
+	env "${SESSION_ENV[@]}" "HOME=$home" "XDG_CONFIG_HOME=$cfg" \
+		env -C "$proj" "$entry/$binary" --version \
+		>"$outside/entry.out" 2>"$outside/entry.err" && rc=0 || rc=$?
+	if [ "$rc" -ne 0 ]; then
+		fail "$(printf 'the entry point does not start in a scratch project (exit %s), so there is no checkout this environment configured:\n%s' \
+			"$rc" "$(tail -20 "$outside/entry.err")")"
+		return 1
+	fi
+
+	cat >"$proj/probe.sh" <<-'PROBE'
+		git=$1
+		work=$2
+		strace=$3
+
+		cd "$work/plain" || exit 1
+		"$git" init -q .
+		printf 'a\n' >f
+		"$git" add f
+		"$strace/bin/strace" -f -e trace=openat -o "$work/plain.trace" \
+			"$git" commit -m "an ordinary commit" >"$work/plain.log" 2>&1
+		printf 'PLAIN_RC :: %s\n' "$?"
+		"$git" config --get commit.gpgsign >"$work/plain.gpgsign" 2>&1
+		printf 'PLAIN_DEMAND_RC :: %s\n' "$?"
+		printf 'PLAIN_HEAD :: %s\n' "$("$git" rev-parse --verify HEAD 2>/dev/null || printf none)"
+		printf 'PLAIN_GPGSIG :: %s\n' "$("$git" cat-file commit HEAD 2>/dev/null | grep -c '^gpgsig')"
+		printf 'PLAIN_SIGSTATUS :: %s\n' "$("$git" log -1 --format='%G?' 2>/dev/null)"
+
+		cd "$work/demand" || exit 1
+		"$git" init -q .
+		"$git" config --local commit.gpgsign true
+		printf 'b\n' >f
+		"$git" add f
+		"$git" commit -m "a commit the checkout demands a signature for" >"$work/demand.log" 2>&1
+		printf 'DEMAND_RC :: %s\n' "$?"
+		printf 'DEMAND_HEAD :: %s\n' "$("$git" rev-parse --verify HEAD 2>/dev/null || printf none)"
+		printf 'DEMAND_OBJECTS :: %s\n' "$("$git" rev-list --count --all 2>/dev/null)"
+	PROBE
+
+	env "${SESSION_ENV[@]}" "HOME=$home" \
+		"$(pinned_bin nono)/nono" run \
+		--profile "$FIXTURE_PROFILE" --workdir "$proj" --allow-cwd -- \
+		"$FIXTURE_BASH/bin/bash" "$proj/probe.sh" "$git" "$proj" "$strace" \
+		>"$outside/probe.out" 2>"$outside/probe.err" && rc=0 || rc=$?
+
+	# The last line the probe writes. A session that died halfway would
+	# otherwise leave both checks asserting against an absence.
+	if ! grep -qF 'DEMAND_OBJECTS ::' "$outside/probe.out"; then
+		fail "$(printf 'the session did not run both commits to the end (exit %s):\n%s\n%s' \
+			"$rc" "$(cat "$outside/probe.out")" "$(tail -20 "$outside/probe.err")")"
+		return 1
+	fi
+
+	ARMS_PROJ=$proj
+}
+
+# Journey 6.2 — a commit made inside a session succeeds, carries no signature,
+# and reaches for nothing it is refused.
+#
+# The third Then is asserted as the absence of a denial rather than as a list
+# of files, and under Landlock that is the whole of it: a read outside the
+# session's reach cannot succeed, so the only way producing the commit could
+# have depended on one is by being refused. An empty denial set is therefore
+# the statement that the commit needed nothing from outside — and it is not
+# vacuous, because the demand arm in the same session is a commit that does
+# reach outside and is refused for it.
+#
+# FR-24's default is asserted against the configuration this environment wrote
+# and not only against the object: a session that happened to commit unsigned
+# because it had no key would pass on the object alone.
+check_j6_2() {
+	local outside out proj found=0
+	local ARMS_PROJ
+	local head sig status denials
+
+	outside=$(mktemp -d -p "${XDG_RUNTIME_DIR:-/tmp}" agent-sandbox-j6_2.XXXXXX)
+	# shellcheck disable=SC2064
+	trap "rm -rf '$outside'" RETURN
+
+	commit_session "$outside" || return 1
+	out="$outside/probe.out"
+	proj=$ARMS_PROJ
+
+	if ! grep -qF 'PLAIN_RC :: 0' "$out"; then
+		fail "$(printf 'a commit inside the session failed, so committing is not what the environment ships:\n%s' \
+			"$(cat "$proj/plain.log" 2>/dev/null)")"
+		return 1
+	fi
+
+	head=$(sed -n 's/^PLAIN_HEAD :: //p' "$out")
+	if ! printf '%s' "$head" | grep -qE '^[0-9a-f]{40}$'; then
+		found=1
+		fail "$(printf 'the commit reported success and left no commit object behind: %s' "$head")"
+	fi
+
+	sig=$(sed -n 's/^PLAIN_GPGSIG :: //p' "$out")
+	status=$(sed -n 's/^PLAIN_SIGSTATUS :: //p' "$out")
+	if [ "$sig" != "0" ] || [ "$status" != "N" ]; then
+		found=1
+		fail "$(printf 'the commit carries a signature, so producing it needed key material: %s gpgsig header(s), signature status %s' \
+			"$sig" "$status")"
+	fi
+
+	# FR-24 on the configuration rather than on the object. `git config --get`
+	# exits 1 for a key set nowhere, so a zero exit here is a demand this
+	# environment wrote itself.
+	if grep -qF 'PLAIN_DEMAND_RC :: 0' "$out"; then
+		found=1
+		fail "$(printf 'the configuration this environment wrote asks for a signature: commit.gpgsign = %s' \
+			"$(cat "$proj/plain.gpgsign" 2>/dev/null)")"
+	fi
+
+	if [ ! -s "$proj/plain.trace" ]; then
+		found=1
+		fail "the commit was not observed at all, so an empty set of denials would mean nothing"
+	else
+		denials=$(trace_denials "$proj/plain.trace")
+		if [ -n "$denials" ]; then
+			found=1
+			fail "$(printf 'producing the commit reached for something outside the session:\n%s' "$denials")"
+		fi
+	fi
+
+	# Control. The same session is refused when the checkout's own
+	# configuration demands a signature, so the success above belongs to a
+	# session that reads the configuration it is given rather than to one that
+	# reads none.
+	if grep -qF 'DEMAND_RC :: 0' "$out"; then
+		found=1
+		fail "the same session commits even where the checkout demands a signature, so an unsigned commit says nothing about what was asked of it"
+	fi
+
+	[ "$found" -eq 0 ]
+}
+
+# R11 — a signature the session cannot produce is refused, loudly.
+#
+# The demand goes in the checkout's own `.git/config`, which is the only place
+# it survives: GIT_CONFIG_GLOBAL points the toolchain at a file inside the
+# project (D11), so a demand written to the host's global configuration is
+# erased before the session ever sees it and the commit succeeds. That is the
+# case FR-24 configures away, and it is not this one.
+check_r11() {
+	local outside out proj found=0
+	local ARMS_PROJ
+	local objects head message
+
+	outside=$(mktemp -d -p "${XDG_RUNTIME_DIR:-/tmp}" agent-sandbox-r11.XXXXXX)
+	# shellcheck disable=SC2064
+	trap "rm -rf '$outside'" RETURN
+
+	commit_session "$outside" || return 1
+	out="$outside/probe.out"
+	proj=$ARMS_PROJ
+
+	# Control, and it comes first because everything below is about a failure.
+	# The ordinary commit in the same session succeeded, so the refusal that
+	# follows is attributable to the demand rather than to a session that
+	# cannot write, cannot commit, or never started.
+	if ! grep -qF 'PLAIN_RC :: 0' "$out"; then
+		fail "$(printf 'the session cannot commit even where nothing demands a signature, so a refused signed commit proves nothing:\n%s' \
+			"$(cat "$proj/plain.log" 2>/dev/null)")"
+		return 1
+	fi
+
+	if grep -qF 'DEMAND_RC :: 0' "$out"; then
+		fail "$(printf 'a checkout whose own configuration demands a signature committed anyway, so the session either signed with key material it should not reach or ignored the demand:\n%s' \
+			"$(cat "$proj/demand.log" 2>/dev/null)")"
+		return 1
+	fi
+
+	objects=$(sed -n 's/^DEMAND_OBJECTS :: //p' "$out")
+	head=$(sed -n 's/^DEMAND_HEAD :: //p' "$out")
+	if [ "$objects" != "0" ] || [ "$head" != "none" ]; then
+		found=1
+		fail "$(printf 'the refused commit left an object behind: %s object(s), HEAD %s' \
+			"$objects" "$head")"
+	fi
+
+	# The message is matched for what it names — the act that could not be
+	# performed and the material it needed — rather than for a string one
+	# version of the toolchain happens to emit. A host carrying no signing
+	# program says `cannot run gpg`; one where the program sits outside the
+	# boundary says `cannot exec 'gpg': Permission denied`. Both name gpg, and
+	# both say the data went unsigned, which is what keeps the failure from
+	# reading as the checkout being unwritable.
+	message=$(cat "$proj/demand.log" 2>/dev/null)
+	if ! printf '%s' "$message" | grep -qi 'sign' ||
+		! printf '%s' "$message" | grep -qiE 'gpg|key'; then
+		found=1
+		fail "$(printf 'the refusal does not name the key material it could not reach, so it reads as the checkout being unwritable:\n%s' \
+			"$message")"
+	fi
+
+	[ "$found" -eq 0 ]
+}
