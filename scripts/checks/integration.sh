@@ -2618,3 +2618,200 @@ check_j5_1() {
 
 	[ "$found" -eq 0 ]
 }
+
+# R8 — a substitute that is no longer valid answers differently from a denied
+# path.
+#
+# The scenario's Given is a stored substitute that has stopped being valid. A
+# session presenting a 64-hex token that is not the one this session was minted
+# is exactly that, and research.md § M7c measured what comes back: the route
+# answers 401 itself, with none of the upstream's headers on it. So the arm
+# needs no provider, no network beyond the loopback port the session was already
+# given, and no waiting on someone else's rate limit. The other reading of the
+# Given — the session's own substitute, forwarded and rejected by the provider —
+# leaves the machine, and is listed as a coverage gap in plan.md instead.
+#
+# What is asserted is the family, `401` or `407`, which is HTTP's own vocabulary
+# for "who you are was not accepted". The particular body this route writes is
+# not asserted: FR-16 asks that an authentication failure be identifiable and be
+# distinguishable from a denial, not that a version of some upstream keeps
+# phrasing it the way it does today.
+#
+# The denial arm is the other half, taken from the same session so that nothing
+# but the operation differs: a file outside the project that is world-readable
+# on the host, so the refusal is the confinement's and not the filesystem's. Its
+# path arrives as an argument rather than in the environment, because the
+# session's `allow_vars` drops anything the description did not name — the
+# measurement's first attempt put it in `SECRET` and the probe read
+# `/nonexistent` instead, which fails for the wrong reason.
+#
+# Three controls, because two of the three observables are failures (D9):
+#
+#   1. In the same session, a file inside the project is read successfully, so a
+#      session that died at startup or a probe that could read nothing at all
+#      cannot pass.
+#   2. The denial target is read once from outside the boundary first, so the
+#      refusal attributes to confinement.
+#   3. A second session, same description, with no credential in the calling
+#      environment: the same stale request must come back outside the
+#      authentication family. Without it, a route that answered 401 to
+#      everything — including to the substitute it had itself minted — would
+#      satisfy the first arm. It also draws the line the scenario is on: a
+#      credential that was never there is a different answer again from one that
+#      is no longer valid.
+check_r8() {
+	local agent=claude-code
+	local outside home proj denied inside cu desc rc arm i
+	local canary stale auth denial status
+	local found=0
+	local FIXTURE_PROFILE FIXTURE_SUBSTRATE FIXTURE_BASH
+	local -a SESSION_ENV cred=()
+
+	session_fixture "$agent" || return 1
+	cu=$(substrate_member "$FIXTURE_SUBSTRATE" env) || {
+		fail "the substrate for $agent provides no coreutils, so the session cannot read a file or time out a request"
+		return 1
+	}
+
+	outside=$(mktemp -d -p "${XDG_RUNTIME_DIR:-/tmp}" agent-sandbox-r8.XXXXXX)
+	# shellcheck disable=SC2064
+	trap "rm -rf '$outside'" RETURN
+
+	home="$outside/home"
+	proj="$outside/work"
+	mkdir -p "$home" "$proj"
+	session_env "$outside/state"
+
+	# Per run, so a stale match in a file left by an earlier run cannot satisfy
+	# the in-project read.
+	canary="PROJECT-FILE-CONTENT-$RANDOM$RANDOM"
+	inside="$proj/inside.txt"
+	printf '%s\n' "$canary" >"$inside"
+
+	denied="$outside/secret.txt"
+	printf 'a file the session was never granted\n' >"$denied"
+	chmod 0644 "$denied"
+	# Control 2.
+	if ! grep -q . "$denied"; then
+		fail 'the denial target is not readable outside the boundary, so a refusal inside it would prove nothing'
+		return 1
+	fi
+
+	# A substitute in the shape of a real one that is not the one this session
+	# holds: minted per run, so it is never the session's own by accident.
+	stale=
+	for ((i = 0; i < 16; i++)); do
+		stale+=$(printf '%04x' "$RANDOM")
+	done
+
+	# The probe writes into its own granted workdir, per check_j5_1. There is no
+	# HTTP client anywhere in the session's reach, so the request goes onto
+	# bash's own socket; coreutils supplies the timeout and the read.
+	cat >"$proj/probe-r8.sh" <<-'PROBE'
+		set -u
+		cu=$1
+		out=$2
+		inside=$3
+		denied=$4
+		stale=$5
+		mkdir -p "$out"
+
+		# Control 1.
+		"$cu/bin/cat" "$inside" >"$out/inside.txt" 2>&1
+
+		url=${ANTHROPIC_BASE_URL:-}
+		if [ -z "$url" ]; then
+			printf 'the session was handed no provider route\n' >"$out/auth.txt"
+		else
+			hostport=${url#http://}
+			path=/${hostport#*/}
+			hostport=${hostport%%/*}
+			body='{"model":"claude-3-5-haiku-20241022","max_tokens":1,"messages":[{"role":"user","content":"hi"}]}'
+			if exec 3<>"/dev/tcp/${hostport%%:*}/${hostport##*:}" 2>"$out/connect.txt"; then
+				printf 'POST %s/v1/messages HTTP/1.1\r\nHost: %s\r\nx-api-key: %s\r\nauthorization: Bearer %s\r\nanthropic-version: 2023-06-01\r\ncontent-type: application/json\r\ncontent-length: %s\r\nconnection: close\r\n\r\n%s' \
+					"$path" "$hostport" "$stale" "$stale" "${#body}" "$body" >&3
+				"$cu/bin/timeout" 25 "$cu/bin/cat" <&3 >"$out/auth.txt" 2>&1
+				exec 3<&-
+			else
+				printf 'the session could not reach the route it was handed\n' >"$out/auth.txt"
+			fi
+		fi
+
+		"$cu/bin/cat" "$denied" >"$out/denial.txt" 2>&1
+	PROBE
+
+	for arm in stale unauthenticated; do
+		cred=()
+		[ "$arm" = stale ] && cred=("ANTHROPIC_API_KEY=sk-ant-real-canary-$RANDOM$RANDOM")
+		rm -rf "$proj/out-$arm"
+
+		env "${SESSION_ENV[@]}" "HOME=$home" "${cred[@]+"${cred[@]}"}" \
+			"$(pinned_bin nono)/nono" run \
+			--profile "$FIXTURE_PROFILE" --workdir "$proj" --allow-cwd -- \
+			"$FIXTURE_BASH/bin/bash" "$proj/probe-r8.sh" \
+			"$cu" "$proj/out-$arm" "$inside" "$denied" "$stale" \
+			>"$outside/out.$arm" 2>"$outside/err.$arm" && rc=0 || rc=$?
+
+		if ! grep -qF "$canary" "$proj/out-$arm/inside.txt" 2>/dev/null; then
+			found=1
+			fail "$(printf 'the %s session never read the file inside the project (exit %s), so it observed no session:\n%s' \
+				"$arm" "$rc" "$(cat "$outside/err.$arm")")"
+			continue
+		fi
+
+		auth=$(cat "$proj/out-$arm/auth.txt" 2>/dev/null)
+		# The status line, with the carriage return the wire format puts on it.
+		status=$(printf '%s' "$auth" | head -n 1 | tr -d '\r')
+
+		if [ "$arm" = unauthenticated ]; then
+			# Control 3. The route must not answer the authentication family to
+			# a session it was never given a credential for, or the arm above
+			# says nothing about the credential.
+			if [[ $status =~ ^HTTP/1\.[01][[:space:]]+(401|407)([[:space:]]|$) ]]; then
+				found=1
+				fail "$(printf 'a session with no credential at all is answered in the authentication family too (%s), so that answer does not identify a credential that stopped being valid' \
+					"$status")"
+			fi
+			continue
+		fi
+
+		denial=$(cat "$proj/out-$arm/denial.txt" 2>/dev/null)
+
+		if [ -z "$auth" ] || [ -z "$denial" ]; then
+			found=1
+			fail "$(printf 'one of the two failures produced no message at all (auth %s byte(s), denial %s byte(s)), so neither can be told from the other' \
+				"${#auth}" "${#denial}")"
+			continue
+		fi
+
+		# The scenario's first Then: what came back identifies an authentication
+		# failure.
+		if [[ ! $status =~ ^HTTP/1\.[01][[:space:]]+(401|407)([[:space:]]|$) ]]; then
+			found=1
+			fail "$(printf 'a request carrying a substitute that is no longer valid was not answered in the authentication family:\n%s' \
+				"$status")"
+		fi
+
+		# The scenario's second Then, both ways round: neither message carries
+		# the other's vocabulary, so a reader cannot mistake one for the other.
+		if printf '%s' "$auth" | grep -q 'Permission denied'; then
+			found=1
+			fail "$(printf 'the authentication failure reads as a confinement denial:\n%s' "$auth")"
+		fi
+		if ! printf '%s' "$denial" | grep -q 'Permission denied'; then
+			found=1
+			fail "$(printf 'reading a path outside the project did not fail on permission, so there is no denial to be distinguished from:\n%s' \
+				"$denial")"
+		fi
+		if printf '%s' "$denial" | grep -qE '\b(401|407|[Uu]nauthorized)\b'; then
+			found=1
+			fail "$(printf 'the confinement denial reads as an authentication failure:\n%s' "$denial")"
+		fi
+		if [ "$auth" = "$denial" ]; then
+			found=1
+			fail 'the two failures produce the same message, so they are not distinguishable'
+		fi
+	done
+
+	[ "$found" -eq 0 ]
+}

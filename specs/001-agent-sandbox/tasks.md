@@ -932,15 +932,31 @@ Two axes in one scenario. Across projects is the original claim; across agents i
 
 The full suite is `1 of 22 checks failed`, the one being `check_sc3`, the deliberate progress bar, now at 10 missing scenarios — `j5_1` leaving and nothing else moving. `nix flake check` passes. `plan.md` gained the machine/session/project scope table that resolves the FR-4 tension, and Journey 5 left the live-OAuth coverage gap, which now belongs to `Rep3` alone.
 
-### M7c — Authentication failure is not a denial (Status: PENDING)
+### M7c — Authentication failure is not a denial (Status: IMPLEMENTED)
 
 **Scenario**: R8
 
 **RED**: `check_r8` invalidates the stored substitute and makes a request.
 
-- [ ] Check written and seen to FAIL
-- [ ] FR-16: the assertion is that the two messages **differ** and that the authentication one is identifiable — not that upstream emits a particular string, which is not ours to demand. That difference is itself the control: two identical messages fail, and so does one message with nothing to compare it to
-- [ ] Violation planted (collapse both failure paths onto one message), seen to FAIL, reverted, recorded in plan.md
+- [x] Check written and seen to FAIL
+- [x] FR-16: the assertion is that the two messages **differ** and that the authentication one is identifiable — not that upstream emits a particular string, which is not ours to demand. That difference is itself the control: two identical messages fail, and so does one message with nothing to compare it to
+- [x] Violation planted (empty `credentialServices`, so no route crosses), seen to FAIL, reverted, recorded in plan.md
+
+**Measured before starting** ([`research.md § M7c`](research.md#m7c--a-stale-substitute-answers-differently-from-a-denied-path)), because the scenario's Given had two readings and only one of them is checkable unattended.
+
+- **A substitute that is not the session's own is answered locally.** The route replies `401 Unauthorized` with none of the upstream's headers on it, so the arm needs no provider, no network beyond the loopback port the session already has, and nobody else's rate limit. The other reading — the session's *own* substitute, forwarded and rejected — carries `server: cloudflare` and `authentication_error` back, which is the real thing and leaves the machine. It is a coverage gap in `plan.md` rather than an arm.
+- **A missing credential is a third answer again**, `503`, not `401`. That is what makes the second session a control worth running rather than a restatement.
+- **The environment does not carry the denial target in.** `allow_vars` drops anything the description did not name, so the first shape of the probe read `/nonexistent` and failed for the wrong reason. The path arrives as an argument, as in `check_r1`.
+
+**Implementation.**
+
+- **The production diff is empty again.** Both messages already exist and already differ; the task is the check, and the only knob that changes either of them is the agent table's own `credentialServices`.
+- **The assertion is the status *family*, `401` or `407`**, which is HTTP's vocabulary for "who you are was not accepted", not this route's phrasing. `{"error":"Unauthorized"}` is deliberately not matched — a version bump that reworded the body must not turn FR-16 red.
+- **Distinguishability is asserted both ways round**: the authentication message must not read as a denial, and the denial must not read as an authentication failure. One direction alone would pass a pair where one message contained both vocabularies.
+- **Three controls** (D9), because two of the three observables are failures: an in-project read carrying a per-run canary, so a session that died at startup cannot pass; the denial target read once from outside the boundary first; and the credential-less second session.
+- **The planted RED bit in one place**, `check_r8` reporting that the session was handed no provider route. The control arm stays quiet under the plant, which is correct — it asserts an *absence* of the authentication family, and a session with no route has none.
+
+The full suite is `1 of 23 checks failed`, the one being `check_sc3`, the deliberate progress bar, now at 9 missing scenarios.
 
 ### M7d — Authenticating twice is harmless (Status: PENDING)
 

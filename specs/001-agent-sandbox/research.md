@@ -1676,6 +1676,49 @@ Two things follow. `check_r3`'s `routed` literal grows by a base URL per declare
 
 **A probe must write its dump inside the granted workdir.** The first harness wrote `env -0` to a path outside it: every arm exited 1 with no output, which reads exactly like the mechanism refusing to start rather than like a redirection being denied.
 
+## M7c — A stale substitute answers differently from a denied path
+
+Measured on x86_64-linux with nono 0.74.0, against the shipped `.#confinement-claude-code`. One probe out of the substrate makes a provider request with bash's own `/dev/tcp`: there is no HTTP client in `sessionTools`, and adding one would widen every session's substrate for a check's convenience. The request is `POST <ANTHROPIC_BASE_URL>/v1/messages` with `connection: close`, and the response is read with the substrate's own `timeout` and `cat`.
+
+### The proxy answers three different ways, and only one of them needs the internet
+
+| What the session presents | Route's credential | Response |
+| --- | --- | --- |
+| the substitute this session was minted | present | forwarded upstream — `server: cloudflare`, `{"type":"error","error":{"type":"authentication_error","message":"API key is invalid."}}`, because the real value was a canary |
+| a 64-hex token that is **not** this session's | present | `HTTP/1.1 401 Unauthorized`, `{"error":"Unauthorized"}`, **no upstream headers at all** |
+| an empty token | present | the same 401 |
+| anything | route declared, variable unset | `HTTP/1.1 503 Service Unavailable`, `{"error":"Service Unavailable"}` |
+| anything | `network.credentials = []` | no `ANTHROPIC_BASE_URL` crosses, so there is no provider request to make |
+
+The second row is R8's `Given` — a stored substitute that is no longer the one the supervisor holds — and it is answered **locally**: the reply carries none of the upstream's headers, so the check needs no internet. The first row does, which is why the check must not send the session's own substitute.
+
+A missing credential and a stale one are **not** the same failure: 503 against 401. `M7a` read the `credential_not_found` warning as R8's observable; it is the observable for a credential that was never there, and R8 asks about one that has stopped working.
+
+### The two messages, and the word that would have confused them
+
+| | |
+| --- | --- |
+| authentication failure | `HTTP/1.1 401 Unauthorized` … `{"error":"Unauthorized"}` |
+| confinement denial | `cat: <path>: Permission denied` |
+
+They share no vocabulary. The authentication failure is carried by the status code the protocol defines for exactly this, and the denial is the operating system refusing a path — the same words `check_r1` and `check_r2` already assert on. Asserting the status **code** rather than the body is also what keeps FR-16 honest: 401 is RFC 9110's meaning and not prose upstream may reword.
+
+The near miss is worth recording. The missing-credential warning reads "managed-credential requests on this route will be **denied** until the credential is available", so a check that keyed on the word `denied` would file an authentication failure under confinement denials.
+
+### The 503 arm is the anti-vacuity control the check can afford
+
+The valid-token arm cannot be in the check, so the check cannot show a provider request succeeding. What it can show is that this port does not answer 401 to everything: the same stale request, in a session whose route has no credential at all, gets 503 instead. The 401 is therefore a judgement about the token presented rather than the proxy's standing answer.
+
+### The plant, and the knob it actually turns
+
+`plan.md` said "collapse both failure paths onto one message **in the wrapper**". The wrapper produces neither message; the knob is the agent table's `credentialServices`. Emptied, no route exists, no base URL crosses, and every failure the session can observe is of one kind — there are no longer two messages to differ.
+
+### Method notes
+
+- **The environment is filtered, so a probe takes its targets as arguments.** The first version passed the outside path in `SECRET=`; the variable does not cross — `allow_vars`, which `check_r3` asserts — and the probe reported `No such file or directory` for a denial it had never attempted.
+- **`/etc/shadow` is the wrong target for the denial half.** It is `0640 root:shadow`, so it says `Permission denied` outside the sandbox too. The file has to be one the harness made world-readable.
+- The proxy resets the connection after the body, so the reader appends `cat: -: Connection reset by peer` to what it captured.
+
 ## M8e — Where each agent reads its declarative extensions from
 
 **Partial.** `opencode` is measured; `claude-code` and `pi` are not.
