@@ -1076,7 +1076,7 @@ Each of the two new agents needs `credentialServices` in its table entry, and de
 
 The consumer's own authoring surface (FR-25) closes this group rather than opening it. It has to be enumerated per agent before it can be granted for any, so it depends on all three being confined — which is also why `M5f` keeps only the undeclared half, the half that needs no mechanism at all.
 
-### M8a — Extract `mkConfinedAgent` (Status: IMPLEMENTED)
+### M8a — Extract `mkEntryPoint` (Status: IMPLEMENTED)
 
 A refactor, and therefore its own task per P6. No behaviour changes — and, as it turned out, no refactor either.
 

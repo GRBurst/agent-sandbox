@@ -76,12 +76,16 @@ That is why `XDG_DATA_HOME` is in the bootstrap and not only in the `shellHook`.
 
 ### Starting an agent
 
-Inside the environment, the agent is on `PATH` under its own name and is already confined:
+Inside the environment, each agent is on `PATH` under its own name and is already confined:
 
 ```sh
-claude --version             # runs under nono, confined to this project
+claude --version            # runs under nono, confined to this project
+opencode --version          # the same, in its own confinement
 type claude                 # a wrapper in the store, not the upstream binary
 ```
+
+`claude` and `opencode` are what ships today.
+`pi` is packaged upstream but is not in the agent table yet, so there is no `pi` on `PATH`; adding it is a table entry and the checks that observe it, not a new mechanism.
 
 The wrapper is the only entry point; the unconfined binary is reachable only by store path.
 If the host cannot enforce confinement the wrapper refuses to start the agent and exits 77, rather than running it unconfined.
@@ -112,7 +116,11 @@ What it receives under that name is 64 hex characters minted for that session al
 ```sh
 echo "$ANTHROPIC_API_KEY"     # outside: your key
 claude                        # inside: a per-session substitute, and a different one next time
+opencode                      # a substitute of its own, not the one claude was given
 ```
+
+One credential in your environment serves every project and every agent.
+There is no per-agent login: each agent declares the service it needs and is minted its own substitute, so no agent reads another's credential store, and starting a session in a second checkout needs no further login.
 
 Two things follow that are easy to be surprised by.
 Copying that value out of a session buys you nothing — it is not a credential the provider has ever seen, and it stops working when the session ends.
@@ -219,7 +227,7 @@ The unit and component layers have no such dependency.
 
 It **exits non-zero today, by design**: `check_sc3` asserts a scenario-to-check bijection and is the feature's progress bar, so it fails until the last scenario in the spec has a check.
 A task is judged by whether its own check passes and whether the set `check_sc3` names shrinks by exactly the scenarios that task covers.
-Today's baseline is `1 of 21 checks failed`, that one being `check_sc3`, and the set it names is 11 scenarios long.
+Today's baseline is `1 of 28 checks failed`, that one being `check_sc3`, and the set it names is 5 scenarios long: `j7_1 j8_1 r9 rep1 rep2`.
 
 ## Known drift
 
@@ -233,8 +241,8 @@ It is the natural input to the first spec.
 
 **Isolation.**
 
-- Confinement is now observed rather than asserted, on both sides. `check_r6` proves the pre-flight refuses a host that cannot enforce it and `check_j1_1` compares a real session's granted reach against the project, the execution substrate and the leak registry; the refusal side is now checked too — `check_r1` reads a planted SSH key from inside a session and watches it fail, `check_r2` writes outside the project and watches the file not appear, `check_r3` puts an API-key canary in the host environment and proves it does not cross, `check_r4` has a session rewrite the source of its own confinement and proves nothing widens until a human re-enters, `check_r5` commits a confinement description to the checkout and proves the entry point does not read it, `check_r10` plants a host git configuration that runs a program and proves it neither crosses nor runs, and `check_j8_2` plants a whole host-global agent installation and compares the session's granted reach to the project, the substrate and the registry as a set. Each of them reads, writes or runs something it *is* allowed in the same session, so a session that failed to start cannot pass — and `check_controls` reads the suite's own text to keep it that way, because a refusal check whose control has been deleted goes on passing while proving nothing.
-- A session is granted the closure of what it runs, 128 store paths rather than the 67,000 the store holds, and the leak registry is now **empty**. What credentials still has no check: a provider actually refusing a substitute copied out of a session. `check_j4_1` asserts the substitute's form, that the real value is nowhere in the session's environment or at rest in the project, and that two sessions get different substitutes — the refusal itself needs a real account and is verified by hand.
+- Confinement is now observed rather than asserted, on both sides. `check_r6` proves the pre-flight refuses a host that cannot enforce it and `check_j1_1` compares a real session's granted reach against the project, the execution substrate and the leak registry; the refusal side is now checked too — `check_r1` reads a planted SSH key from inside a session and watches it fail, `check_r2` writes outside the project and watches the file not appear, `check_r3` puts an API-key canary in the host environment and proves it does not cross, `check_r4` has a session rewrite the source of its own confinement and proves nothing widens until a human re-enters, `check_r5` commits a confinement description to the checkout and proves the entry point does not read it, `check_r10` plants a host git configuration that runs a program and proves it neither crosses nor runs, `check_r8` presents a substitute that is no longer valid and proves the answer names an authentication failure rather than a denial, `check_r11` puts a demand for a signature in a checkout's own configuration and proves the commit is refused with no object created and no key read, and `check_j8_2` plants a whole host-global agent installation and compares the session's granted reach to the project, the substrate and the registry as a set. Each of them reads, writes or runs something it *is* allowed in the same session, so a session that failed to start cannot pass — and `check_controls` reads the suite's own text to keep it that way, because a refusal check whose control has been deleted goes on passing while proving nothing.
+- A session is granted the closure of what it runs, and each agent has a substrate of its own: 128 store paths for `claude-code` and 128 for `opencode`, rather than the 67,000 the store holds. The leak registry is now **empty**. `check_j4_1` asserts the substitute's form, that the real value is nowhere in the session's environment or at rest in the project, and that two sessions get different substitutes; `check_j5_1` asserts that one credential in your environment serves every project and every agent, each minted a substitute of its own; and `check_r8` presents a substitute that is no longer valid and proves the answer is an authentication failure rather than a denial. What still has no check is a real provider refusing a substitute copied out of a session, which needs a real account and is verified by hand.
 - **Two projects at once are checked concurrently, not one after the other.** `check_j3_1` runs two sessions in sibling checkouts at the same time and asserts that each reaches exactly one of them, that the two differ, and that neither can write into the other — confirmed from outside the sandbox, since a denial reported from inside is the sandbox's own account of itself. The two halves are separate on purpose: a *read-only* grant on a sibling checkout is a leak that no write attempt would ever observe.
 - **A grant on an exact path beats a `deny` the mechanism carries for it.** The five `required` deny groups, `deny_credentials` among them, are not a backstop behind the leak registry — a registry entry naming `$HOME/.ssh` would read the key, with the deny sitting beside the grant in the resolved manifest. A grant on an *ancestor* of denied paths is refused and the session does not start, but do not expect the message to say so: granting `$HOME` is refused first for overlapping nono's own protected state root, at a path that need not even exist, and the deny rules are never mentioned. So the registry's strictness is the whole of the guarantee.
 - **A confinement description written inside the project is one the mechanism will find, and what refuses it is a single command-line argument.** The blanket `XDG_CONFIG_HOME` puts nono's user profile directory inside the checkout, so a profile committed to a repository is listed by `nono profile list` and grants what it asks for the moment anything resolves it by name. The entry point passes `--profile <store path>` as an argument, and an argument beats `NONO_PROFILE`, which is why an untrusted checkout cannot grant itself paths. Nothing refuses the file itself.
