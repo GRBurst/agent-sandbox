@@ -836,6 +836,12 @@ Gated on `M1b` and `M1g`. [D1](plan.md#d1) resolved to the branch where the real
 - [ ] The registry stays empty; if `M1g` found a path that forces an entry, it carries both justification fields
 - [ ] Violation planted (expose the real value to the session instead of the substitute), seen to FAIL, reverted, recorded in plan.md
 
+**Measured before starting**, for the whole group, in [`research.md § M7`](research.md#m7--the-credential-surface-and-interception-measured-rather-than-reasoned). The surface is five top-level keys — `credential_capture`, `credential_providers`, `credential_routes`, `env_credentials` and its alias `secrets` — plus `network.credentials` and `network.custom_credentials`, which `M1b` discussed by name without recording that they sit under `network`. Three constraints bind what this task may write:
+
+- `CustomCredentialDef` requires only `upstream`, but **`env_var` becomes required as soon as `credential_key` is a URI manager reference** — `op://`, `bw://`, `apple-password://`, `file://`, `cmd://` — and is derived only for `env://`. So the arrangement's shape is decided by which scheme the credential comes from, and `env://` is the one that needs no second field.
+- `credential_key` is mutually exclusive with `auth`, `aws_auth` and `spiffe`.
+- A bogus service name still exits 0 at 0.74.0, with nothing in either stream naming it. The third criterion above is therefore live, and not an artefact of the 0.73.0 it was first measured against.
+
 ### M7b — Authenticating once serves every project, and every agent (Status: PENDING)
 
 **Scenario**: Journey 5.1
@@ -886,6 +892,16 @@ Shaped by `M1c`, and rewritten twice after the first two shapes were found to pr
 
 The exchange is credential-free and no requirement asks otherwise: `M1c` established that every store a credential could come from sits in a deny group the mechanism marks `required`, and authenticating the version-control toolchain is out of scope. FR-17 is about trust in the inspecting authority, and that is all this checks.
 
+**Measured before starting** ([`research.md § M7`](research.md#m7--the-credential-surface-and-interception-measured-rather-than-reasoned)). Four things, all against the shipped description with one `jq` edit between arms.
+
+The two arms differ exactly as `D12` predicts. A plain-string `allow_domain` entry leaves all five variables `<unset>`; an object entry — `{"domain": …, "endpoints": [{"method": …, "path": …}]}`, both endpoint fields **singular** — sets all five to the same path. So **the planted violation is already known to bite arm 1**, and arm 1 asserts a difference rather than restating the description.
+
+There is a second observable for arm 1, independent of the child's environment: the capability banner's network line reads `net outbound allowed` for a tunnel and **`net proxy`** for an inspected destination. Worth asserting alongside the five variables, because a change in how nono exports them would otherwise take arm 1 down with it.
+
+**The file is readable from inside, which the criterion needed and its location made doubtful.** The bundle is at `$XDG_STATE_HOME/nono/sessions/intercept-<pid>-<n>/intercept-ca.pem`, outside the project by [D13](plan.md#d13)'s design — yet the session reads it and it contains `BEGIN CERTIFICATE`. And the granted reach and the audit record's `tracked_paths` gain **nothing** but the project, so interception widens no reach and `check_j1_1` and `check_sc1` need no exception. The directory is deleted when the session ends, so arm 1 must read the bundle from inside rather than inspect it afterwards.
+
+A malformed `allow_domain` arm refuses to start — `Profile parse error: data did not match any variant of untagged enum AllowDomainEntry`, exit 1 — so getting the endpoint shape subtly wrong cannot produce a passing check.
+
 ______________________________________________________________________
 
 ### M7f — A commit needs no key (Status: PENDING)
@@ -895,6 +911,8 @@ ______________________________________________________________________
 Unsigned commits are the default, and a key that is genuinely needed arrives from an agent or a secret service rather than from a granted directory ([D16](plan.md#d16)). Not hypothetical: every commit made while implementing this feature failed exactly this way — `M3c`, `M3d`, `M4a` and the `M4b` precondition commit, four for four — `gpg` denied its temporary file beneath `$HOME/.gnupg`, and `git` then reporting `fatal: failed to write commit object`. It fires on the first commit, so a consumer meets it immediately.
 
 **Which half of this task those failures belong to has been measured, and it is the half FR-24 configures away.** The demand comes from the *global* `~/.gitconfig`; under [D11](plan.md#d11)'s redirection the setting is not present anywhere, and a commit in a throwaway checkout then succeeded unsigned with no override. So `check_j6_2` is expected to pass on the mechanism already shipped in `lib/confinement.nix`, and the RED it starts from is the absence of the check rather than a missing capability. `check_r11` correspondingly **must set its demand in the checkout's own `.git/config`** — a demand set globally is erased by `GIT_CONFIG_GLOBAL`, so a check that plants it there would assert nothing and still pass. That is what makes the criterion's wording *a checkout whose own configuration demands a signature* load-bearing, and it is the first thing to get right when this task starts.
+
+**The route a consumer who wants signatures would take is a first-class credential type, not something that would have to be built.** `CommandCredentialConfig` carries a `local-socket` kind whose `path` is documented as "commonly `$SSH_AUTH_SOCK` for SSH agent", with `mode: connect` ([research](research.md#m7--the-credential-surface-and-interception-measured-rather-than-reasoned)). That is worth stating in this task's closing note rather than leaving `D16`'s forwarded socket sounding hypothetical — it is still a new feature number, but it is a configuration rather than an invention.
 
 **RED**: `check_j6_2` and `check_r11`, in one session, each the other's control ([D9](plan.md#d9)).
 

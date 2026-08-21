@@ -1426,6 +1426,69 @@ The `true` record is the pre-flight's enforceability probe and the `sh` record i
 
 A record carries no working directory. Its keys are `audit_attestation audit_event_count audit_integrity command ended executable_identity exit_code merkle_roots network_events session_id snapshot_count started tracked_paths`, and `.cwd`, `.workdir` and `.working_directory` are all absent. **So a two-session check must select by the project path appearing in `tracked_paths`**, and that is also the assertion it wants to make: the record naming `alpha` names no `beta` path and the record naming `beta` names no `alpha` path. Selecting by project and asserting on the project would be circular if the sets were built from the same source, so the check must require exactly one record per project first, then compare the two sets against each other.
 
+## M7 — The credential surface, and interception measured rather than reasoned
+
+Measured on x86_64-linux against the pinned **nono 0.74.0**, whereas [`M1b`](#m1b--pointing-an-agent-at-a-substituted-endpoint) was measured at 0.73.0. Everything below comes either from `nono profile schema` — a 103,981-byte JSON Schema, so the whole surface is machine-readable and needs no `strings` over the binary — or from live sessions against the shipped `.#confinement-claude-code` with one `jq` edit between arms.
+
+### The credential surface is five top-level keys plus two under `network`
+
+The description has 34 top-level keys. Five carry credentials, and the two `M1b` discussed by name are **not** among them, because they live under `network`:
+
+| key | shape | what it is for |
+| --- | --- | --- |
+| `credential_capture` | object → `CredentialCaptureEntry` | supervisor-side commands or provider subprocesses backing a `credential_key: "cmd://<name>"`. Captures run lazily and "captured material is injected by the proxy and never exposed to the sandboxed child" |
+| `credential_providers` | object → `CredentialProviderDef` | declarative OAuth capture: token endpoints to capture, API origins where phantoms resolve, optional store detection and lifecycle helpers |
+| `credential_routes` | **array** → `CredentialRouteDef` | binds a provider to a sandbox-visible phantom credential |
+| `env_credentials` | `SecretsConfig` | keystore account names or `op://`/`bw://`/`apple-password://`/`env://` URIs mapped to variable names, loaded at startup |
+| `secrets` | `SecretsConfig` | an alias for `env_credentials` |
+| `network.credentials` | array of names | "Credential service names to enable via the reverse proxy" — the activation list |
+| `network.custom_credentials` | object → `CustomCredentialDef` | "Keys are service names used with `--credential`" |
+
+Required fields, which is what constrains the arrangement `M7a` and `M7b` have to write:
+
+- `CredentialRouteDef` — `name`, `provider`. `env_var` is optional and its own description says why: it is "for clients that can start from a sandbox-visible phantom token. Many OAuth CLI clients instead receive phantoms through their captured credential store during login." `base_url_env_var` "points SDKs at the mediated proxy base URL". `upgrades` names WebSocket targets, each origin having to be one of the provider's `api_hosts`.
+- `CredentialProviderDef` — `type` (`oauth_capture`), `token_endpoints` ("Configure every token-bearing endpoint the client may use"), `api_hosts`. `inject_header` defaults to `Authorization` and `credential_format` to `Bearer {}`.
+- `CustomCredentialDef` — only `upstream`. **`env_var` is required whenever `credential_key` is a URI manager reference** — `op://`, `bw://`, `apple-password://`, `file://`, `cmd://` — and optional only for `env://`, where it is derived. `credential_key` is mutually exclusive with `auth`, `aws_auth` and `spiffe`. A non-empty `endpoint_rules` makes that route default-deny, and `rate_limit` "applies only to L7-visible traffic" with "no effect on opaque CONNECT tunnels".
+- `CredentialCaptureEntry` — nothing required. `command` is "executed without a shell", `provider` is a subprocess speaking `nono.credential-provider.v1`, and `interaction` is an "explicit opt-in policy for interactive capture commands".
+- `CommandCredentialConfig` carries a **`local-socket`** kind whose `path` is "commonly `$SSH_AUTH_SOCK` for SSH agent", with `mode: connect`. So the forwarded-agent-socket route [`D16`](plan.md#d16) names for a signing key is a first-class credential type rather than something that would have to be built, which is what `M7f`'s closing note should cite.
+
+A bogus service name is still accepted silently at 0.74.0: `nono run --credential __bogus__ --dry-run -- true` exits 0 with nothing in either stream matching `bogus|unknown|credential`. `M7a`'s criterion that the wrapper validate the name itself therefore still stands, and is not an artefact of the older version it was first measured against.
+
+### D12 holds exactly, and the plant `M7e` names is measured to bite
+
+`allow_domain`'s items are `oneOf` a plain string or an `AllowDomainWithEndpoints`, which requires `domain` and `endpoints`; each `EndpointRule` requires `method` and `path`, both **singular**. Guessing the plurals gives `Profile parse error: data did not match any variant of untagged enum AllowDomainEntry` and exit 1 — a malformed arm refuses to start rather than falling back, so a check cannot get this subtly wrong and pass.
+
+Two arms, one `jq` edit apart, each running a bash probe out of the substrate:
+
+| `network.allow_domain` | the five trust-bundle variables | the banner's network line |
+| --- | --- | --- |
+| `["example.com"]` | all five **`<unset>`** | `net outbound allowed` |
+| `[{"domain":"example.com","endpoints":[{"method":"GET","path":"/"}]}]` | all five set, to the **same** path | `net proxy` |
+
+Both exit 0. So interception is per-destination and off by default exactly as `D12` says, and `M7e`'s planted violation — asking for the destination as a plain string — leaves all five unset, which means arm 1 asserts a difference rather than restating the description. The banner's `net proxy` is a second observable for the same fact, independent of the child's environment, and worth asserting alongside the variables rather than instead of them.
+
+### The trust bundle is readable from inside, and it does not widen the reach
+
+This was the open question, because the bundle is at `$XDG_STATE_HOME/nono/sessions/intercept-<pid>-<n>/intercept-ca.pem` and [`D13`](plan.md#d13) keeps `XDG_STATE_HOME` deliberately outside the project. From inside the intercepting session:
+
+| observable | value |
+| --- | --- |
+| `SSL_CERT_FILE` | the `intercept-ca.pem` path under the ambient `XDG_STATE_HOME` |
+| the file exists | yes |
+| reading it | succeeds, and it contains `BEGIN CERTIFICATE` |
+| the banner's non-store grants | the project, `+ 34 system/group paths`, `net proxy` — **and nothing else** |
+| the audit record's non-store `tracked_paths` | the project, and nothing else |
+
+Both halves matter. **`M7e` arm 1 can assert that the file exists and parses, from inside the session**, which is what the criterion asks for and what the location made doubtful. And the readability does **not** appear as a tracked path, so `check_j1_1`'s and `check_sc1`'s set equalities are unaffected by interception and neither needs a new exception. Whatever mechanism delivers the file — a pre-opened descriptor, a bind, or a path inside the collapsed `+ 34 system/group paths` — is invisible to the observable the reach checks are built on.
+
+The intercept directory is also **removed when the session ends**: `find "$XDG_STATE_HOME/nono/sessions" -name 'intercept-*'` afterwards finds nothing. So a check must read the bundle from inside the session and cannot inspect it afterwards.
+
+### Two traps for whoever writes these checks
+
+`XDG_CONFIG_HOME` pointing at a directory that does not exist produces nine `WARN Ignoring invalid XDG_CONFIG_HOME='…' (canonicalize failed: No such file or directory)` lines on stderr and **falls back to `$HOME/.config`** — silently, as far as the exit status goes. A check that means to isolate the config root must `mkdir -p` it, or it will be testing the developer's own configuration.
+
+`nix build .#nono` is the way to reach the pinned supervisor from a harness; `substrate_member`'s loop over `store-paths` testing `[ -x "$p/bin/bash" ]` is the way to reach a `bash`, and a name regex is not, because the `-doc` output sorts first and carries no `bin/`.
+
 ## M8e — Where each agent reads its declarative extensions from
 
 **Partial.** `opencode` is measured; `claude-code` and `pi` are not.
