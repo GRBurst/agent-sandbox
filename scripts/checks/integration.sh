@@ -4160,3 +4160,273 @@ check_j8_1() {
 
 	[ "$found" -eq 0 ]
 }
+
+# Which of the given paths a session can actually read, under a given grant.
+#
+# The grant is passed as the flags the entry point itself built, terminated by
+# `--`, so what is exercised is the reach the shipped wrapper asked for rather
+# than the reach this check would have preferred to see. Reads with bash's own
+# redirection because the enumerated substrate carries no cat, and requires the
+# content to be non-empty so a path that exists but yields nothing cannot pass
+# for a readable one. Prints the readable paths, sorted.
+#
+# Each answer is marked and the marker stripped again, because nono writes its
+# own diagnostics to stdout rather than stderr: measured, a session started
+# without a resolvable credential prints a `Credential not found for route`
+# warning that would otherwise be indistinguishable from a readable path and
+# would land in the difference set as though the surface had brought it.
+session_readable() {
+	local nono=$1 profile=$2 bash_path=$3 project=$4 home_dir=$5
+	local -a grant=()
+	shift 5
+	while [ $# -gt 0 ] && [ "$1" != -- ]; do
+		grant+=("$1")
+		shift
+	done
+	[ "${1:-}" = -- ] || return 1
+	shift
+	# The probe body runs inside the session, so it is deliberately unexpanded
+	# here.
+	# shellcheck disable=SC2016
+	env "${SESSION_ENV[@]}" "HOME=$home_dir" \
+		env -C "$project" "$nono" run --profile "$profile" \
+		--workdir "$project" --allow-cwd "${grant[@]+"${grant[@]}"}" -- \
+		"$bash_path" -c \
+		'for p in "$@"; do if { v=$(<"$p"); } 2>/dev/null && [ -n "$v" ]; then printf "READABLE\t%s\n" "$p"; fi; done' \
+		probe "$@" 2>/dev/null | sed -n 's/^READABLE\t//p' | sort
+}
+
+# R9. Journey 8's harder half: reaching for the surface must not drag in the
+# installation it sits inside.
+#
+# A grant that brings the declared surface *and* something else satisfies
+# check_j8_1 completely, so no single observation can carry this. The property
+# is a difference: the same planted home directory is used twice, once with the
+# surface declared and once without, and the readable sets are subtracted. What
+# the declaration is responsible for is exactly what appears in one and not the
+# other, and that difference is asserted equal to the declaration in both
+# directions — nothing missing, and nothing extra.
+#
+# The reach is observed by reading, not by reasoning about the grant: each arm
+# runs a session under the argv the wrapper itself built and asks it which of
+# the planted paths it can actually open.
+#
+# The self-referential case M1e found gets its own arm. A host confinement
+# description sitting in the same home directory must take no part in deciding
+# what the session may reach, so the grant is compared against a run made with
+# that description deleted. Equal grants is the only outcome that means the
+# boundary was decided inside the repository.
+check_r9() {
+	local outside home proj agent binary entry strace_bin nono_bin
+	local trace project i rc want canary got missing extra arm surface
+	local found=0
+	local -a table=() binaries=() invocation=() declared=() probe=() secrets=()
+	local -a granted=() grant=()
+	local FIXTURE_PROFILE FIXTURE_SUBSTRATE FIXTURE_BASH
+	local -a SESSION_ENV
+	local system
+
+	system=$(nix eval --impure --raw --expr builtins.currentSystem) || {
+		fail 'the current system does not resolve, so no entry point can be named'
+		return 1
+	}
+	if ! mapfile -t table < <(nix eval --json "$REPO_ROOT#agents" \
+		--apply builtins.attrNames | jq -r '.[]'); then
+		fail 'the agent table does not evaluate, so there is no set to assert the property over'
+		return 1
+	fi
+	if ! mapfile -t binaries < <(nix eval --json "$REPO_ROOT#agentBinaries.$system" |
+		jq -r 'to_entries | sort_by(.key) | .[].value'); then
+		fail 'the entry point names do not evaluate, so no agent can be started'
+		return 1
+	fi
+	if [ "${#table[@]}" -eq 0 ] || [ "${#table[@]}" -ne "${#binaries[@]}" ]; then
+		fail "the agent table has ${#table[@]} entries and ${#binaries[@]} commands, so there is no set to assert the property over"
+		return 1
+	fi
+
+	nono_bin=$(pinned_bin nono) || return 1
+
+	outside=$(mktemp -d -p "${XDG_RUNTIME_DIR:-/tmp}" agent-sandbox-r9.XXXXXX)
+	# shellcheck disable=SC2064
+	trap "rm -rf '$outside'" RETURN
+
+	home="$outside/home"
+	proj="$outside/proj"
+	mkdir -p "$proj"
+	session_env "$outside/state"
+	project=$(cd "$proj" && pwd -P)
+
+	# A home directory that already configures these agents for every project,
+	# which is R9's Given. Two declared skill directories and a third beside
+	# them under the same parent, so a declaration widened to their common
+	# ancestor is distinguishable from one that names each in its own right.
+	canary="host-canary-$RANDOM$RANDOM"
+	declared=("$home/skills/alpha" "$home/skills/beta")
+	mkdir -p "${declared[0]}/one" "${declared[1]}/two" "$home/skills/gamma/three" \
+		"$home/.claude/projects/p" "$home/.pi/agent/sessions" \
+		"$home/.config/nono/profiles"
+	printf -- '---\nname: one\ndescription: %s, declared\n---\n\n%s-one\n' \
+		"$canary" "$canary" >"${declared[0]}/one/SKILL.md"
+	printf -- '---\nname: two\ndescription: %s, declared\n---\n\n%s-two\n' \
+		"$canary" "$canary" >"${declared[1]}/two/SKILL.md"
+	printf -- '---\nname: three\ndescription: %s, never declared\n---\n\n%s-three\n' \
+		"$canary" "$canary" >"$home/skills/gamma/three/SKILL.md"
+
+	# The three classes FR-21 keeps out, and the confinement description whose
+	# reach would define the boundary from outside it.
+	secrets=(
+		"$home/.claude/.credentials.json"
+		"$home/.claude/projects/p/history.jsonl"
+		"$home/.pi/agent/sessions/state.jsonl"
+		"$home/.config/nono/profiles/host.json"
+	)
+	printf '{"token":"%s-credential"}\n' "$canary" >"${secrets[0]}"
+	printf '{"role":"user","text":"%s-history"}\n' "$canary" >"${secrets[1]}"
+	printf '{"session":"%s-state"}\n' "$canary" >"${secrets[2]}"
+	printf '{"meta":{"name":"%s-host"}}\n' "$canary" >"${secrets[3]}"
+
+	# The control: something a session reaches in every arm regardless of the
+	# declaration, so a session that read nothing at all cannot pass by having
+	# an empty difference.
+	printf '%s-project\n' "$canary" >"$proj/canary.txt"
+
+	probe=(
+		"${declared[0]}/one/SKILL.md"
+		"${declared[1]}/two/SKILL.md"
+		"$home/skills/gamma/three/SKILL.md"
+		"${secrets[@]}"
+		"$project/canary.txt"
+	)
+	# What the declaration is answerable for, and nothing else.
+	want=$(printf '%s\n' "${declared[0]}/one/SKILL.md" "${declared[1]}/two/SKILL.md" | sort)
+
+	for ((i = 0; i < ${#table[@]}; i++)); do
+		agent=${table[i]}
+		binary=${binaries[i]}
+		entry=$(pinned_bin "$binary") || return 1
+		session_fixture "$agent" || return 1
+		strace_bin=$(substrate_member "$FIXTURE_SUBSTRATE" strace) || {
+			fail "the substrate for $agent provides no strace, so the grant it was given cannot be observed"
+			return 1
+		}
+		case $binary in
+		opencode) invocation=(debug skill) ;;
+		claude | pi) invocation=(-p hi) ;;
+		*)
+			fail "no invocation is known to start $binary far enough to observe its reach"
+			return 1
+			;;
+		esac
+
+		# Both arms, then the same arm again with the host confinement
+		# description deleted. Each writes its grant and its readable set.
+		for arm in declared bare nohost; do
+			trace="$outside/trace.$agent.$arm"
+			case $arm in
+			declared | nohost)
+				surface="AGENT_SANDBOX_SKILLS=${declared[0]}:${declared[1]}"
+				;;
+			bare)
+				surface=AGENT_SANDBOX_SKILLS=
+				;;
+			esac
+			if [ "$arm" = nohost ]; then
+				# Only the grant is read from this arm, so the cheapest
+				# invocation that still reaches `exec nono run` will do.
+				rm -rf "$home/.config/nono"
+				env "${SESSION_ENV[@]}" "HOME=$home" \
+					"XDG_CONFIG_HOME=$outside/cfg" "$surface" \
+					env -C "$proj" "$strace_bin/bin/strace" -ff -s 4096 \
+					-e trace=execve -o "$trace." \
+					"$entry/$binary" --version \
+					>/dev/null 2>&1 || :
+				mkdir -p "$home/.config/nono/profiles"
+				printf '{"meta":{"name":"%s-host"}}\n' "$canary" >"${secrets[3]}"
+			else
+				env "${SESSION_ENV[@]}" "HOME=$home" \
+					"XDG_CONFIG_HOME=$outside/cfg" \
+					"ANTHROPIC_API_KEY=sk-ant-canary-$RANDOM$RANDOM" \
+					"$surface" \
+					env -C "$proj" "$strace_bin/bin/strace" -ff -s 4096 \
+					-e trace=execve -o "$trace." \
+					"$entry/$binary" "${invocation[@]}" \
+					>"$outside/out.$agent.$arm" 2>"$outside/err.$agent.$arm" &&
+					rc=0 || rc=$?
+			fi
+			cat "$trace".* >"$trace" 2>/dev/null || :
+
+			mapfile -t granted < <(grep -oE '"--(read|allow|write)", "[^"]*"' "$trace" |
+				sed -E 's/"(--[a-z]+)", "([^"]*)"/\1 \2/' | sort -u)
+			printf '%s\n' "${granted[@]+"${granted[@]}"}" >"$outside/grant.$agent.$arm"
+
+			[ "$arm" = nohost ] && continue
+
+			# The control, per arm: the session has to have started and got
+			# somewhere. The pre-flight's own refusals are 77 and 78.
+			if [ "$rc" = 77 ] || [ "$rc" = 78 ] ||
+				! grep -qE 'execve\("[^"]*/nono"' "$trace"; then
+				found=1
+				fail "$(printf 'the %s session did not start in the %s arm (exit %s), so its reach means nothing:\n%s' \
+					"$agent" "$arm" "$rc" "$(tail -n 5 "$outside/err.$agent.$arm")")"
+				continue
+			fi
+
+			grant=()
+			for got in "${granted[@]+"${granted[@]}"}"; do
+				grant+=("${got%% *}" "${got#* }")
+			done
+			session_readable "$nono_bin/nono" "$FIXTURE_PROFILE" \
+				"$FIXTURE_BASH/bin/bash" "$project" "$home" \
+				"${grant[@]+"${grant[@]}"}" -- "${probe[@]}" \
+				>"$outside/readable.$agent.$arm"
+
+			# Anti-vacuity for the difference: a probe that could read
+			# nothing at all would subtract to the empty set and pass every
+			# containment below.
+			if ! grep -qxF -- "$project/canary.txt" "$outside/readable.$agent.$arm"; then
+				found=1
+				fail "the $agent session could not read its own project in the $arm arm, so nothing it could not read means anything"
+			fi
+
+			# FR-21, in both arms. Stored credentials, conversation history,
+			# session state and the host's confinement description sit in the
+			# same home directory as the surface and stay out of reach whether
+			# the surface is declared or not.
+			for got in "${secrets[@]}"; do
+				if grep -qxF -- "$got" "$outside/readable.$agent.$arm"; then
+					found=1
+					fail "the $agent session read $got in the $arm arm, so declaring an authoring surface drags in the installation around it"
+				fi
+			done
+		done
+
+		# The difference, both directions. What one arm can read and the other
+		# cannot is exactly what was declared.
+		got=$(comm -13 "$outside/readable.$agent.bare" \
+			"$outside/readable.$agent.declared")
+		missing=$(comm -13 <(printf '%s\n' "$got") <(printf '%s\n' "$want"))
+		extra=$(comm -13 <(printf '%s\n' "$want") <(printf '%s\n' "$got"))
+		if [ -n "$missing" ]; then
+			found=1
+			fail "$(printf 'declaring the surface did not make these readable to %s:\n%s' \
+				"$agent" "$missing")"
+		fi
+		if [ -n "$extra" ]; then
+			found=1
+			fail "$(printf 'declaring the surface also made these readable to %s:\n%s' \
+				"$agent" "$extra")"
+		fi
+
+		# The self-referential case: the same declaration, with the host's own
+		# confinement description gone, has to produce the same grant.
+		if ! diff -q "$outside/grant.$agent.declared" \
+			"$outside/grant.$agent.nohost" >/dev/null; then
+			found=1
+			fail "$(printf 'deleting the host confinement description changed what the %s session was granted, so configuration outside the boundary decided the boundary:\n%s' \
+				"$agent" "$(diff "$outside/grant.$agent.declared" "$outside/grant.$agent.nohost")")"
+		fi
+	done
+
+	[ "$found" -eq 0 ]
+}

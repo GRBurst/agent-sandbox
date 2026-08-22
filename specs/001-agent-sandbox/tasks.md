@@ -1218,7 +1218,7 @@ No check changed, and none should have: a spike that alters behaviour is not a s
 
 The suite is at `1 of 30 checks failed`, `check_sc3` now missing only `j7_1 r9 rep1 rep2`.
 
-### M8g — The declared surface is exactly what arrives (Status: PENDING)
+### M8g — The declared surface is exactly what arrives (Status: IMPLEMENTED)
 
 **Scenario**: R9
 
@@ -1226,12 +1226,24 @@ The half of R9 that needs `M8f` to exist. A grant that brings the surface *and* 
 
 **RED**: `check_r9` runs the same planted host configuration twice, once with the surface declared and once without, and subtracts the readable sets.
 
-- [ ] Check written and seen to FAIL
-- [ ] The difference set is asserted **equal** to the declared locations, in both directions: `⊇` is the surface arriving, `⊆` is nothing arriving with it
-- [ ] Stored credentials, conversation history and session state are planted under the same host root and asserted unreachable in both arms (FR-21)
-- [ ] No host confinement description takes part in deciding reach, asserted by comparing granted paths against a run with the host description removed — the self-referential case `M1e` found, where host configuration decides what a session may reach
-- [ ] **Control**: the session starts and works in both arms, so an agent that read nothing cannot pass
-- [ ] Both violations planted (widen the declaration to the locations' common ancestor; grant the host's confinement description directory), each seen to FAIL, reverted, recorded in plan.md
+- [x] Check written and seen to FAIL
+- [x] The difference set is asserted **equal** to the declared locations, in both directions: `⊇` is the surface arriving, `⊆` is nothing arriving with it
+- [x] Stored credentials, conversation history and session state are planted under the same host root and asserted unreachable in both arms (FR-21)
+- [x] No host confinement description takes part in deciding reach, asserted by comparing granted paths against a run with the host description removed — the self-referential case `M1e` found, where host configuration decides what a session may reach
+- [x] **Control**: the session starts and works in both arms, so an agent that read nothing cannot pass
+- [x] Three violations planted rather than the two named here, each seen to FAIL, reverted, recorded in plan.md
+
+**Findings**
+
+- **The reach is *read*, not reasoned about.** `session_readable` takes the grant off the wrapper's own `execve` line and hands that exact argv to a fresh `nono run`, which then tries to open each planted path. A check that subtracted two lists of `--read` flags would assert that the wrapper says the right thing; this one asserts that the session can do the right thing, and the two differ wherever a grant names a path a profile then withholds.
+- **nono's diagnostics go to stdout**, so a session started with no resolvable credential prints `Credential not found for route 'anthropic'` into the same stream the probe answers on. Unmarked, that line lands in the difference set as though the surface had brought it. The probe marks each answer and the marker is stripped again, which is the only reason the difference is ever empty.
+- **The three plants are disjoint, and that is what needed three of them.** Widening the grant to the surface's parent fires the difference arm alone; granting the host's `nono` directory fires FR-21 alone; making the grant *depend* on the host description fires the self-referential arm alone. The plan predicted the middle one would cover the last, on the reasoning that a granted host description is a host description deciding reach. It is not: an unconditional grant is byte-identical in both arms, so `deciding` needs a plant that varies with the description's presence. The third plant is P2 applied to a checklist line that would otherwise have gone unproven.
+- **The never-declared sibling is load-bearing.** `$home/skills/gamma/three` sits under the same parent as the two declared roots and is what makes the widening plant bite. Without it the plant widens to a directory holding nothing else, the difference is unchanged, and the `⊆` direction passes for want of anything to catch — the plan's own prediction, that the parent would drag in credentials and history, does not hold for a home laid out the way a consumer lays one out.
+- **The anti-vacuity arm is per-arm, not per-check.** `$PWD/canary.txt` is asserted readable in `declared` and in `bare` separately, because a difference of two empty sets is empty and satisfies both containments. The `nohost` arm needs none: only its grant is read, so the cheapest `--version` run that still reaches `exec nono run` is enough, and it never starts a session to be vacuous about.
+- **The suite was silently one check short, and this task is how that surfaced.** With `check_r9` written, discovered by `--list` and named by `check_sc3` as covered, a full run still printed `1 of 30 checks failed` and never mentioned it. `run_layers` feeds check names to a `while read` loop through a process substitution, so a check inherits that list on its stdin; `check_j8_1` starts `claude -p hi` and `pi -p hi`, print mode reads stdin for its prompt, and the last name in the file was eaten. Reproduced in isolation before the harness was touched, because "a check vanished" and "a check was never defined" look identical from a green run.
+  Two fixes, at two depths. `run_check` gives each check `</dev/null`, which closes the cause. And `run_layers` counts what `checks_in` found against what the loop reached, which closes the class: the existing anti-vacuity rule only fires when *nothing* ran, and a suite that runs all but one is the same failure one increment away from invisible. The second is what turns a future recurrence into a red run instead of a shorter green one.
+
+The suite is at `1 of 31 checks failed`, `check_sc3` now missing only `j7_1 rep1 rep2`.
 
 **Checkpoint**: FR-1 is satisfied; all three agents are confined and `check_sc1` still passes without being edited, which is the property SC-1 asserts. FR-25 holds for every agent, and SC-9's obligation — that any location the surface does *not* reach is named in the usage document rather than discovered by experiment — is carried into `M10a`.
 

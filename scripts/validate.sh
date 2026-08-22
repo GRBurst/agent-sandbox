@@ -111,7 +111,13 @@ readonly SKIP_STATUS=78
 
 run_check() {
 	local name=$1 output rc=0
-	output=$("$name" 2>&1) || rc=$?
+	# No stdin, and this is load-bearing rather than tidy. run_layers feeds the
+	# check names through a process substitution on the loop's stdin, which a
+	# check inherits; an agent started in print mode reads stdin for its prompt,
+	# drains the list, and every name after it is silently never run. Measured:
+	# `check_j8_1`'s sessions swallowed `check_r9` and the suite reported 30
+	# passes with nothing to say the thirty-first existed.
+	output=$("$name" 2>&1 </dev/null) || rc=$?
 	if [ "$rc" -eq 0 ]; then
 		printf 'PASS  %s\n' "$name"
 		return 0
@@ -138,11 +144,14 @@ list_checks() {
 }
 
 run_layers() {
-	local layer file name rc ran=0 failed=0 skipped=0
+	local layer file name rc ran=0 failed=0 skipped=0 found=0
+	local -a defined=()
 	for layer in "$@"; do
 		file=$(layer_file "$layer")
 		[ -f "$file" ] || continue
 		printf '== %s\n' "$layer"
+		mapfile -t defined < <(checks_in "$file")
+		found=$((found + ${#defined[@]}))
 		while read -r name; do
 			rc=0
 			run_check "$name" || rc=$?
@@ -160,6 +169,13 @@ run_layers() {
 	# testing nothing, which is strictly worse than a red run. A skipped check
 	# is not a run one, so a host where every check skipped fails here.
 	[ "$ran" -gt 0 ] || die "no checks ran; the suite would report success without testing anything"
+	# The same rule one step finer: a suite that ran all but one reports success
+	# too, and says nothing about the one. What the layer files define is counted
+	# before the loop and compared against what the loop reached, so a loop cut
+	# short is a red run — which is how `check_r9` came to be missing from a
+	# green one.
+	[ "$found" -eq $((ran + skipped)) ] ||
+		die "$found checks were found and $((ran + skipped)) ran; the suite stopped short of its own list"
 	if [ "$failed" -gt 0 ]; then
 		printf '%d of %d checks failed\n' "$failed" "$ran" >&2
 		return 1
