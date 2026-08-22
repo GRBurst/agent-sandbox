@@ -5,9 +5,9 @@
 # `agents.${name} or (throw …)`. P9 forbids a lookup miss producing something
 # that merely looks like a confined session.
 #
-# Only `claude-code` is here today. `opencode` and `pi` arrive with M8, which is
-# where the checks that observe them live; adding them now would be asserting
-# nothing about two agents while appearing to support them.
+# All three of FR-1's agents are here, each landing beside the check that
+# observes it: an entry whose behaviour nothing exercises would assert nothing
+# about an agent while appearing to support it.
 #
 # Each entry carries only what some check already exercises. `credential`
 # arrives with M7, which asserts the credential's shape. The alternative is a
@@ -168,6 +168,53 @@ lib.mapAttrs (_: checkAgent) {
       # P8, for claude-code's reason: nix owns the version, and an agent that
       # updates itself is not the agent this description was written against.
       OPENCODE_DISABLE_AUTOUPDATE = "1";
+    };
+  };
+
+  pi = {
+    package = agentPkgs: agentPkgs.pi;
+
+    # Nothing a group grants is wanted here either, for D15's reason.
+    groups = [ ];
+
+    # The same one service, and for the same measured reason as opencode: M8d
+    # found the bundled Anthropic SDK defaulting `baseURL` from
+    # ANTHROPIC_BASE_URL and `apiKey` from ANTHROPIC_API_KEY, the pair the
+    # mediated route injects. D14 expected this agent to need a provider base
+    # URL written into a configuration file; it does not, and this environment
+    # writes none.
+    credentialServices = [ "anthropic" ];
+
+    stateVars = w: {
+      # One variable carries the whole relocation. M1d measured it and M8d
+      # confirmed it occurs exactly once in the binary, as the sole override of
+      # a `$HOME/.pi/agent` default, so everything the agent persists — its
+      # credential store, its model store, its session transcripts — follows it.
+      #
+      # PI_CODING_AGENT_SESSION_DIR is documented and absent from the binary, so
+      # it is not set: a variable nothing reads is a claim nothing keeps true.
+      #
+      # PI_PACKAGE_DIR is documented as "useful for Nix/Guix store paths", which
+      # reads like the mechanism FR-22 wants. M8d found it names the agent's own
+      # installation — themes and assets, derived from `dirname(execPath)` — and
+      # not its extensions, so setting it would point the agent away from the
+      # files nix already gave it.
+      PI_CODING_AGENT_DIR = "${w}/.agents/pi";
+
+      # FR-22. This is the variable that stops the agent extending itself: a
+      # package declared in the settings it reads is installed on startup, and
+      # M8d measured the difference directly — set, the agent lists the
+      # declaration and fetches nothing; unset, startup runs
+      # `npm install <pkg> --prefix <root>/npm --legacy-peer-deps` and the tree
+      # appears. M1d's "startup operations only" is why it does not constrain
+      # `pi install` typed by hand, which reaches the registry either way.
+      #
+      # It is not the only guard, and the other one is the boundary rather than
+      # a setting: with this unset, a confined session's attempt dies on
+      # `EACCES: permission denied, posix_spawn 'npm'`, because the enumerated
+      # execution substrate carries no npm to run. Two guards, because a
+      # settings file is a request and the substrate is an answer.
+      PI_OFFLINE = "1";
     };
   };
 

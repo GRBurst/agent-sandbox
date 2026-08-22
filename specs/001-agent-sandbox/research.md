@@ -57,6 +57,8 @@ Decisive quotations:
 - `codex` — built from the pinned nixpkgs and inspected; Rust symbols `config_toml::deserialize_model_providers`, `validate_model_providers`, `merge_configured_model_providers`, `create_oss_provider_with_base_url` and `resolve_runtime_model_provider_base_url`, with the TOML field names `base_url` and `wire_api` adjacent in the serde table. It validates its CA variables — "custom CA env var points at an unreadable file", "custom CA env var does not point at a file"
 
 `claude-code`, `opencode` and `pi` are Bun binaries and honour `NODE_EXTRA_CA_CERTS`; `codex` honours it too, among seven others.
+
+The "by what" column is corrected for `opencode` and `pi` by [`M8c`](#m8c--opencode-needs-no-variable-of-its-own-and-takes-its-credential-from-the-environment) and [`M8d`](#m8d--pi-needs-two-variables-and-fr-22-is-not-the-networks-doing), which ran the agents rather than reading them. Both configuration keys exist, and neither is needed: both agents default the base URL from `ANTHROPIC_BASE_URL` and the key from `ANTHROPIC_API_KEY`, in the same constructor, so all three shipped agents take the mediated route out of the environment and this environment writes no provider configuration at all. The row for `opencode` was also wrong to expect config precedence to shadow the variable — config wins only where it is set, and nothing sets it.
 That is the one CA lever proven across all four.
 In the three Bun binaries `SSL_CERT_FILE`/`SSL_CERT_DIR` appear only as isolated symbols with no surrounding logic, so they are not established there.
 
@@ -256,8 +258,14 @@ Two observations sharpen it.
 And although `settings.json` records the pinned spec `npm:left-pad@1.3.0`, the `package.json` `pi` generates beside it reads `"left-pad": "^1.3.0"` — a caret range, resolved when the install runs.
 
 **The environment therefore ships no `pi` packages and sets `PI_OFFLINE`.**
-With no packages declared there is nothing to install on startup; `PI_OFFLINE` also suppresses the update check and the model-catalogue refresh.
 A consumer who wants a package provisions it into the project before the session, which is exactly what FR-22 asks for.
+
+Two claims in the paragraphs above are corrected by [`M8d`](#m8d--pi-needs-two-variables-and-fr-22-is-not-the-networks-doing), which had to make `PI_OFFLINE` bite:
+
+- "`PI_OFFLINE` disables *startup* network operations, not explicit commands" is right, but the *startup* half was never observed here, because it was measured with no package declared and there was nothing for it to disable. Declare one and it is plain: `{"packages":["npm:left-pad"]}` in the user settings file, and without the variable the next `pi` invocation runs a real `npm install` and leaves `npm/node_modules/left-pad` under the relocated root. With it, `pi list` reports the package and installs nothing.
+- "`PI_OFFLINE` also suppresses the update check and the model-catalogue refresh" was inferred from the documentation rather than measured, and no run here could tell the two arms apart: `pi --list-models` and a real `-p` exchange produced identical file trees and identical `connect` sets under `strace` either way. Whatever those two operations are gated on, it is not something an unattended check reaches. The variable stays for the install, which is observable.
+
+Also worth writing down, because the name reads exactly like the mechanism FR-22 wants: `PI_PACKAGE_DIR` is documented as "override the package directory, useful for Nix/Guix store paths", and it is **not** about `pi` packages. It defaults to `dirname(process.execPath)` and feeds `getThemesDir()` and its siblings — it names `pi`'s own installation. Setting it would point the agent's themes and assets at the wrong place while moving no extension at all.
 
 ## M1e — Machine-readable resolved policy
 
@@ -1969,6 +1977,83 @@ The fix was to make the description true rather than to add a second copy of it:
 The two plants against `check_opencode` are recorded there too. The second is worth reading for its surprise: removing a root's relocation does not make `opencode` write to `$HOME`, it makes `opencode` die with `EACCES` before it can answer. Relocation for this agent is load-bearing rather than tidying, and its failure mode is refusal rather than leakage — the mirror image of `claude-code`, which reached `$HOME` only once the plant also granted the fallback.
 
 One misleading detail worth knowing when reading a failure: nono's epilogue said `No path denials were observed during this session. The failure may be unrelated to sandbox restrictions.` It was entirely related. The denial was an `openat` inside the agent's own error handling rather than a tracked path denial, so nono's own accounting did not see it.
+
+## M8d — `pi` needs two variables, and FR-22 is not the network's doing
+
+Measured against `pi 0.84.2`, `/nix/store/bjgyqm88nc2v0bl2cjbg0lklprnwmmlz-pi-0.84.2` — the same version `M1d` read, so its findings carry over and only the ones below are new.
+
+### The relocation half needed no work, and one documented variable is a trap
+
+`M1d` had already settled it: `PI_CODING_AGENT_DIR` occurs exactly once in the binary, as the sole override of a `$HOME/.pi/agent` default, and `PI_CODING_AGENT_SESSION_DIR` is documented but absent from the code. Both hold. Confirmed by writing: a real session leaves `auth.json`, `models-store.json` and `sessions/<mangled-cwd>/<timestamp>_<uuid>.jsonl` under the relocated root and nothing under the home directory.
+
+The trap is `PI_PACKAGE_DIR`, which `docs/environment-variables.md` describes as "override the package directory, useful for Nix/Guix store paths". It reads like the mechanism FR-22 wants and is nothing of the kind: it defaults to `dirname(process.execPath)` and is consumed by `getThemesDir()` and its siblings, so it names `pi`'s **own** installation — themes, assets, bundled docs. Setting it moves no extension and misdirects the agent's assets. It is deliberately unset, and this is written down because the documentation invites the mistake.
+
+### The credential arrives the same way it does for `opencode`, so `D14`'s written file is withdrawn for both
+
+The task expected `providers.<id>.baseUrl` in a `models.json` this environment writes. The bundled Anthropic SDK reads both names in its own constructor defaults:
+
+```js
+constructor({ baseURL = readEnv("ANTHROPIC_BASE_URL"), apiKey = readEnv("ANTHROPIC_API_KEY") ?? null, authToken = readEnv("ANTHROPIC_AUTH_TOKEN") ?? null, ...opts } = {})
+```
+
+`docs/providers.md` agrees, documenting a provider-to-variable table whose Anthropic row is `ANTHROPIC_API_KEY`. So `credentialServices = [ "anthropic" ]` is the whole entry again and no file is written — the third agent in a row for which that is true, which is why the correction is made against [`D14`](plan.md#d14) rather than against this task.
+
+`pi auth check --provider anthropic --json --credentials` is a better observable than either of the other two agents offer, because it prints the credential the agent is holding rather than the name of the variable it came from:
+
+| State | Exit | Payload |
+| --- | --- | --- |
+| credential present | 0 | `{"status":"ready","provider":"anthropic","authType":"api_key","credentials":"<the value verbatim>"}` |
+| no credential | 1 | `{"status":"not_ready","provider":"anthropic","reason":"credentials_not_configured"}` |
+| relocation dropped | 2 | `{"status":"invalid","provider":"anthropic","reason":"invalid_state"}` |
+
+So the substitute is **read** rather than inferred: the check asserts the 64-hex form on the value the agent itself reports, and asserts the real canary appears in neither stream. The third row is the plant, and it is a distinct payload rather than a distinct exit status alone.
+
+### `PI_OFFLINE` bites, but only against a declared package
+
+`M1d` recorded this variable as gating "startup operations only" and could not see it do anything, because it was measured with nothing declared. With `{"packages":["npm:left-pad"]}` in `$PI_CODING_AGENT_DIR/settings.json`, unconfined, the two arms are plainly different:
+
+| `PI_OFFLINE` | `pi list` | The relocated root afterwards |
+| --- | --- | --- |
+| `1` | `User packages:` / `npm:left-pad`, exit 0 | no `npm/`, no network |
+| unset | the same listing, after `added 1 package, and audited 2 packages in 4s` | `npm/node_modules/left-pad` |
+
+Two details that decide how the check is written. `pi list` reads the `packages` array from the **user** settings file the relocated root holds; a project-local `.pi/settings.json` is ignored until the project is trusted, and a declaration planted there produced `No packages installed.` and no install in either arm. And the listing has to be asserted, not just the absence of `node_modules`: a session asked to install nothing installs nothing, so without that control the FR-22 assertion is vacuous.
+
+### The boundary stops the fetch as well, and that is a second guard rather than the same one
+
+With `PI_OFFLINE` removed **inside** a confined session, the startup install is attempted and killed:
+
+```text
+EACCES: permission denied, posix_spawn 'npm'
+spawnargs: [ "install", "left-pad", "--prefix", "<proj>/.agents/pi/npm", "--legacy-peer-deps" ]
+```
+
+`sessionTools` carries no `npm` and no `node`, so the substrate the session runs cannot spawn the installer. The two guards are independent: the variable stops the attempt, the substrate stops the attempt from succeeding, and either alone satisfies FR-22 for the declared-package path.
+
+### What FR-22 cannot be, measured: egress from a confined session is unrestricted
+
+Worth recording because it is the obvious wrong reading of FR-22. The built description's `network` block is exactly `{"credentials":["anthropic"]}` — no host allow list and no deny list. Inside a session that means:
+
+| Probe | Result |
+| --- | --- |
+| `bash -c 'exec 3<>/dev/tcp/1.1.1.1/443'` | `connect: Permission denied` — raw TCP is denied |
+| `git -c http.proxy="$https_proxy" ls-remote https://github.com/npm/cli HEAD` | a real SHA — arbitrary HTTPS through the injected proxy succeeds |
+
+The session's environment carries `http_proxy`/`https_proxy` as `http://nono:<token>@127.0.0.1:<port>`, `NODE_USE_ENV_PROXY=1`, `NODE_EXTRA_CA_CERTS` pointing at the intercept authority, and `ANTHROPIC_BASE_URL` at the mediated route — which is also, incidentally, how the credential reaches the agent with no file written.
+
+So the boundary mediates egress rather than restricting where it goes, and **FR-22 is not enforceable against a session that decides to fetch.** A consumer who types `pi install npm:something` inside a session will reach the registry. That is exactly how [`spec.md`](spec.md) already frames the requirement — "verified as the absence of a thing" — and the thing whose absence is verified is *this environment* fetching, not the session being unable to. The unrestricted proxy egress belongs in the handbook's known drift rather than in a footnote here.
+
+### The consumer path is inside the session, not outside it
+
+`M8d`'s fourth criterion assumed provisioning an extension had to happen "outside the confined entry point". Measured from **inside** a confined session, it does not, as long as the source is a local path:
+
+```text
+$ pi install ./vendor/my-ext
+Installing ./vendor/my-ext
+Installed ./vendor/my-ext
+```
+
+`.agents/pi/settings.json` gains `{"packages":["../../vendor/my-ext"]}`, `pi list` resolves it to the vendored directory, and no `node_modules` is created. `docs/packages.md` explains both halves: local paths "are added to settings without copying", and are "resolved against the settings file they appear in" — so the recorded path is relative and a moved or cloned checkout still resolves it. That is the route the handbook documents, and it is the one that keeps what arrives inside the checkout, under version control, and out of the registry.
 
 ## M8e — Where each agent reads its declarative extensions from
 

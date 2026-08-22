@@ -3732,3 +3732,161 @@ check_opencode() {
 
 	[ "$found" -eq 0 ]
 }
+
+# Journey 2.1 for `pi`, plus FR-22. Out of the bijection for check_opencode's
+# reason: Journey 2.1 already has check_j2_1, and FR-22 carries no scenario of
+# its own.
+#
+# What it asserts, and why in this shape:
+#
+#   * Relocation is read from what the session wrote, not from the variable
+#     this environment set. `pi` has no `debug paths` to interrogate, so the
+#     observable is the files themselves: M8d measured `auth.json` and
+#     `models-store.json` appearing directly in the relocated root and nothing
+#     landing anywhere else. Asserting PI_CODING_AGENT_DIR's value instead
+#     would assert this environment's intent back at itself, and
+#     `check_confinement_validates` already does that for every entry in the
+#     table.
+#
+#   * `pi auth check --provider anthropic --json --credentials` prints the
+#     credential the agent resolved, verbatim. That is a stronger observation
+#     than the other two agents allow: rather than inferring from a provider
+#     listing that a credential arrived, this reads the value the agent is
+#     holding and asserts it is the supervisor's substitute and not the real
+#     key. D14 sketched a `providers.<id>.baseUrl` in a file this environment
+#     writes; M8d measured the bundled SDK defaulting `baseURL` from
+#     ANTHROPIC_BASE_URL and `apiKey` from ANTHROPIC_API_KEY, which is exactly
+#     the pair the mediated route injects, so no file is written and none is
+#     asserted here.
+#
+#   * FR-22 is the absence of a thing, which is how spec.md frames it: this
+#     environment declares no `pi` package, so the startup that would install
+#     missing ones has nothing to install and reaches no registry. `pi list`
+#     is the agent's own answer to that, and the relocated root is checked for
+#     the npm tree an install would have left. Neither asserts that a session
+#     *cannot* fetch — M8d measured the confinement's proxy carrying arbitrary
+#     HTTPS, so it can, and the handbook records that.
+check_pi() {
+	local agent=pi binary=pi
+	local entry outside home proj cfg state project rc real root cred
+	local found=0
+	local -a landed=() changed=() strayed=()
+
+	session_fixture "$agent" || return 1
+	entry=$(pinned_bin "$binary") || return 1
+
+	outside=$(mktemp -d -p "${XDG_RUNTIME_DIR:-/tmp}" agent-sandbox-pi.XXXXXX)
+	# shellcheck disable=SC2064
+	trap "rm -rf '$outside'" RETURN
+	home="$outside/home"
+	proj="$outside/proj"
+	cfg="$outside/cfg"
+	state="$outside/state"
+	mkdir -p "$home" "$proj" "$cfg"
+	session_env "$state"
+	project=$(cd "$proj" && pwd -P)
+
+	# The home carries the root this agent falls back to when the relocation is
+	# lost — `$HOME/.pi/agent`, which M8d read out of the binary as the sole
+	# default. Populated for check_j2_1's reason: with nothing there, a session
+	# that lost its relocation writes nowhere the diff below would notice.
+	mkdir -p "$home/.pi/agent"
+	printf '{}\n' >"$home/.pi/agent/auth.json"
+
+	find "$home" -printf '%p\t%s\t%T@\n' | sort >"$outside/before"
+
+	real="sk-ant-real-canary-$RANDOM$RANDOM"
+	root="$project/.agents/pi"
+
+	# One invocation carries both the credential arm and the relocation arm: it
+	# is the call that makes the agent resolve a provider, and resolving one is
+	# what makes it write its stores.
+	env "${SESSION_ENV[@]}" "HOME=$home" "XDG_CONFIG_HOME=$cfg" "ANTHROPIC_API_KEY=$real" \
+		env -C "$proj" "$entry/$binary" auth check --provider anthropic --json --credentials \
+		>"$outside/auth.out" 2>"$outside/auth.err" && rc=0 || rc=$?
+	if [ "$rc" -ne 0 ]; then
+		fail "$(printf 'the agent reports its anthropic credential is unusable (exit %s):\n%s\n%s' \
+			"$rc" "$(cat "$outside/auth.out")" "$(tail -20 "$outside/auth.err")")"
+		return 1
+	fi
+
+	if [ "$(jq -r '.status // ""' "$outside/auth.out")" != ready ]; then
+		found=1
+		fail "$(printf 'the agent does not consider the mediated route usable:\n%s' \
+			"$(cat "$outside/auth.out")")"
+	fi
+	if [ "$(jq -r '.authType // ""' "$outside/auth.out")" != api_key ]; then
+		found=1
+		fail "$(printf 'the agent resolved the credential by some route other than the injected key:\n%s' \
+			"$(cat "$outside/auth.out")")"
+	fi
+
+	# The value the agent is holding. FR-6: 64 hex characters minted for this
+	# session, and not the key the supervisor read out of its own environment.
+	cred=$(jq -r '.credentials // ""' "$outside/auth.out")
+	if ! printf '%s' "$cred" | grep -qE '^[0-9a-f]{64}$'; then
+		found=1
+		fail "the credential the agent holds is not a per-session substitute: ${cred:+${#cred} characters, }not 64 hex"
+	fi
+	if [ "$cred" = "$real" ] || grep -qF "$real" "$outside/auth.out" "$outside/auth.err"; then
+		found=1
+		fail 'the credential the supervisor holds reached the session unsubstituted'
+	fi
+
+	# FR-22, asked the only way that is not vacuous: something has to want
+	# installing. A declaration this environment did not provision is planted in
+	# the settings the session reads, because M8d measured that a declared
+	# package is what the agent installs on startup — with PI_OFFLINE it lists
+	# the declaration and fetches nothing, without it the startup runs a real
+	# `npm install` and the tree appears. Asserting no package tree in a session
+	# that was asked to install none would assert nothing at all.
+	printf '{"packages":["npm:left-pad"]}\n' >"$root/settings.json"
+	env "${SESSION_ENV[@]}" "HOME=$home" "XDG_CONFIG_HOME=$cfg" "ANTHROPIC_API_KEY=$real" \
+		env -C "$proj" "$entry/$binary" list \
+		>"$outside/list.out" 2>"$outside/list.err" && rc=0 || rc=$?
+	if [ "$rc" -ne 0 ]; then
+		found=1
+		fail "$(printf 'the agent could not report its packages (exit %s):\n%s' \
+			"$rc" "$(tail -20 "$outside/list.err")")"
+	elif ! grep -qF 'npm:left-pad' "$outside/list.out"; then
+		# The control. If the agent did not read the declaration, an absent
+		# package tree says only that nothing asked to be fetched.
+		found=1
+		fail "$(printf 'the agent did not read the planted package declaration, so finding nothing installed proves nothing:\n%s' \
+			"$(cat "$outside/list.out")")"
+	fi
+	# The subject: the declaration went unfulfilled. A package this environment
+	# did not provision stays unprovisioned, whatever the session was asked for.
+	mapfile -t strayed < <(find "$root" -maxdepth 3 -name node_modules 2>/dev/null | sort)
+	if [ "${#strayed[@]}" -gt 0 ]; then
+		found=1
+		fail "$(printf 'the session installed a package that was declared but never provisioned through nix, so it fetched code from inside the boundary:\n%s' \
+			"$(printf '%s\n' "${strayed[@]}")")"
+	fi
+
+	# Relocation, observed. The store the agent writes when it resolves a
+	# provider is the one M8d measured, and it is under the working directory.
+	if [ ! -f "$root/auth.json" ]; then
+		found=1
+		fail "$(printf 'the agent wrote no credential store under %s, so its state did not follow the relocation:\n%s' \
+			"$root" "$(find "$project" -mindepth 1 2>/dev/null | head -12)")"
+	fi
+
+	# The control, for check_opencode's reason: without state in the project, an
+	# unchanged home proves nothing.
+	mapfile -t landed < <(find "$project" -mindepth 1 2>/dev/null | sort)
+	if [ "${#landed[@]}" -eq 0 ]; then
+		found=1
+		fail "the session wrote nothing inside the project, so an unchanged home directory would prove nothing"
+	fi
+
+	find "$home" -printf '%p\t%s\t%T@\n' | sort >"$outside/after"
+	mapfile -t changed < <(comm -13 "$outside/before" "$outside/after" | cut -f1)
+	if [ "${#changed[@]}" -gt 0 ]; then
+		found=1
+		fail "$(printf 'the session changed the home directory:\n%s' \
+			"$(printf '%s\n' "${changed[@]}")")"
+	fi
+
+	[ "$found" -eq 0 ]
+}

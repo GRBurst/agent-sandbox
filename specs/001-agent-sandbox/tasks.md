@@ -91,7 +91,7 @@ The finding reversed once between research rounds, so it is verified before FR-4
 - **It relocates, and `pi` needs no registry entry.** `PI_CODING_AGENT_DIR` is the whole root; the binary resolves it in one place, defaulting to `~/.pi/agent`, and the shipped `quickstart.md` confirms that settings, credentials, sessions and installed packages all live there. Of the five `homedir()`-rooted constructions in the binary, only that one is `pi` state.
 - Observed both ways round, which is what makes it a finding rather than a reading. With the override, `pi install` writes only under it. Without it, the same command fails with `EACCES: permission denied, mkdir '/home/pallon/.pi/agent/settings.json.lock'` — the control that fixes the default and shows `pi` writes rather than merely reads there.
 - **`PI_CODING_AGENT_SESSION_DIR` does not exist.** The task named it and `docs/environment-variables.md` documents it, but the string is absent from the 112 MB binary, where `PI_CODING_AGENT_DIR` occurs exactly once. Setting it is a no-op. It is dropped from the plan's `stateVars` sketch, with the reason recorded there.
-- **FR-22 is not satisfied by relocation.** Relocation puts the npm install inside the project — `$PI_CODING_AGENT_DIR/npm/node_modules/…`, observed — which satisfies FR-4. But `pi` still "installs any missing packages automatically on startup", `pi install` runs a real `npm install` that reached the registry here even under `PI_OFFLINE=1`, and the `package.json` it generates loosens a pinned spec to a caret range. So the environment ships no `pi` packages and sets `PI_OFFLINE`, added to the plan's sketch.
+- **FR-22 is not satisfied by relocation.** Relocation puts the npm install inside the project — `$PI_CODING_AGENT_DIR/npm/node_modules/…`, observed — which satisfies FR-4. But `pi` still "installs any missing packages automatically on startup", `pi install` runs a real `npm install` that reached the registry here even under `PI_OFFLINE=1`, and the `package.json` it generates loosens a pinned spec to a caret range. So the environment ships no `pi` packages and sets `PI_OFFLINE`, added to the plan's sketch. `M8d` corrects the reading of that variable: it is the *startup* install it stops, which this spike could not observe because it declared no package, and the explicit-command half is stopped by the substrate carrying no `npm` rather than by the variable.
 - `spec.md` was corrected in place, as this task's third criterion directs: the `pi` edge case, and the assumption at *Assumptions validated by research* that still described the finding as unverified. The *Assumptions the plan must confirm* checklist was left alone — it is a to-do list retired at close-out, not a statement of fact, and the same reasoning left `M1b`'s counterpart untouched.
 
 ### M1e — Spike: is nono's resolved policy machine-readable? (Status: DONE)
@@ -1143,17 +1143,29 @@ The second plant is worth recording for its surprise. Removing a root's relocati
 
 Suite after the task: `1 of 28 checks failed`, the failure being `check_sc3`'s deliberate progress bar, now missing `j7_1 j8_1 r9 rep1 rep2`. `nix flake check` passes.
 
-### M8d — `pi`, and pre-provisioned extensions (Status: PENDING)
+### M8d — `pi`, and pre-provisioned extensions (Status: IMPLEMENTED)
 
 **Scenario**: Journey 2.1 for `pi`, plus FR-22.
 
 Shaped by `M1d`: relocation holds through the single variable `PI_CODING_AGENT_DIR`, so `pi` needs no registry entry. `PI_CODING_AGENT_SESSION_DIR` does not exist and is not set.
 
-- [ ] Extensions provisioned through Nix before the session, never fetched from inside it (FR-22)
-- [ ] `PI_OFFLINE` is set, because `pi` installs missing packages automatically on startup, and its own install path reached the registry even under that variable — which disables startup operations only
-- [ ] It takes its credential from the mediated route, via `providers.<id>.baseUrl` in the file this environment writes ([D14](plan.md#d14))
-- [ ] The path for a consumer who must install an extension — outside the confined entry point — is documented rather than left to be discovered
-- [ ] Seen to FAIL before the fix
+- [x] Extensions provisioned through Nix before the session, never fetched from inside it (FR-22)
+- [x] `PI_OFFLINE` is set, because `pi` installs missing packages automatically on startup, and its own install path reached the registry even under that variable — which disables startup operations only
+- [x] It takes its credential from the mediated route — from `ANTHROPIC_BASE_URL` and `ANTHROPIC_API_KEY` in the session's environment, and **not** from `providers.<id>.baseUrl` in a file this environment writes, because it writes none ([D14](plan.md#d14) is corrected)
+- [x] The path for a consumer who must install an extension is documented rather than left to be discovered — and it is **inside** the confined entry point, not outside it, which is this criterion's other correction
+- [x] Seen to FAIL before the fix — the check written before the table entry, `the confinement for pi does not build`
+- [x] Five violations planted, each seen to FAIL, reverted, recorded in [plan.md](plan.md#planted-violations)
+
+`pi` needs **two** variables, not the one `M1d` predicted, and every other premise this task carried was wrong in the same direction as `M8a`'s, `M8b`'s and `M8c`'s. Full account in [research.md](research.md#m8d--pi-needs-two-variables-and-fr-22-is-not-the-networks-doing); what the criteria above turn on:
+
+- **The credential needs no file**, the third agent in a row. `pi auth check --provider anthropic --json --credentials` prints the credential the agent holds, so the check reads the 64-hex substitute out of the agent rather than inferring it from a variable name — the sharpest of the three agents' observables.
+- **`PI_OFFLINE` is unobservable until a package is declared**, which is why `M1d` could not see it work. The check declares `npm:left-pad` in the relocated settings file and asserts the listing names it *before* asserting no `node_modules` arrived; without that control the FR-22 assertion holds vacuously.
+- **`PI_PACKAGE_DIR` is a trap**, documented as "useful for Nix/Guix store paths" while naming `pi`'s own installation. It is deliberately unset.
+- **The boundary is a second, independent guard.** With the variable removed inside a session the install is attempted and dies on `EACCES: permission denied, posix_spawn 'npm'`, because the substrate carries no `npm`.
+- **FR-22 is not the network's doing, and that is worth knowing.** Egress from a confined session is mediated, not restricted: raw TCP is denied, but arbitrary HTTPS through the injected proxy succeeds, measured with `git ls-remote` against a public host. So a session that types `pi install npm:something` will reach the registry. FR-22 is the absence of *this environment* fetching, which is how the spec already frames it, and the unrestricted egress is a drift entry for `M10a` rather than a defect here.
+- **A consumer provisions from inside the session.** `pi install ./vendor/my-ext` on a vendored directory works confined, records a path relative to the settings file, and copies nothing — so a cloned checkout resolves it too. That is what the handbook now documents.
+
+Suite after the task: `1 of 29 checks failed`, the failure being `check_sc3`'s deliberate progress bar, still missing `j7_1 j8_1 r9 rep1 rep2`. `nix flake check` passes, now evaluating a third confinement.
 
 ### M8e — Spike: where does each agent read its declarative extensions from? (Status: PENDING)
 

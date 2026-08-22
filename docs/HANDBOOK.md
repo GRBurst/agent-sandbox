@@ -81,11 +81,11 @@ Inside the environment, each agent is on `PATH` under its own name and is alread
 ```sh
 claude --version            # runs under nono, confined to this project
 opencode --version          # the same, in its own confinement
+pi --version                # and the same again
 type claude                 # a wrapper in the store, not the upstream binary
 ```
 
-`claude` and `opencode` are what ships today.
-`pi` is packaged upstream but is not in the agent table yet, so there is no `pi` on `PATH`; adding it is a table entry and the checks that observe it, not a new mechanism.
+All three of the agents this repository names are on `PATH`.
 
 The wrapper is the only entry point; the unconfined binary is reachable only by store path.
 If the host cannot enforce confinement the wrapper refuses to start the agent and exits 77, rather than running it unconfined.
@@ -106,6 +106,29 @@ cat .agents/git/config      # what this session commits as
 Edit it and it is never rewritten, which is how a project gets an identity of its own.
 If your host has neither value the file is not written at all, and a commit fails with git's own `Please tell me who you are` rather than being made under a placeholder.
 Nothing else from your host git configuration is read: `GIT_CONFIG_GLOBAL` points at that file and `GIT_CONFIG_SYSTEM` at `/dev/null`, so a `core.hooksPath` or `credential.helper` in `~/.gitconfig` cannot direct a session.
+
+### Extending an agent
+
+An agent that extends itself by fetching code at run time does not do it here.
+`pi` is the one that would: a package named in its settings is installed on startup, with a real `npm install`.
+Inside a session that startup does nothing, and two separate things stop it.
+`PI_OFFLINE=1` is set, so the agent lists what is declared and installs none of it; and if that were removed, the attempt would still die on `EACCES: permission denied, posix_spawn 'npm'`, because the enumerated execution substrate carries no `npm` to run.
+
+So an extension is **vendored into the project and declared as a local path**, which needs no network and works from inside a session:
+
+```sh
+mkdir -p vendor/my-ext/skills/demo                  # or let nix put it there
+pi install ./vendor/my-ext                          # records the path, fetches nothing
+pi list                                             # ../../vendor/my-ext -> <checkout>/vendor/my-ext
+cat .agents/pi/settings.json                        # the declaration, relative to itself
+```
+
+The recorded path is relative to the settings file, so a checkout moved or cloned elsewhere still resolves it.
+`pi install npm:<pkg>` and `pi install git:<repo>` are the other two sources, and both need the registry.
+Typed by hand they reach it — `PI_OFFLINE` governs the startup install, not the command — but what arrives is then unpinned and outside nix, which is what FR-22 exists to prevent.
+Vendor it and declare the path instead.
+
+`claude` and `opencode` have no equivalent startup install, so nothing here applies to them.
 
 ### The API key inside a session is not your API key
 

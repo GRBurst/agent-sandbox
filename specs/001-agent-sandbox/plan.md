@@ -157,7 +157,9 @@ Read these before writing anything. Do not skim `ai.nix`; it is the working prio
 
 <a id="d14"></a>
 
-- <a id="d14"></a>**D14 — The other agents take their credential from the mediated session, not from the first agent's store.** FR-7 spans agents as well as projects, and there were two ways to reach that. The prior art shares credentials by plugin: one agent shells out to another, or reads its credential file directly, which needs that credential directory granted read-write inside the boundary. This environment instead lets the mechanism capture the token flow into its supervisor-side store and exposes it to every process in the session as an environment variable plus a mediated base URL, picked up by `opencode` through its provider options and by `pi` through its provider base URL and header interpolation.
+- <a id="d14"></a>**D14 — The other agents take their credential from the mediated session, not from the first agent's store.** FR-7 spans agents as well as projects, and there were two ways to reach that. The prior art shares credentials by plugin: one agent shells out to another, or reads its credential file directly, which needs that credential directory granted read-write inside the boundary. This environment instead lets the mechanism capture the token flow into its supervisor-side store and exposes it to every process in the session as an environment variable plus a mediated base URL.
+
+  The second half of that sentence is corrected: it said the base URL would be picked up "by `opencode` through its provider options and by `pi` through its provider base URL and header interpolation", so this environment would write a configuration file per agent. It writes none. `M8c` and `M8d` measured both agents reading `ANTHROPIC_API_KEY` and `ANTHROPIC_BASE_URL` straight out of the environment — for `pi`, in the bundled SDK's own constructor defaults — which is exactly the pair the mediated route injects. So all three agents take the route the same way, by having it in their environment, and `credentialServices` is the only thing any of their table entries says about it. A written file would have been a second place for the route to be wrong.
   This is **forced rather than preferred**: FR-6 and FR-3 together already exclude the alternative, since granting the credential store would put a credential that works outside the boundary inside it, on a justification of convenience rather than of structural impossibility.
 
   **Corrected by `M7b`: there is no first agent, and no agent takes anything from another.** The mechanism above is withdrawn, the same way `M7a` withdrew `D1`'s fork and for the same reason — it describes an OAuth capture that cannot be exercised. What was measured instead is that each agent's own description declares the same service name and the supervisor mints it an **independent** substitute: two descriptions differing only in `meta.name`, run in two unrelated checkouts against one supervisor environment, each got a distinct 64-hex value and neither read anything of the other's. So the login belongs to the machine rather than to any agent, and "the other agents obtain what they need from the authenticating one" is not what happens — they need nothing from it.
@@ -282,10 +284,12 @@ Signatures and structures, laid out so implementation is mechanical. Types in `�
 
 ### `lib/agents.nix`
 
-The sketch below is the table's final shape, not its first one. `M3b` wrote only `groups` and `stateVars`, and only for `claude-code`, because a field nothing reads is how a table starts lying: `package` and `binary` arrive with `M4`, which builds the entry point that runs them, `credential` with `M7`, which asserts its shape, and the other two agents with `M8`, where the checks that observe them live. The type is a `submodule` evaluated per entry, so each field is enforced from the moment it exists.
+The sketch below is the table's final shape, not its first one. `M3b` wrote only `groups` and `stateVars`, and only for `claude-code`, because a field nothing reads is how a table starts lying: `package` arrives with `M4`, which builds the entry point that runs it, `credentialServices` with `M7`, which asserts its shape, and the other two agents with `M8`, where the checks that observe them live. The type is a `submodule` evaluated per entry, so each field is enforced from the moment it exists.
+
+Two of the five fields this section first named are gone, and the sketch is corrected rather than annotated. There is no `binary`, because `meta.mainProgram` already names the command and a second copy of it could disagree with the package. And `credential = { tokenHost, apiHost }` is `credentialServices`, a list of service names: `M7a` measured the mechanism taking the service and deriving the rest, so the hosts were a description of something nothing read.
 
 ```nix
-# agent ∷ { package, binary, groups, stateVars, credential }
+# agent ∷ { package, groups, credentialServices, stateVars }
 # The set of agents is closed (FR-1) and keyed by name; P9 forbids a silent
 # lookup miss, so callers use `agents.${name} or (throw …)`.
 #
@@ -297,8 +301,8 @@ The sketch below is the table's final shape, not its first one. `M3b` wrote only
 {
   claude-code = {
     package   = pkgs: pkgs.claude-code;         # unfree; allowUnfree scoped to this pkgs
-    binary    = "claude";
     groups    = [ ];                            # the substrate is derived, not inherited (D18)
+    credentialServices = [ "anthropic" ];
     # M1g observed which of the thirteen candidates govern: three do, and
     # together they cover the whole default home layout. M8b then reached the
     # paths a one-turn session never does — a subagent listing and a background
@@ -313,33 +317,29 @@ The sketch below is the table's final shape, not its first one. `M3b` wrote only
       CLAUDE_CODE_REMOTE_MEMORY_DIR = "${w}/.agents/claude/memory";
       DISABLE_AUTOUPDATER           = "1";   # M1g: inherited on the dev host, so P8 needs it set here
     };
-    credential = { tokenHost = "platform.claude.com"; apiHost = "api.anthropic.com"; };
   };
   opencode = {
     package   = pkgs: pkgs.opencode;
-    binary    = "opencode";
     groups    = [ ];
-    # Its own variables, not XDG_DATA_HOME: P1 forbids a blanket XDG override
-    # where the tool exposes a specific one.
-    stateVars = w: {
-      OPENCODE_CONFIG     = "${w}/.agents/opencode/config.json";
-      OPENCODE_CONFIG_DIR = "${w}/.agents/opencode";
-    };
-    credential = { … };                         # from the mediated session, D14
+    credentialServices = [ "anthropic" ];       # from the mediated session, D14
+    # Almost empty, and that is M8c's finding. The OPENCODE_CONFIG and
+    # OPENCODE_CONFIG_DIR this sketch first named are withdrawn: every root the
+    # agent reports is derived from the XDG_* roots and TMPDIR, which the
+    # confinement already relocates for every agent, so there is nothing
+    # agent-specific left to move.
+    stateVars = _w: { OPENCODE_DISABLE_AUTOUPDATE = "1"; };   # P8
   };
   pi = {
     package   = pkgs: pkgs.pi;
-    binary    = "pi";
     groups    = [ ];
+    credentialServices = [ "anthropic" ];       # from the mediated session, D14
     stateVars = w: {
       # The whole root: settings, credentials, sessions and installed packages.
       # PI_CODING_AGENT_SESSION_DIR is documented but absent from the binary — M1d.
       PI_CODING_AGENT_DIR = "${w}/.agents/pi";
-      # FR-22: with no packages declared there is nothing to install on startup,
-      # and this also stops the update check and the model-catalogue refresh.
+      # FR-22: the startup install of any declared package does not happen.
       PI_OFFLINE = "1";
     };
-    credential = { … };                         # from the mediated session, D14
   };
 }
 ```
@@ -752,6 +752,11 @@ Mandatory per P2. Tick `Verified` only after seeing red, **and only after confir
 | `check_opencode` | Empty `credentialServices` on the `opencode` entry | `the agent found no provider credential in its environment, so the mediated route did not reach it`. One place. Note what does **not** move: `0 credentials` still prints, because the store is empty either way — it is the agent's `Environment` block naming `ANTHROPIC_API_KEY` that disappears, which is why the check asserts the two separately | [x] |
 | `check_opencode` | Drop `XDG_DATA_HOME` from `set_vars` | `the agent did not answer where it writes (exit 1)`, quoting the agent's own `errno: -13, code: "EACCES"`. Harder than predicted: the roots do not stray to `$HOME` and get caught by the diff, the agent dies before printing anything, because the fallback root is denied. For `opencode` a lost relocation is a refusal, the mirror image of `claude-code`, which escaped only once the plant *also* granted the fallback ([`M8c`](research.md#m8c--opencode-needs-no-variable-of-its-own-and-takes-its-credential-from-the-environment)) | [x] |
 | `check_confinement_validates` | Add `OPENCODE_PLANTED_ROOT = "/tmp/opencode"` to the **second** agent's `stateVars` | `the agent table points OPENCODE_PLANTED_ROOT at /tmp/opencode for opencode, which is not under the working directory`. Planted on the agent the check was never written for, which is the point: it proves the loop reaches an entry added to the table with no edit here, and that the failure says which agent it belongs to | [x] |
+| `check_pi` | Write the check before the table entry exists | `the confinement for pi does not build`, `nix build` reporting `does not provide attribute 'packages.x86_64-linux.confinement-pi'`. This was the task's RED, and it is the only one available: nothing else about a third agent can fail while the third agent is not in the table | [x] |
+| `check_pi` | Drop `PI_CODING_AGENT_DIR` from `stateVars` | `pi could not report its credential state (exit 2)`, quoting the agent's own `{"status":"invalid","provider":"anthropic","reason":"invalid_state"}`. As with `opencode`, a lost relocation is a refusal rather than a stray write — the fallback `$HOME/.pi/agent` is denied and the agent cannot reach its own credential store, so the plant never gets far enough to make the home diff fire | [x] |
+| `check_pi` | Empty `credentialServices` on the `pi` entry | `pi holds no anthropic credential`, quoting `{"status":"not_ready","provider":"anthropic","reason":"credentials_not_configured"}` at exit 1. The two plants above are distinguishable by that payload alone, which is why the check asserts `.status` and `.authType` rather than the exit status | [x] |
+| `check_pi` | Pre-create `$PI_CODING_AGENT_DIR/npm/node_modules/left-pad`, which is what a startup install leaves behind | `the relocated root carries an installed package tree: …/proj/.agents/pi/npm/node_modules`. The plant on the artefact rather than on the code, because FR-22 is the absence of a fetch and the fetch is what the shipped environment does not do — this is the only way to watch the assertion that would catch one | [x] |
+| `check_pi` | Drop `PI_OFFLINE` from `stateVars` | `pi could not list its packages (exit 1)`, the agent crashing in its own `runNpmCommand`. **Only observable because the check declares a package**: with no `packages` array in the settings file there is nothing to install on startup and the variable is inert, which is how [`M1d`](research.md#m1d--pi-relocates-through-one-variable-and-its-extensions-do-not) came to record it as unobservable. Inside the boundary the same plant is stopped twice — the substrate carries no `npm`, so the spawn fails with `EACCES: permission denied, posix_spawn 'npm'` — and the crash is that second guard reporting itself | [x] |
 | `check_rep2` | Make `validate.sh` write a log file into the checkout | the second run differs from the first | [ ] |
 | `check_controls` | Delete `check_r2`'s two control arms, comments and code together, as a careless hand would leave them | `refusal check asserts no permitted action: check_r2 (integration.sh)`, verbatim. And the finding that justifies the check: with its controls gone `check_r2` still **passed**, the integration layer reporting `10 checks passed`, so nothing but `check_controls` said the refusal now proved nothing | [x] |
 | every refusal check | `workdir.access = "none"` in `lib/confinement.nix`, which withholds the project from every session the suite starts | `8 of 10 checks failed` at the integration layer, three of them in the control's own words: `the shipped arm never read the file inside the project, so it observed no session (exit 126)` (`check_r1`), the same for `check_r2`'s write, and `it is inert and arm 1 proves nothing` (`check_r5`). Two passed, both principled rather than uncontrolled: `check_r6` starts no session, and `check_r3`'s subject is the environment, which the workdir grant does not touch | [x] |
