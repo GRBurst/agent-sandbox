@@ -2265,3 +2265,60 @@ Whether a real model request succeeds through the mediated route cannot be measu
 `curl` is not an escape hatch either — the substrate grants the `curl` package's default output while `bin/curl` lives in its separate `-bin` output, so the binary is absent.
 No check in the suite makes a live model call, and none can without a real host credential.
 That is a coverage gap for `M9` and the handbook rather than something `M8e` can resolve.
+
+## M8f — The declared surface, and the two instruments it needed
+
+The design `M8e` left open is settled here, and every part of it was measured before it was written.
+
+### `claude-code` is coverable after all, by symlinking the children
+
+`M8e` recorded that this agent has no additive extra-root mechanism, which looked like SC-9's "name the uncovered location" was the only answer for it.
+It is not.
+Unconfined, with `CLAUDE_CONFIG_DIR` pointed at a scratch root, a symlink `$CFG/skills/hostskill -> $RO/hostskill` over a `chmod -R a-w` target is followed and read: `openat(…/cfg/skills/hostskill/SKILL.md", O_RDONLY|O_NOCTTY|O_LARGEFILE)` succeeds, with `statx` reporting `S_IFLNK|0777` on the link, `S_IFDIR|0555` on the target and `S_IFREG|0444` on the file.
+
+The hazard `M8e` measured — that the agent writes `manifest.json`, `.staging`, `synced` and `.trash` *inside* `skills/` — is avoided rather than met, because those writes land at the level **above** the links, which is the project's own writable directory.
+Symlinking the `skills/` directory itself at a read-only root would have broken them; symlinking each child does not.
+
+### The grant has to be argv, not environment
+
+`nono run`'s filesystem flags are `--allow` (read+write), `--read` and `--write`, plus their `--*-file` forms.
+Only `--allow` carries an environment form (`NONO_ALLOW`).
+So a *read-only* grant cannot be declared the way `D17` assumed the widening channel would work, and the entry point has to put `--read` on the argv it builds.
+There is also no `--set-env`/`--env` flag anywhere in `nono run --help`, which rules out the neater-looking alternative of pointing `opencode` with `OPENCODE_CONFIG_CONTENT`: a run-time value cannot cross the boundary, since nono carries variables only through the profile's build-time `set_vars` or its fixed `allow_vars` pass-through list.
+
+Measured in real confined sessions, against a symlink pointing out of the project:
+
+| grant | result |
+| --- | --- |
+| none | read through the symlink **denied** — so the grant is load-bearing and the control is not vacuous |
+| `--read <parent>` | read succeeds |
+| `--read <the directory itself>` | read succeeds — the enumerated, never-ancestor grant `D17` requires is implementable |
+| `--read …` then a write | **denied**, surface byte-identical |
+| `--allow …` then a write | **succeeds**, surface tainted |
+
+The last two rows are why the check asserts the write denial by attempting it rather than by comparing the surface afterwards: with a read-only grant nothing in a normal session tries to write there, so the comparison alone would pass under a read-write grant too.
+
+### `strace -f -o <file>` is the wrong instrument, and it fails intermittently
+
+The first `check_j8_1` was flaky — a different subset of agents reported a missing read on each run, and once it passed outright.
+The cause is not the sandbox and not the agents.
+`strace -f` writing to a single file multiplexes every traced process into one stream, so a syscall interrupted by another process is split into `<unfinished ...>` and `<... resumed>` lines.
+The path then no longer shares a line with its return value, and any assertion of the form "this path, and this call succeeded" fails on scheduling alone.
+
+`-ff -o <prefix>` writes one complete file per process; concatenating them afterwards gives a stream where every line is whole.
+Four consecutive runs passed after the change.
+This is a trap for any future check that greps a trace for a call *and* its result, which is most of them.
+
+A second, smaller trap in the same assertion: an `O_PATH` open of the link and of the target directory succeeds **without** any grant, because `O_PATH` needs no read permission.
+Only a non-`O_PATH` successful open distinguishes a granted surface from a denied one.
+
+### What the entry point does, and what it leaves behind
+
+Verified across all three agents in real confined sessions, with pre-existing consumer settings in place:
+
+- Declared, the surface arrives — `claude` gains one symlink per skill under `.agents/claude/skills`, `opencode` gains `.skills.paths` in `.config/opencode/opencode.json`, `pi` gains `.skills` in `.agents/pi/settings.json` — and every unrelated key in those files survives.
+- Run twice, nothing changes (P8, by checksum).
+- Withdrawn, the files return **exactly** to the consumer's own content, with no empty `"skills": {}` left behind: the links are pruned before they are planted, and the jq filter deletes the key and then any container it emptied on the way.
+
+The last point is Journey 8's second scenario obtained for free rather than by a second code path, and it is the reason the pruning happens first rather than last.
+The prune deletes symlinks only, so a real skill directory a consumer put under `claude`'s configuration root is theirs and is left alone.

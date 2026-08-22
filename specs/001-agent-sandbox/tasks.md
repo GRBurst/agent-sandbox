@@ -1195,19 +1195,28 @@ Do not trust an agent's own listing command alone. `opencode debug skill` report
 
 No check changed, and none should have: a spike that alters behaviour is not a spike. The suite is unchanged at `1 of 29 checks failed`, the failure being `check_sc3`'s progress bar.
 
-### M8f — A declared authoring surface arrives (Status: PENDING)
+### M8f — A declared authoring surface arrives (Status: IMPLEMENTED)
 
 **Scenario**: Journey 8.1
 
 **RED**: `check_j8_1` declares an authoring surface holding one extension per location `M8e` enumerated, starts a session, and asks the agent to report the extensions it has.
 
-- [ ] Check written and seen to FAIL
-- [ ] The declaration comes from the calling environment, never from a file inside a project — the same channel as `source_up_if_exists`, which keeps R5 intact by construction ([D17](plan.md#d17))
-- [ ] The grant names the enumerated authoring directories individually and **no ancestor of them**, so nothing FR-26 excludes and no credential store arrives with the surface
-- [ ] The agent is *pointed* at the granted roots by the configuration this environment writes; nothing is copied into the project, so there is no reconciliation step and no staleness (P8)
-- [ ] Second arm: the surface is byte-identical before and after a session that tries to write to it — FR-25 lends it rather than handing it over
-- [ ] **Control**: an extension planted at a location that was *not* declared is asserted absent in the same session
-- [ ] Both violations planted (remove the configuration key while keeping the grant; make the grant read-write), each seen to FAIL, reverted, recorded in plan.md
+- [x] Check written and seen to FAIL
+- [x] The declaration comes from the calling environment, never from a file inside a project — the same channel as `source_up_if_exists`, which keeps R5 intact by construction ([D17](plan.md#d17)). `AGENT_SANDBOX_SKILLS`, a colon-separated list of absolute host directories, read by the entry point before it starts a session
+- [x] The grant names the enumerated authoring directories individually and **no ancestor of them**, so nothing FR-26 excludes and no credential store arrives with the surface. Asserted as a set equality against the `--read` flags read off the wrapper's own `execve` line in the trace, so the grant is observed rather than recomputed from the declaration
+- [x] The agent is *pointed* at the granted roots by the configuration this environment writes; nothing is copied into the project, so there is no reconciliation step and no staleness (P8). Three mechanisms, because `M8e` found no common one, all declared as a `skillSurface` field beside each table entry
+- [x] Second arm: the surface is byte-identical before and after a session that tries to write to it — FR-25 lends it rather than handing it over. The write is *attempted*, with the flags the wrapper was observed to pass, because a read-only grant leaves a normal session with no reason to try
+- [x] **Control**: an extension planted at a location that was *not* declared is asserted absent in the same session
+- [x] Both violations planted (remove the configuration key while keeping the grant; make the grant read-write), each seen to FAIL, reverted, recorded in plan.md
+
+**Findings**
+
+- **`claude-code` is coverable, which `M8e` had concluded it was not.** Symlinking each *child* of the skills root works where symlinking the root would not: the agent follows the links into a read-only host directory, and keeps its own `manifest.json` and `synced` at the writable level above them. So SC-9's "name the uncovered location" escape is not needed for skills.
+- **The read-only grant has to go on the argv.** `--allow` is the only filesystem flag nono gives an environment form, and there is no `--set-env` at all — which also rules out pointing `opencode` with `OPENCODE_CONFIG_CONTENT`, since a run-time value cannot cross the boundary.
+- **`strace -f -o <file>` is not a usable instrument for this**, and it fails intermittently rather than outright: one file for many processes splits a syscall into `<unfinished>`/`<... resumed>` lines, so a path stops sharing a line with its result. `-ff` per-process files, concatenated, fixes it. Also `O_PATH` opens succeed with no grant, so only a non-`O_PATH` open discriminates. Both recorded in [`research.md`](research.md#m8f--the-declared-surface-and-the-two-instruments-it-needed).
+- **Skills alone.** Prompts, themes, agents, commands, output styles, rules, modes and workflows are not carried in, and SC-9's obligation to name them is discharged in the handbook. Past skills the surfaces shade into code that runs, which FR-26 keeps out of a variable set once and forgotten.
+
+The suite is at `1 of 30 checks failed`, `check_sc3` now missing only `j7_1 r9 rep1 rep2`.
 
 ### M8g — The declared surface is exactly what arrives (Status: PENDING)
 

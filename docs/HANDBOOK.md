@@ -130,6 +130,39 @@ Vendor it and declare the path instead.
 
 `claude` and `opencode` have no equivalent startup install, so nothing here applies to them.
 
+### Bringing your own skills in
+
+A session reads nothing from your home directory by default, which includes the skills you wrote for yourself.
+`AGENT_SANDBOX_SKILLS` is the one exception, and it is the only widening this repository ships.
+
+Set it in the environment you start the agent from — your shell profile, your home-manager configuration, a parent `.envrc` — as a colon-separated list of absolute directories, each holding skill directories:
+
+```sh
+export AGENT_SANDBOX_SKILLS="$HOME/skills:$HOME/work/skills"   # once, for the machine
+claude                                                          # every agent honours it
+```
+
+Nothing inside a project can set it.
+A checkout you cloned from a stranger cannot ask for your home directory, because the declaration is not a file the project carries.
+
+Each directory you name is granted **read-only**, individually, with no parent of it granted.
+A session can read what you wrote there and cannot change it: the surface is lent, not handed over.
+Unset the variable and the next session has none of it, with the agents' own configuration left exactly as you had it.
+
+The three agents are pointed at the granted directories by three different mechanisms, because they have no common one:
+
+| Agent | How it is pointed | What the environment writes |
+| --- | --- | --- |
+| `claude` | one symlink per skill, since it has no additive setting at all | `.agents/claude/skills/<name>` |
+| `opencode` | its `skills.paths` setting | `.config/opencode/opencode.json` |
+| `pi` | its `skills` setting | `.agents/pi/settings.json` |
+
+Those files are merged, never replaced, so anything else you keep in them survives.
+The `claude` case only ever creates symlinks in that directory, so a real skill directory you put there is yours and is left alone.
+
+**Skills are the whole of it.** The other authoring surfaces these agents read — `agents/`, `commands/`, `output-styles/`, `rules/`, `workflows/` and `themes/` for `claude`, `prompts/` and `themes/` for `pi`, and `opencode`'s agents, commands and modes — are **not** carried in, and neither is anything executable: a plugin, a hook or a `.ts` extension arrives nowhere near this route.
+Those are code that runs, not directives that are read, and widening for them is a decision to make deliberately rather than one to inherit from a variable set months ago.
+
 ### The API key inside a session is not your API key
 
 Put your provider credential in the environment you start the agent from, as `ANTHROPIC_API_KEY`.
@@ -184,7 +217,7 @@ Byte-identical source text is the wrong criterion, because nix's indented string
 It is set for the whole devShell, not only for a confined session, so *every* program you run in the checkout looks for its configuration under `$PWD/.config` — including an agent you installed on the host yourself.
 Inside the project, that agent finds none of your `~/.config` settings, subagents or skills.
 This is a tracked violation of the constitution's "prefer the tool's own variable" rule, recorded as `C1` in the feature's plan, and it is kept only because `nono` has no variable of its own: pointed at a directory that does not exist it falls back to the host's `~/.config` silently, which would let host confinement descriptions decide what a confined session may reach.
-Extensions you authored yourself are meant to come with you, by declaring them once for the machine rather than by widening this; that is not built yet.
+Skills you authored yourself come with you by the separate route above, declared once for the machine rather than by widening this; the other authoring surfaces do not, and that is the gap that section names.
 
 **A confined session gets its own set, and none of the table above reaches it.**
 The variables in that table are the *shell's*, and the boundary passes almost nothing through: measured, a session inherits `HOME` and a handful of locale and terminal variables, and not one `XDG_*` root nor `TMPDIR`.

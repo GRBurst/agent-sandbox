@@ -3890,3 +3890,273 @@ check_pi() {
 
 	[ "$found" -eq 0 ]
 }
+# A manifest of a directory tree, precise enough that "unchanged" means it.
+#
+# Names, types and modes, and the content of every file. Timestamps are left
+# out on purpose: a check that reads them cannot tell a rewrite that preserved
+# the bytes from a touch, and it is the bytes the consumer cares about.
+tree_manifest() {
+	find "$1" -mindepth 1 \( -type f -o -type d -o -type l \) -printf '%y\t%m\t%p\n' | sort
+	find "$1" -type f -exec sha256sum {} + | sort -k2
+}
+
+# The path each agent would read the surface at, as the agent table describes
+# it. Derived rather than written down, because the two mechanisms M8e measured
+# differ in where the read lands: an agent pointed at the host directory opens
+# the host path, and an agent pointed by a symlink under its own configuration
+# root opens that path instead. Prints one path per skill name given.
+surface_reads() {
+	local agent=$1 project=$2 kind root name
+	shift 2
+	kind=$(nix eval --raw "$REPO_ROOT#agents.$agent.skillSurface.kind") || return 1
+	case $kind in
+	symlink-children)
+		# One link per child of a declared directory, under the agent's own
+		# configuration root, so the read lands on the link's path.
+		root=$(nix eval --raw "$REPO_ROOT#agents.$agent.skillSurface.path" \
+			--apply "f: f \"$project\"") || return 1
+		for name; do printf '%s/%s/SKILL.md\n' "$root" "${name##*/}"; done
+		;;
+	json-array)
+		# Pointed at the declared directory itself, so the read is the
+		# consumer's own path, given here already qualified.
+		for name; do printf '%s/SKILL.md\n' "$name"; done
+		;;
+	*)
+		return 1
+		;;
+	esac
+}
+
+# Journey 8.1. The one host path a session reads on purpose.
+#
+# The property is a conjunction whose halves fail differently, so both are
+# asserted for every agent in the table: the declared surface *arrives* — the
+# agent opens the file the consumer wrote, from inside the boundary — and
+# nothing else does, neither an ancestor of what was declared nor a sibling
+# beside it.
+#
+# The observable is strace around the shipped entry point rather than each
+# agent's own listing command, because M8f measured that only one of the three
+# has one. It also reads what the wrapper did rather than what it was asked to
+# do: the execve line carries the argv it built, so the grant is observed here
+# instead of being recomputed and compared against itself.
+#
+# Two traps, both recorded in research.md § M8f. `-s 4096`, because strace
+# truncates strings at 32 characters by default and every path here is longer
+# than that. And the successful-open pattern excludes O_PATH, which needs no
+# read permission and so succeeds whether the grant is there or not.
+check_j8_1() {
+	local outside home host proj agent binary entry strace_bin nono_bin
+	local canary want stray trace rc project i opened wrote
+	local found=0
+	local -a table=() binaries=() reads=() granted=() declared=() invocation=() expect=() control=() digests=() grant=()
+	local FIXTURE_PROFILE FIXTURE_SUBSTRATE FIXTURE_BASH
+	local -a SESSION_ENV
+	local system
+
+	system=$(nix eval --impure --raw --expr builtins.currentSystem) || {
+		fail 'the current system does not resolve, so no entry point can be named'
+		return 1
+	}
+	if ! mapfile -t table < <(nix eval --json "$REPO_ROOT#agents" \
+		--apply builtins.attrNames | jq -r '.[]'); then
+		fail 'the agent table does not evaluate, so there is no set to assert the property over'
+		return 1
+	fi
+	# The command each agent answers to, read off the entry points the flake
+	# builds. Keyed the same way, so one list indexes the other.
+	if ! mapfile -t binaries < <(nix eval --json "$REPO_ROOT#agentBinaries.$system" |
+		jq -r 'to_entries | sort_by(.key) | .[].value'); then
+		fail 'the entry point names do not evaluate, so no agent can be started'
+		return 1
+	fi
+	# Anti-vacuity: a property over an empty table holds by matching nothing.
+	if [ "${#table[@]}" -eq 0 ] || [ "${#table[@]}" -ne "${#binaries[@]}" ]; then
+		fail "the agent table has ${#table[@]} entries and ${#binaries[@]} commands, so there is no set to assert the property over"
+		return 1
+	fi
+
+	nono_bin=$(pinned_bin nono) || return 1
+
+	outside=$(mktemp -d -p "${XDG_RUNTIME_DIR:-/tmp}" agent-sandbox-j8_1.XXXXXX)
+	# shellcheck disable=SC2064
+	trap "rm -rf '$outside'" RETURN
+
+	# The home is a sibling of the project rather than its parent, per
+	# check_r1: the description carries $HOME-relative deny rules and nono
+	# refuses to start on a workdir that overlaps one.
+	home="$outside/home"
+	host="$outside/host"
+	proj="$outside/proj"
+	mkdir -p "$home" "$proj"
+	session_env "$outside/state"
+	project=$(cd "$proj" && pwd -P)
+
+	# Two declared directories rather than one, so "each declared directory is
+	# named in its own right" is distinguishable from "something containing
+	# both is named", and a third beside them that is never declared. The
+	# canary is per run, so nothing an earlier run left behind can satisfy any
+	# of this.
+	canary="surface-canary-$RANDOM$RANDOM"
+	declared=("$host/alpha" "$host/beta")
+	mkdir -p "${declared[0]}/one" "${declared[1]}/two" "$host/undeclared/three"
+	printf -- '---\nname: one\ndescription: %s, the first declared surface\n---\n\n%s-one\n' \
+		"$canary" "$canary" >"${declared[0]}/one/SKILL.md"
+	printf -- '---\nname: two\ndescription: %s, the second declared surface\n---\n\n%s-two\n' \
+		"$canary" "$canary" >"${declared[1]}/two/SKILL.md"
+	printf -- '---\nname: three\ndescription: %s, never declared\n---\n\n%s-three\n' \
+		"$canary" "$canary" >"$host/undeclared/three/SKILL.md"
+
+	tree_manifest "$host" >"$outside/before"
+	# What a copy of the surface would look like, wherever it landed.
+	mapfile -t digests < <(sha256sum \
+		"${declared[0]}/one/SKILL.md" "${declared[1]}/two/SKILL.md" |
+		cut -d' ' -f1)
+
+	for ((i = 0; i < ${#table[@]}; i++)); do
+		agent=${table[i]}
+		binary=${binaries[i]}
+		entry=$(pinned_bin "$binary") || return 1
+		session_fixture "$agent" || return 1
+		strace_bin=$(substrate_member "$FIXTURE_SUBSTRATE" strace) || {
+			fail "the substrate for $agent provides no strace, so what the $agent session opened cannot be observed"
+			return 1
+		}
+		if ! mapfile -t expect < <(surface_reads "$agent" "$project" \
+			"${declared[0]}/one" "${declared[1]}/two"); then
+			fail "the agent table does not say where $agent reads a declared surface, so its arrival cannot be observed"
+			return 1
+		fi
+		if ! mapfile -t control < <(surface_reads "$agent" "$project" \
+			"$host/undeclared/three"); then
+			fail "the agent table does not say where $agent reads a declared surface, so a wider one cannot be ruled out"
+			return 1
+		fi
+
+		# Discovery has to be forced: M8e measured that a cheap invocation
+		# never reaches it. Print mode does, and the authentication failure
+		# that follows is the signal that it got there. `debug skill` is
+		# opencode's own, and reaches discovery without a request.
+		case $binary in
+		opencode) invocation=(debug skill) ;;
+		claude | pi) invocation=(-p hi) ;;
+		*)
+			fail "no invocation is known to make $binary discover its skills, so the arrival of the surface cannot be observed"
+			return 1
+			;;
+		esac
+
+		trace="$outside/trace.$agent"
+		env "${SESSION_ENV[@]}" "HOME=$home" "XDG_CONFIG_HOME=$outside/cfg" \
+			"ANTHROPIC_API_KEY=sk-ant-canary-$RANDOM$RANDOM" \
+			"AGENT_SANDBOX_SKILLS=${declared[0]}:${declared[1]}" \
+			env -C "$proj" "$strace_bin/bin/strace" -ff -s 4096 \
+			-e trace=openat,execve -o "$trace." \
+			"$entry/$binary" "${invocation[@]}" \
+			>"$outside/out.$agent" 2>"$outside/err.$agent" && rc=0 || rc=$?
+
+		# One file per traced process, joined afterwards. Tracing into a
+		# single file instead is what made this check flake: a shared stream
+		# interleaves concurrent processes, so strace splits a syscall into an
+		# `<unfinished ...>` line and a `<... resumed>` line and the path
+		# stops sharing a line with its return value. Whether that happened to
+		# any particular openat was a matter of scheduling.
+		cat "$trace".* >"$trace" 2>/dev/null || :
+
+		if [ ! -s "$trace" ]; then
+			found=1
+			fail "$(printf 'the %s session produced no trace (exit %s), so it observes nothing:\n%s' \
+				"$agent" "$rc" "$(tail -n 5 "$outside/err.$agent")")"
+			continue
+		fi
+
+		# The surface arrives. Each declared directory separately, so one of
+		# them arriving cannot stand in for the other.
+		for want in "${expect[@]}"; do
+			opened=$(grep -F -- "\"$want\", O_RDONLY|O_NOCTTY" "$trace" |
+				grep -cE '\) = [0-9]+$') || opened=0
+			if [ "$opened" -eq 0 ]; then
+				found=1
+				fail "$(printf 'the %s session never read the declared surface at %s (exit %s), so it did not arrive' \
+					"$agent" "$want" "$rc")"
+			fi
+		done
+
+		# The grant, read off the argv the wrapper built: exactly the declared
+		# directories, each in its own right and no ancestor of either.
+		#
+		# Two readings of the same argv. `reads` is the read-only grant, which
+		# is what the declaration is allowed to produce. `granted` keeps the
+		# mode alongside the path for every filesystem flag the wrapper passed,
+		# so the write arm below exercises the grant that was really made
+		# rather than the one this check would have preferred to see.
+		mapfile -t reads < <(grep -oE '"--read", "[^"]*"' "$trace" |
+			sed -E 's/"--read", "([^"]*)"/\1/' | sort -u)
+		mapfile -t granted < <(grep -oE '"--(read|allow|write)", "[^"]*"' "$trace" |
+			sed -E 's/"(--[a-z]+)", "([^"]*)"/\1 \2/' | sort -u)
+		want=$(printf '%s\n' "${declared[@]}" | sort -u)
+		if [ "$(printf '%s\n' "${reads[@]}")" != "$want" ]; then
+			found=1
+			fail "$(printf 'the %s session was granted\n%s\nbut the consumer declared\n%s' \
+				"$agent" "$(printf '%s\n' "${reads[@]}")" "$want")"
+		fi
+
+		# Nothing beside the declaration arrives. Not vacuous: a wrapper that
+		# pointed the agent at the declared directories' common parent would
+		# satisfy every assertion above and pull this one in as well.
+		for want in "${control[@]}"; do
+			if grep -qF -- "\"$want\", O_RDONLY|O_NOCTTY" "$trace"; then
+				found=1
+				fail "the $agent session read an undeclared skill beside the surface at $want, so what arrives is wider than what was declared"
+			fi
+		done
+
+		# Pointed at, not copied (P8). By digest rather than by searching for
+		# the canary text, because an agent that loaded the skill records its
+		# description in its own transcript, and a transcript is the session's
+		# work rather than a copy of the surface. `find -type f` does not
+		# follow symlinks, so the link the symlink-children mechanism plants
+		# is correctly not counted as one either.
+		stray=$(find "$project" -type f -exec sha256sum {} + 2>/dev/null |
+			grep -Ff <(printf '%s\n' "${digests[@]}") - || true)
+		if [ -n "$stray" ]; then
+			found=1
+			fail "$(printf 'the %s session has the surface copied into the project rather than pointed at:\n%s' \
+				"$agent" "$stray")"
+		fi
+
+		# Lent, not handed over — and observed by trying rather than by
+		# hoping. The comparison after the loop cannot tell a read-only
+		# grant from a read-write one unless something in a session actually
+		# attempts the write, so one session does. The grant used here is
+		# the argv just read off the wrapper's own execve, not a grant
+		# recomputed from the declaration, so a wrapper that widened the
+		# mode is caught here and not only by the arm above.
+		grant=()
+		for want in "${granted[@]}"; do
+			grant+=("${want%% *}" "${want#* }")
+		done
+		wrote=$(env "${SESSION_ENV[@]}" "HOME=$home" \
+			env -C "$proj" "$nono_bin/nono" run \
+			--profile "$FIXTURE_PROFILE" --workdir "$project" --allow-cwd \
+			"${grant[@]}" -- "$FIXTURE_BASH/bin/bash" -c \
+			"printf tainted >'${declared[0]}/one/SKILL.md' && echo WROTE || echo DENIED" \
+			2>/dev/null | tail -n 1)
+		if [ "$wrote" != DENIED ]; then
+			found=1
+			fail "the grant the $agent entry point passes let a session write to the declared surface ($wrote), so the surface is handed over rather than lent"
+		fi
+	done
+
+	# Lent, not handed over. Once, after every session: the surface is one
+	# host tree and any of them writing to it is the same violation.
+	tree_manifest "$host" >"$outside/after"
+	if ! diff -q "$outside/before" "$outside/after" >/dev/null; then
+		found=1
+		fail "$(printf 'the declared surface changed across the sessions that read it:\n%s' \
+			"$(diff "$outside/before" "$outside/after")")"
+	fi
+
+	[ "$found" -eq 0 ]
+}

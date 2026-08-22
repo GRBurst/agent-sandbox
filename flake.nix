@@ -128,7 +128,12 @@
             substrate = substrateFor;
           };
           mkEntryPoint = import ./lib/confined-agent.nix {
-            inherit pkgs agentPkgs agents;
+            inherit
+              lib
+              pkgs
+              agentPkgs
+              agents
+              ;
             confinement = mkConfinement;
           };
         in
@@ -148,6 +153,12 @@
           entryPoints = lib.listToAttrs (
             map (e: lib.nameValuePair e.name e) (map mkEntryPoint (lib.attrNames agents))
           );
+
+          # The same mapping the other way round: which command each agent
+          # answers to. Read back off the entry point rather than written down,
+          # so a check that iterates the table can name the command it must run
+          # without a second list to drift from D3.
+          entryPointNames = lib.mapAttrs (name: _: (mkEntryPoint name).name) agents;
         };
     in
     {
@@ -163,6 +174,12 @@
       # than parsing lib/agents.nix, which is how the description and the
       # assertions about it are kept from drifting apart.
       inherit agents;
+
+      # FR-1 again, from the command's side. `agents` says which agents exist;
+      # this says what a human types to start each one. A check asserting a
+      # property over every agent needs both, and deriving the second from the
+      # entry point the flake builds is what keeps the two from disagreeing.
+      agentBinaries = forSystems (system: (forSystem system).entryPointNames);
 
       packages = forSystems (
         system:

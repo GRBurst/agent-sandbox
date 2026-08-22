@@ -9,6 +9,7 @@
 #
 # mkEntryPoint ∷ name → derivation exposing /bin/<the agent's mainProgram>
 {
+  lib,
   pkgs,
   agentPkgs,
   agents,
@@ -38,9 +39,18 @@ pkgs.writeShellApplication {
   #
   # git is here for FR-23's copy below, and is the same derivation the session's
   # own substrate is rooted at, so it adds nothing to the closure.
+  #
+  # jq, coreutils and findutils are FR-25's, and they widen nothing the session
+  # can see: this script is the supervisor, running outside the boundary before
+  # `nono run` is reached, so its closure is not the enumerated substrate. Named
+  # rather than left to the host's PATH, because AGENTS.md §3 counts a tool that
+  # resolves only from a user profile as absent.
   runtimeInputs = [
     agentPkgs.nono
     pkgs.git
+    pkgs.jq
+    pkgs.coreutils
+    pkgs.findutils
   ];
 
   text = ''
@@ -101,6 +111,118 @@ pkgs.writeShellApplication {
       fi
     fi
 
+    # FR-25. The one host location a session reads on purpose. The declaration
+    # arrives in a variable from the calling environment — the same channel the
+    # parent `.envrc` uses — and never from a file inside a project, which is
+    # what keeps R5 true by construction rather than by a check: a project that
+    # cannot name the surface cannot widen its own reach.
+    #
+    # Colon-separated, like PATH, and so a directory whose name contains a colon
+    # cannot be declared. That is the same limitation PATH has had for fifty
+    # years and it needs no mechanism of its own.
+    agent_sandbox_surfaces=()
+    agent_sandbox_reads=()
+    if [ -n "''${AGENT_SANDBOX_SKILLS:-}" ]; then
+      IFS=: read -r -a agent_sandbox_declared <<<"''${AGENT_SANDBOX_SKILLS}"
+      for agent_sandbox_dir in "''${agent_sandbox_declared[@]}"; do
+        [ -n "$agent_sandbox_dir" ] || continue
+
+        # Refuse rather than guess. A relative entry would resolve against
+        # whatever directory the agent was started in, so the same declaration
+        # would grant different things in different projects (P9).
+        case "$agent_sandbox_dir" in
+          /*) ;;
+          *)
+            printf 'agent-sandbox: AGENT_SANDBOX_SKILLS names a relative path: %s\n' "$agent_sandbox_dir" >&2
+            printf 'agent-sandbox: every entry must be an absolute directory.\n' >&2
+            exit 78
+            ;;
+        esac
+        if [ ! -d "$agent_sandbox_dir" ]; then
+          printf 'agent-sandbox: AGENT_SANDBOX_SKILLS names something that is not a directory: %s\n' "$agent_sandbox_dir" >&2
+          exit 78
+        fi
+
+        # Resolved here, because the grant and the pointing must name the same
+        # path. A symlinked declaration granted by its link name reaches nothing.
+        agent_sandbox_dir="$(cd "$agent_sandbox_dir" && pwd -P)"
+        agent_sandbox_surfaces+=("$agent_sandbox_dir")
+
+        # --read and not --allow. M8f ran both: read-only refuses the session's
+        # write and leaves the surface byte-identical, while --allow lets the
+        # session edit the consumer's own skills. FR-25 lends the surface.
+        #
+        # Each declared directory by name, and no ancestor — M8f confirmed a
+        # grant on the directory itself is enough, so there is no reason to
+        # widen to a parent that also holds credentials and history (R9).
+        agent_sandbox_reads+=(--read "$agent_sandbox_dir")
+      done
+    fi
+
+    # The pointing, written before the session starts because it has to be there
+    # when the agent looks. Every artefact lands inside the project, so a
+    # consumer can read what their session was told, and nothing is copied: a
+    # copy would answer for the surface as it was at some earlier moment.
+    ${
+      let
+        s = a.skillSurface;
+        target = s.path "$PWD";
+      in
+      if s.kind == "symlink-children" then
+        ''
+          # One link per skill, for the reason recorded in the table: the agent
+          # keeps its own bookkeeping in this directory, so the directory itself
+          # must stay writable and local.
+          mkdir -p "${target}"
+          # Prune first, so a surface the consumer stopped declaring stops
+          # arriving. Only symlinks are removed: a real directory here is the
+          # consumer's own skill and none of this environment's business.
+          find "${target}" -mindepth 1 -maxdepth 1 -type l -delete
+          for agent_sandbox_dir in ''${agent_sandbox_surfaces+"''${agent_sandbox_surfaces[@]}"}; do
+            for agent_sandbox_skill in "$agent_sandbox_dir"/*; do
+              [ -d "$agent_sandbox_skill" ] || continue
+              ln -sfn "$agent_sandbox_skill" "${target}"/"$(basename "$agent_sandbox_skill")"
+            done
+          done
+        ''
+      else
+        ''
+          # Merged into whatever is already there. The agent rejects an unknown
+          # top-level key outright, and this file also carries settings this
+          # environment did not put there, so writing it whole would discard
+          # them. The declared roots replace the previous ones rather than
+          # accumulating, which is what makes running this twice change nothing.
+          mkdir -p "$(dirname "${target}")"
+          [ -f "${target}" ] || printf '{}\n' >"${target}"
+          if [ "''${#agent_sandbox_surfaces[@]}" -gt 0 ]; then
+            agent_sandbox_roots="$(jq -n '$ARGS.positional' --args "''${agent_sandbox_surfaces[@]}")"
+          else
+            agent_sandbox_roots='[]'
+          fi
+          # An empty declaration removes the key rather than writing an empty
+          # array, so a machine that declares nothing leaves a file this
+          # environment cannot be told apart from the consumer's own — which is
+          # Journey 8's second scenario, and P8's idempotence, in one line.
+          #
+          # The containers on the way to it go too. Removing `.skills.paths` and
+          # leaving `"skills": {}` behind would still be this environment's
+          # fingerprint on a file it was asked to stop touching, and an empty
+          # container carries no setting a consumer could lose.
+          jq --argjson roots "$agent_sandbox_roots" \
+            --argjson at ${lib.escapeShellArg (builtins.toJSON (lib.splitString "." (lib.removePrefix "." s.key)))} \
+            'def prune($p):
+               if ($p | length) == 0 then .
+               else (if (getpath($p) | . == {} or . == []) then delpaths([$p]) else . end) | prune($p[0:-1])
+               end;
+             if ($roots | length) > 0
+             then setpath($at; $roots)
+             else delpaths([$at]) | prune($at[0:-1])
+             end' \
+            "${target}" >"${target}.agent-sandbox.tmp"
+          mv "${target}.agent-sandbox.tmp" "${target}"
+        ''
+    }
+
     # --allow-cwd is not decoration. M4b ran the same profile with and without
     # it: `workdir.access = "readwrite"` sets the *level* of the working
     # directory grant, while the flag is the run-time consent that makes the
@@ -111,6 +233,7 @@ pkgs.writeShellApplication {
       --profile ${profile} \
       --workdir "$PWD" \
       --allow-cwd \
+      ''${agent_sandbox_reads+"''${agent_sandbox_reads[@]}"} \
       -- ${agent}/bin/${binary} "$@"
   '';
 

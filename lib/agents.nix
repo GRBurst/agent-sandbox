@@ -67,6 +67,54 @@ let
           table rather than over a named one.
         '';
       };
+      skillSurface = mkOption {
+        type = types.submodule {
+          options = {
+            kind = mkOption {
+              type = types.enum [
+                "json-array"
+                "symlink-children"
+              ];
+              description = ''
+                How this agent is told where to look. `M8e` measured all three
+                and found no mechanism they share: two take a list of extra
+                roots in a configuration file they read, and one has no
+                additive mechanism at all, so the only way to point it is a
+                symlink per skill under the root its own variable already
+                moved. FR-25 asks that the surface arrive for every agent, so
+                the difference lives here rather than in a special case.
+              '';
+            };
+            path = mkOption {
+              type = types.functionTo types.str;
+              description = ''
+                Where this environment writes the pointing, as a function of
+                the working directory placeholder — the configuration file for
+                `json-array`, the directory the symlinks go in for
+                `symlink-children`. It lies under the placeholder for the same
+                reason `stateVars` does: the pointing is a project artefact, so
+                a consumer can read what their session was told.
+              '';
+            };
+            key = mkOption {
+              type = types.str;
+              default = "";
+              description = ''
+                For `json-array`, the jq path of the array the roots are merged
+                into, as `.skills.paths`. Merged rather than written, because
+                the file also carries settings this environment did not put
+                there. Empty for `symlink-children`, which has no file.
+              '';
+            };
+          };
+        };
+        description = ''
+          FR-25's half of the table: what this environment does with the
+          authoring surface a consumer declared, once the grant has been made.
+          It points, and never copies — a copy would go stale silently, and P8
+          asks that running the wrapper twice change nothing.
+        '';
+      };
     };
   };
 
@@ -136,6 +184,22 @@ lib.mapAttrs (_: checkAgent) {
       # is not the agent this description was written against.
       DISABLE_AUTOUPDATER = "1";
     };
+
+    # The awkward one. M8e found this agent has no additive mechanism at all:
+    # CLAUDE_CONFIG_DIR moves the whole global surface rather than adding to it,
+    # and there is no settings key naming an extra skill root. So the pointing
+    # is a symlink per skill inside the root that variable already moved.
+    #
+    # Per skill, never the `skills` directory itself. M8e measured the agent
+    # writing manifest.json and a `synced` marker inside `skills/`, so a symlink
+    # at that level would aim its own writes at a read-only host directory. M8f
+    # then measured the child form working: the agent reads through the link
+    # into a directory mode 0555 and keeps its bookkeeping in the writable level
+    # above.
+    skillSurface = {
+      kind = "symlink-children";
+      path = w: "${w}/.agents/claude/skills";
+    };
   };
 
   opencode = {
@@ -168,6 +232,18 @@ lib.mapAttrs (_: checkAgent) {
       # P8, for claude-code's reason: nix owns the version, and an agent that
       # updates itself is not the agent this description was written against.
       OPENCODE_DISABLE_AUTOUPDATE = "1";
+    };
+
+    # `skills.paths`, which M8e found covers skills and only skills —
+    # OPENCODE_CONFIG_DIR moves agents, commands, modes and plugins but not
+    # these. The file is the global configuration under the relocated config
+    # root, and the roots are merged into it rather than written over it,
+    # because the agent rejects an unknown top-level key outright and a
+    # consumer's own settings may already be there.
+    skillSurface = {
+      kind = "json-array";
+      path = w: "${w}/.config/opencode/opencode.json";
+      key = ".skills.paths";
     };
   };
 
@@ -219,6 +295,17 @@ lib.mapAttrs (_: checkAgent) {
       # execution substrate carries no npm to run. Two guards, because a
       # settings file is a request and the substrate is an answer.
       PI_OFFLINE = "1";
+    };
+
+    # The `skills` array in the settings file, which M8e found is the mechanism
+    # this agent's own documentation points at another harness's skill root
+    # with. The file is the one PI_CODING_AGENT_DIR moved, and it is the same
+    # file the FR-22 `packages` key lives in, so the roots are merged in rather
+    # than written over.
+    skillSurface = {
+      kind = "json-array";
+      path = w: "${w}/.agents/pi/settings.json";
+      key = ".skills";
     };
   };
 
