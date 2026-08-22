@@ -1257,19 +1257,28 @@ ______________________________________________________________________
 
 **RED**: `check_j1_1` at e2e runs `nix develop <canonical ref>` with `HOME=$(mktemp -d)`, from the pushed ref and never from the working tree.
 
+**Preconditions, measured** — in full in [research.md](research.md#m9--preconditions-for-the-end-to-end-layer-measured-before-it-exists). Three of the four change this task rather than merely confirming it.
+
+1. **The ref is right and its content is not.** `origin` is `git@github.com:GRBurst/agent-sandbox.git`, public and reachable unauthenticated, so FR-19's name is confirmed and the handbook's `github:HivemindTechnologies/sandbox-examples` is wrong in both halves. But `origin/main` is 50 commits behind, and what is pushed is a Kafka playground shell with no agent, no `nono` and no `nixConfig`. **`check_j1_1` stays RED until a human pushes**, which is the correct state for it and not a reason to defer writing it.
+1. **The obvious invocation passes against that agentless ref.** `nix develop --command` prepends the devshell's `PATH` and *keeps the caller's*, so `command -v claude` inside `nix develop <ref>` resolved the developing checkout's own wrapper, at position 53 of `$PATH`. The instrument is therefore part of this task's definition: `env -i` with `PATH=/run/current-system/sw/bin` and a scratch `HOME`, never `direnv exec .`.
+1. **`--accept-flake-config` is load-bearing.** A clean run was seen to print `ignoring untrusted flake configuration setting 'extra-substituters'`, so the declared cache does nothing for a stranger who is not a trusted user. That changes what the handbook tells a stranger to type, not only what the check does.
+1. **The harness needs one new file.** `scripts/checks/e2e.sh` does not exist; every function that walks the layers skips a missing file, and `M8g`'s found-versus-ran guard counts only files that exist.
+
 - [ ] Check written and seen to FAIL
 - [ ] FR-19: the canonical reference is `github:GRBurst/agent-sandbox`, named identically in every document; the handbook's current owner and repository are both wrong and are corrected
-- [ ] No step depends on the author's configuration (SC-5)
+- [ ] No step depends on the author's configuration (SC-5), and the run inherits **nothing** from the developing environment — asserted by the check itself, which fails if any agent resolves before `nix develop` has been entered
 - [ ] The clean `$HOME` is created before the run and `$XDG_CONFIG_HOME` inside it exists before the mechanism is invoked, or the mechanism silently reads the real home instead ([M1e](research.md#m1e--machine-readable-resolved-policy))
-- [ ] The binary cache is reachable by the stranger too: this repository's own `nixConfig` declares `https://cache.numtide.com` and its key, because an input's `nixConfig` is not inherited ([M4b](#m4b--a-confined-claude-starts-status-pending))
+- [ ] The binary cache is reachable by the stranger too: this repository's own `nixConfig` declares `https://cache.numtide.com` and its key, because an input's `nixConfig` is not inherited ([M4b](#m4b--a-confined-claude-starts-status-implemented)). Since a stranger is not a trusted user, the handbook's command carries `--accept-flake-config` and the check passes it too
 - [ ] Nothing is passed `--impure`, and the lock is the committed one (P8)
 - [ ] Violation planted (consume from the working tree rather than the pushed ref), seen to FAIL, reverted, recorded in plan.md — `M4b` already planted the confinement arm, and this task adds the arm that is specifically about consuming from the ref
 
-This check needs no positive control, and the reason is worth writing down rather than leaving as an omission: its observable is a *set* — the granted reach compared against the registry — and a set is already discriminating, because with confinement removed there is no manifest to read at all. [D9](plan.md#decisions) binds the checks whose observable is a *failure*.
+This check needs no positive control against confinement, and the reason is worth writing down rather than leaving as an omission: that observable is a *set* — the granted reach compared against the registry — and a set is already discriminating, because with confinement removed there is no manifest to read at all. [D9](plan.md#decisions) binds the checks whose observable is a *failure*. It does need the inheritance control named above, which is a different problem: there the failure mode is a check that passes without the ref taking any part at all.
 
 ### M9b — Entering and verifying twice change nothing (Status: PENDING)
 
 **Scenario**: Rep1 and Rep2 — two scenarios, so if either needs more than a trivial edit, split this task.
+
+**Precondition, measured**: `.gitignore` already excludes `.tmp/`, `.cache/`, `/.local/`, `/.config/`, `/.agents/`, `*.log` and `.direnv`. That is what "tracked files unchanged" rests on, and an entry added later would weaken the assertion in silence — so the comparison is over *tracked* files, never the working tree.
 
 - [ ] `check_rep1`: tracked files unchanged and granted reach byte-identical
 - [ ] `check_rep2`: same result, no residue a third run would trip over — SC-7 stated as a property of the suite rather than of one run
@@ -1283,6 +1292,8 @@ An assertion that two things are equal is the shape most easily satisfied by not
 **Scenario**: Journey 7.1
 
 **RED**: `check_j7_1` at e2e asserts the suite ran unattended and reported success, then plants a registry entry and asserts the expected set changed with the check unedited.
+
+**Preconditions, measured**: there is no `.github/`, so this starts from nothing. The sentence to amend is `AGENTS.md`'s "There is no cloud, no Kubernetes, no CD pipeline and no deployed service", and it appears once. The substituter checkbox below is not speculative — a clean run was seen to print `ignoring untrusted flake configuration setting 'extra-substituters'`, so without the flag or a machine-level setting a runner compiles three agents from source ([research.md](research.md#m9--preconditions-for-the-end-to-end-layer-measured-before-it-exists)).
 
 - [ ] Check written and seen to FAIL
 - [ ] `.github/workflows/verify.yml` runs `scripts/validate.sh` on `ubuntu-latest` and `macos-latest`, unattended, on a machine with no prior agent state (FR-13)
@@ -1315,6 +1326,8 @@ ______________________________________________________________________
 - [ ] The way to run an agent unconfined — by not invoking the confined entry point — is described rather than concealed (FR-10)
 - [ ] Every open question in `spec.md` resolved in place with a one-line outcome, including the two assumptions the plan was still to confirm
 - [ ] The handbook names what the automated run cannot reach: an unattended token flow, the second platform, and a consumer's own trust settings for the substituter
+- [ ] **Egress is mediated, not restricted**, and the handbook says so rather than letting a reader infer otherwise from the filesystem confinement: raw TCP is denied but arbitrary HTTPS through the injected proxy succeeds, so a session that asks an agent to fetch a package reaches the registry ([M8d](#m8d--pi-and-pre-provisioned-extensions-status-implemented)). The drift entry this task retires is the absence of that sentence, not the behaviour
+- [ ] The stranger's copyable command carries `--accept-flake-config`, because the declared substituter is ignored for anyone who is not a trusted user — measured, not assumed ([research.md](research.md#m9--preconditions-for-the-end-to-end-layer-measured-before-it-exists))
 - [ ] `docs/CONSTITUTION.md` P1's accepted-leak list amended to its second entry
 - [ ] `research.md` consolidated to what is still true, per AGENTS.md §1 — the decisions and the criteria kept, the record of how each was checked dropped; the `codex` findings kept, since they are the follow-up feature's head start
 - [ ] Touched files formatted and linted per [AGENTS.md](../../AGENTS.md#4-verify-every-change)

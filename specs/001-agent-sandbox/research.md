@@ -2322,3 +2322,92 @@ Verified across all three agents in real confined sessions, with pre-existing co
 
 The last point is Journey 8's second scenario obtained for free rather than by a second code path, and it is the reason the pruning happens first rather than last.
 The prune deletes symlinks only, so a real skill directory a consumer put under `claude`'s configuration root is theirs and is left alone.
+
+## M9 — Preconditions for the end-to-end layer, measured before it exists
+
+`M9a` is the first task in this feature whose observable lives outside the checkout, so its preconditions were measured rather than assumed.
+Two of them are not satisfiable by an agent at all, and saying so here is the point of the section.
+
+### The canonical ref exists, is public, and holds none of this work
+
+`origin` is `git@github.com:GRBurst/agent-sandbox.git`, which confirms FR-19's `github:GRBurst/agent-sandbox` and confirms that [docs/HANDBOOK.md](../../docs/HANDBOOK.md)'s `github:HivemindTechnologies/sandbox-examples` is wrong in both halves.
+`git ls-remote https://github.com/GRBurst/agent-sandbox HEAD` succeeds unauthenticated from inside a confined session, so a stranger can reach it.
+
+What is *at* the ref is the problem.
+`origin/main` is `1c8b15e`, "Add basic sdd files", and local `main` is **50 commits ahead of it**.
+The pushed tree is `.envrc`, `.gitignore`, `AGENTS.md`, `docs/`, `flake.{nix,lock}` and `specs/templates/` — no `lib/`, no `scripts/` — and the pushed `flake.nix` is a *Kafka playground* shell holding `just`, `kcat`, `kafkactl`, `postgresql` and `maven`, with no agent, no `nono` and no `nixConfig`.
+
+So `check_j1_1` cannot go green until a human pushes.
+That is not a defect and not a reason to delay writing the check: RED is the correct state for a check whose ref does not yet carry the feature, and it is the only honest state until the push happens.
+
+### An e2e run in this repository lies to itself by default
+
+The obvious invocation passes today, against that agentless ref:
+
+```sh
+direnv exec . env HOME="$clean" nix develop 'github:GRBurst/agent-sandbox' \
+  --command sh -c 'command -v claude opencode pi nono'
+```
+
+It reported four store paths — `…-claude/bin/claude`, `…-opencode/bin/opencode`, `…-pi/bin/pi`, `…-nono-0.74.0/bin/nono` — the same ones the developing checkout resolves.
+
+Printing `$PATH` inside that shell explains it.
+The ref's own packages occupy positions 1–20; the agents sit at positions **53–55**, appended.
+`nix develop --command` *prepends* the devshell's `PATH` and keeps the caller's, so every tool the developing environment already exported is still on it.
+A `command -v` inside `nix develop <ref>` therefore measures the caller, not the ref, and would have reported success for a ref containing nothing at all.
+
+This is the trap [AGENTS.md](../../AGENTS.md) § 4 names, reached by the shortest possible route, and it is why `M9a`'s instrument is part of the task's definition rather than an implementation detail.
+
+### The instrument that does not lie
+
+Bare `nix` is unusable here — the ambient sandbox denies `$HOME`, so the fetcher cache fails with a SQLite error — and `direnv exec .` is what contaminates.
+`env -i` with a minimal `PATH` is the only form that is both runnable and clean:
+
+```sh
+env -i HOME="$H" XDG_CONFIG_HOME="$H/.config" XDG_DATA_HOME="$H/.local/share" \
+  XDG_CACHE_HOME="$H/.cache" TMPDIR="$H/tmp" USER="$(id -un)" \
+  PATH=/run/current-system/sw/bin \
+  nix develop '<ref>' --command sh -c '…'
+```
+
+`$XDG_CONFIG_HOME` must exist before the run, or `nono` falls back to the host's real `~/.config` — the same trap [`M1e`](#m1e--machine-readable-resolved-policy) found, and already a checkbox on the task.
+Under this form the agentless ref reports no agent on `$PATH` at all, which is `check_j1_1`'s genuine RED.
+
+Run against the *current* flake by revision rather than by path — `git+file://$PWD?ref=main&rev=$(git rev-parse HEAD)` — the same form puts the four confined wrappers at positions **14–17**, at store paths identical to the direnv shell's.
+`writeShellApplication` names a wrapper after `mainProgram`, so `…-claude` is the confined entry point and not the raw `claude-code` package, and the check needs no extra step to tell them apart.
+
+### The substituter is genuinely out of reach for a stranger
+
+[flake.nix](../../flake.nix)'s comment on its own `nixConfig` predicted this, and it is now measured rather than predicted.
+The clean run prints:
+
+```text
+warning: ignoring untrusted flake configuration setting 'extra-substituters'.
+Pass '--accept-flake-config' to trust it
+warning: ignoring untrusted flake configuration setting 'extra-trusted-public-keys'.
+```
+
+The shell still built, but only because this host's store is warm.
+A stranger with a cold store, and equally a CI runner, compiles every agent from source unless the substituter is configured on the machine, the user is trusted, or `--accept-flake-config` is passed.
+`https://cache.numtide.com/nix-cache-info` answers `200` from here, so the cache is reachable; reachable and *trusted* are different things, and only the second one saves the build.
+
+`M9a` says nothing is passed `--impure` and says nothing about this flag.
+The honest reading is that `--accept-flake-config` is a load-bearing part of the invocation a stranger runs, so it belongs in the handbook's copyable command rather than hidden inside a check.
+
+### What the harness already provides, and what M9 has to create
+
+- `scripts/checks/` holds `unit.sh`, `component.sh` and `integration.sh` only.
+  **There is no `e2e.sh`**, though `e2e` is the fourth entry of `LAYERS`.
+  `source_layers`, `list_checks` and `run_layers` each skip a layer whose file is absent, and the `found`-versus-`ran` guard added in `M8g` counts only files that exist, so creating the file is the whole of the harness work.
+- **There is no `.github/`.** `M9c` starts from nothing.
+- `AGENTS.md`'s "no cloud, no Kubernetes, no CD pipeline and no deployed service" is the sentence `M9c` has to amend, and it is one sentence in one place.
+- `.gitignore` already excludes `.tmp/`, `.cache/`, `/.local/`, `/.config/`, `/.agents/`, `*.log` and `.direnv`, which is what `M9b`'s "tracked files unchanged" rests on.
+  An entry added later would weaken that assertion silently, so `check_rep1` compares *tracked* files rather than the working tree.
+
+### The two preconditions an agent cannot satisfy
+
+Recorded here so that a session picking up `M9` does not spend its budget discovering them again.
+
+1. **The push.** `check_j1_1` is RED until `main` reaches `origin/main`, and [AGENTS.md](../../AGENTS.md) forbids pushing unasked.
+1. **The second platform.** SC-8 compares the resolved reach *across* `ubuntu-latest` and `macos-latest`, and no single machine can make that comparison.
+   It is the one assertion in the suite that only CI can run, which is why `M9c` exists as a task rather than as a check.
