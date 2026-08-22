@@ -177,12 +177,16 @@ lib.mapAttrs (_: checkAgent) {
     # Nothing a group grants is wanted here either, for D15's reason.
     groups = [ ];
 
-    # The same one service, and for the same measured reason as opencode: M8d
-    # found the bundled Anthropic SDK defaulting `baseURL` from
-    # ANTHROPIC_BASE_URL and `apiKey` from ANTHROPIC_API_KEY, the pair the
-    # mediated route injects. D14 expected this agent to need a provider base
-    # URL written into a configuration file; it does not, and this environment
-    # writes none.
+    # The same one service as the other two, but reached differently. D14
+    # expected this agent to need a provider base URL written into a
+    # configuration file; it does not, and this environment writes none. M8d
+    # then read the bundled Anthropic SDK's constructor defaults and concluded
+    # the agent picks ANTHROPIC_BASE_URL up from the environment as the other
+    # two do. M8e measured the running agent and found otherwise: pi passes an
+    # explicit baseUrl from its own provider registry, which overrides that
+    # default, so only ANTHROPIC_API_KEY crosses and the mediation is nono's
+    # intercepting proxy in front of the real host. Nothing here changes as a
+    # result; the reason it works does.
     credentialServices = [ "anthropic" ];
 
     stateVars = w: {

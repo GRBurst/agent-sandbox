@@ -2057,11 +2057,14 @@ Installed ./vendor/my-ext
 
 ## M8e — Where each agent reads its declarative extensions from
 
-**Partial.** `opencode` is measured; `claude-code` and `pi` are not.
-The session doing the measuring was itself confined and got `Permission denied` on `~/.claude`, `~/.config/pi` and `~/.pi`, so their layouts are unobserved and `M8e` still owes them.
-`~/.config/claude` and `~/.config/anthropic` returned `ENOENT` rather than a denial, so those two do not exist on this machine.
+All three agents are measured: `opencode` 1.18.18 through its own `debug` subcommands, `pi` 0.84.2 and `claude-code` 2.1.237 through `strace`.
 
-Measured against `opencode` 1.18.18, and against its own documentation at `opencode.ai/docs/skills` and `/docs/config`.
+An earlier attempt at the other two failed because the measuring session was itself confined and got `Permission denied` on `~/.claude`, `~/.config/pi` and `~/.pi`.
+That was the wrong instrument for the question.
+Enumerating the locations an agent *attempts* to read does not need the host's real dotfiles at all: run the raw package unconfined against a scratch `HOME`, plant a fixture in every candidate root, and trace the syscalls.
+A denied root and an empty root then stop looking alike, because the trace records the attempt either way.
+
+The `opencode` half below was measured against its own documentation at `opencode.ai/docs/skills` and `/docs/config`.
 
 ### The instruments
 
@@ -2152,4 +2155,113 @@ Reading the binary for variable names appeared not to be available for this agen
 
 - `opencode debug skill` is the enumeration instrument of choice, but it reports what the agent **resolved**, not every path it tried.
   A root that is denied and one that is empty look the same.
-  Enumerating the locations an agent *attempts* still needs `strace -f -e trace=openat`, which is how the other two agents must be measured.
+  Enumerating the locations an agent *attempts* still needs `strace -f -e trace=openat`, which is how the other two agents were measured.
+
+- **An agent has to be given work before it looks for extensions.** `pi --list-models` and the equivalent cheap invocations produce 343 trace lines and touch almost nothing; a print-mode run (`-p 'hi'` with a syntactically valid but wrong `ANTHROPIC_API_KEY`) produces around a thousand for `pi` and nearly eight thousand for `claude-code`, because discovery completes before the request is sent and the request then fails with a 401.
+  The 401 is the signal that discovery ran to completion, so it is the instrument working rather than the measurement failing.
+
+- **Plant a fixture in every candidate root, not only the ones expected to win.** Dedup, precedence and trust gates are all invisible when only one root is populated, and each of the three findings below about ordering came from a root that had a file in it.
+
+### `pi` — one variable moves the global surface, and the project surface is behind a trust gate
+
+Four declarative surfaces, each with a global root under `$PI_CODING_AGENT_DIR` and a project root under `.pi/`: `skills/`, `prompts/`, `themes/`, `extensions/`.
+Measured with fixtures in all eight, plus `$HOME/.agents/skills` and `PROJ/.agents/skills`, in two arms:
+
+| arm | roots read |
+| --- | --- |
+| default (project untrusted) | the four global roots, and `$HOME/.agents/skills` |
+| `-a` (project trusted for the run) | the same, **plus** the four `.pi/` roots and `PROJ/.agents/skills` |
+
+Three things follow.
+`PI_CODING_AGENT_DIR` moves the whole global surface, which is the same relocation `M8d` already relies on for state — one variable, no per-surface variable, and nothing left behind under `$HOME`.
+The trust gate is real and observable rather than documented-only: an untrusted project's `.pi/extensions/*.ts` is never opened, while the *global* extensions load in an untrusted project regardless.
+And `$HOME/.agents/skills` is read **`$HOME`-relative**, so it is `pi`'s copy of the hazard [D17](plan.md#d17) exists to contain, identical in shape to `opencode`'s.
+
+`pi` probes no `~/.claude` or `~/.codex` root of its own.
+Its documentation presents those as sanctioned *entries for the settings `skills` array*, which is a different thing: something a consumer writes down, not something that arrives.
+
+Extensions are TypeScript, auto-discovered from `{global,.pi}/extensions/{*.ts,*/index.ts}`, loaded in-process through **jiti**, and able to register tools, commands and providers and to intercept every tool call.
+That is `opencode`'s `plugin/` hazard again, and `FR-26`'s reason for keeping executable extensions out of the authoring surface holds for `pi` unchanged.
+Measured detail that matters under confinement: **jiti compiles to `$TMPDIR/jiti/`**, so it honours the redirection and extension loading works inside a session; with `TMPDIR` unset it compiles to `/tmp/jiti/` and fails `EACCES`, which is what the environment setting `TMPDIR` inside the project already prevents.
+
+The extra-root mechanism is the settings arrays — `skills`, `prompts`, `extensions`, `packages` — each taking files or directories, resolved relative to the settings file they appear in.
+It covers every surface, unlike `opencode` where `OPENCODE_CONFIG_DIR` covers four of five.
+CLI equivalents exist for one-off use (`--skill`, `--prompt-template`, `-e`), all repeatable and all additive even against `--no-skills` or `--no-prompt-templates`.
+An extension may also contribute `skillPaths`, `promptPaths` and `themePaths` at run time through the `resources_discover` event, which means the executable surface can enlarge the declarative one.
+
+### `pi` ignores `ANTHROPIC_BASE_URL`, which corrects [D14](plan.md#d14) and `M8d`
+
+Two arms under `strace -f -e trace=connect`, one with the variable unset and one with it set to `http://127.0.0.1:9/v1` — a port nothing listens on, so redirection would be unmissable.
+Both connected to `160.79.104.10:443` and both returned the real API's `401 {"type":"error","error":{"type":"authentication_error","message":"API key is invalid."}}`.
+`pi` passes an explicit `baseUrl` from its own provider registry, which overrides the bundled SDK's `readEnv("ANTHROPIC_BASE_URL")` default.
+
+So `M8d`'s claim that `pi` picks the mediated base URL up from the environment is **false**, and only `ANTHROPIC_API_KEY` crosses.
+This does not change what the environment declares — `credentialServices = [ "anthropic" ]` is still the whole of it — but it changes *why it works*: for `pi`, mediation rests on nono's intercepting proxy in front of the real host, not on the agent being pointed somewhere else.
+The two mechanisms are not interchangeable, because the proxy route depends on `NODE_EXTRA_CA_CERTS` and the interception directory, and `M1c` already recorded that interception is skipped when that directory cannot be created.
+
+### `claude-code` — one variable moves everything, and the hazard is the ancestor walk
+
+`CLAUDE_CONFIG_DIR` is the broadest single relocation of the three agents.
+Diffing a run with it set against one without: around 84 paths move out of `~/.claude/`, **nothing is left behind under `$HOME`**, and `~/.claude.json` moves too, becoming `$CFG/.claude.json`.
+What moves covers the authoring surface (`skills/`, `agents/`, `commands/`, `output-styles/`, `rules/`, `themes/`, `workflows/`, `settings.json`), the executable surface (`plugins/` with `installed_plugins.json`, `known_marketplaces.json`, `cache/`, `synced/`) and every state and credential root (`.credentials.json`, `projects/<mangled-cwd>/`, `sessions/`, `todos/`, `logs/`, `statsig/`, `shell-snapshots/`, `file-history/` and the rest).
+One variable for the whole global surface is better than `opencode`, where skills escape `OPENCODE_CONFIG_DIR`, and better than `pi` only in that it also carries state.
+
+**`claude-code` reads no `.agents/` root at all.**
+The only `SKILL.md` files opened were `~/.claude/skills/*/SKILL.md` and `PROJ/.claude/skills/*/SKILL.md`; `$HOME/.agents/skills` has zero mentions in either arm, and a fixture at `PROJ/.agents/skills` was never opened.
+The `.agents/…` entries that do appear in the trace are `.git`, `.gitignore`, `.ignore` and `.rgignore` probes from the agent's file walk, not discovery — a trap worth naming, because grepping the trace for `.agents` suggests the opposite of what happened.
+So the cross-agent `~/.agents` convention is honoured by two of the three, and a surface declared there is invisible to `claude-code`.
+
+**The hazard here is the ancestor walk.**
+At every ancestor of the working directory up to `/` — measured through the scratch project, `.tmp/m8e2`, `.tmp`, the repository root, `hivemind`, `projects`, `/home/pallon`, `/home` and `/` — the agent probes `CLAUDE.md`, `CLAUDE.local.md`, `.claude/CLAUDE.md`, `.claude/rules` and `.mcp.json`.
+The repository root's `AGENTS.md` was genuinely read this way.
+So an authoring surface *and* an MCP server declaration can arrive from a directory nobody named, including `$HOME`.
+Inside a confined session the working directory is the project root and every ancestor is denied, so this fails closed — but it fails closed by the boundary, not by the agent, which is exactly the class of thing `check_j8_2`'s set equality exists to keep honest.
+
+**`/etc/claude-code/` is a third kind of root**, neither `$HOME`- nor XDG-relative: probed for `managed-settings.json`, `managed-settings.d`, `managed-mcp.json`, `CLAUDE.md` and `.claude/{skills,agents,commands,output-styles,rules}`.
+No variable moves it.
+Measured inside a confined session: the profile's `filesystem.allow` is `[]`, `filesystem.read` holds store paths only, and `groups.include` is `[]`, so `ls /etc` exits 2 and `/etc/passwd` cannot be read.
+`/etc/claude-code` is therefore unreachable and `FR-26` holds here by construction rather than by declaration.
+The banner's "+ 34 system/group paths" are not `/etc` entries.
+
+The XDG- and `TMPDIR`-derived paths all follow the redirection: `$XDG_CONFIG_HOME/anthropic/{active_config,configs/default.json}`, `$XDG_STATE_HOME/claude/locks`, `$XDG_CACHE_HOME/claude-cli-nodejs/<mangled-cwd>/`, `$XDG_CACHE_HOME/claude/staging`, `$XDG_DATA_HOME/claude/versions`, `$TMPDIR/claude-<uid>/`.
+Project-relative: `.claude/{skills,agents,commands,output-styles,rules,workflows,worktrees}`, `.claude/{settings.json,settings.local.json,scheduled_tasks.json,CLAUDE.md}`, `.mcp.json`, `CLAUDE.md`, `CLAUDE.local.md`.
+Two hardcoded absolute paths are of no consequence and are denied: `/home/claude/.claude/remote/{.oauth_token,.session_ingress_token}`.
+
+### The answer, as one table
+
+Every location, classified as `FR-25` asks — an authoring surface that can be lent read-only, or an executable extension that `FR-26` excludes — with the redirection each one obeys.
+
+| agent | location | kind | moved by |
+| --- | --- | --- | --- |
+| all three | project-relative roots (`.opencode/`, `.pi/`, `.claude/`) | authoring | nothing; inside the workdir already |
+| `opencode` | `~/.config/opencode/{agent,command,skills,prompts,modes,themes}` | authoring | `XDG_CONFIG_HOME`, and `OPENCODE_CONFIG_DIR` for all but skills |
+| `opencode` | `~/.config/opencode/plugin(s)`, `.opencode/plugin(s)/*.ts` | **executable** | as above |
+| `opencode` | `~/.agents/skills`, `~/.claude/skills` | authoring | **nothing — `$HOME`-relative** |
+| `pi` | `$PI_CODING_AGENT_DIR/{skills,prompts,themes}` | authoring | `PI_CODING_AGENT_DIR` |
+| `pi` | `$PI_CODING_AGENT_DIR/extensions`, `.pi/extensions` | **executable** | `PI_CODING_AGENT_DIR` / workdir |
+| `pi` | `~/.agents/skills` | authoring | **nothing — `$HOME`-relative** |
+| `claude-code` | `$CLAUDE_CONFIG_DIR/{skills,agents,commands,output-styles,rules,themes,workflows}` | authoring | `CLAUDE_CONFIG_DIR` |
+| `claude-code` | `$CLAUDE_CONFIG_DIR/plugins` | **executable** | `CLAUDE_CONFIG_DIR` |
+| `claude-code` | every ancestor's `CLAUDE.md`, `.claude/rules`, `.mcp.json` | authoring, and `.mcp.json` reaches further | **nothing — walks to `/`** |
+| `claude-code` | `/etc/claude-code/**` | both | **nothing — absolute** |
+
+Two rows carry the whole risk, and they are the two that no variable moves: `$HOME`-relative roots for `opencode` and `pi`, the ancestor walk for `claude-code`.
+Those are the paths along which an extension can arrive in a session that declared nothing, and they are why `check_j8_2` asserts the undeclared case as a set equality instead of trusting that nothing was granted.
+The rest are moved by exactly one variable per agent, all of which the agent table already sets.
+
+The extra-root mechanism, per agent, and whether it covers the whole surface:
+
+| agent | mechanism | covers |
+| --- | --- | --- |
+| `opencode` | `skills.paths` configuration key | skills only; `OPENCODE_CONFIG_DIR` covers agents, commands, modes, plugins and **not** skills |
+| `pi` | settings arrays `skills`, `prompts`, `extensions`, `packages` | every surface |
+| `claude-code` | none found | — the only lever is `CLAUDE_CONFIG_DIR`, which *moves* the root rather than adding one |
+
+`claude-code` having no additive mechanism is the finding that constrains `M8f` and `M8g` most: for that agent, "declare an extra authoring surface" and "relocate the only global surface" are the same operation, so a declared surface and the agent's own state cannot be separated by pointing at them independently.
+
+### A gap this session cannot close
+
+Whether a real model request succeeds through the mediated route cannot be measured from here, because no credential is resolvable in this session at all: `ANTHROPIC_API_KEY` arrives **empty** with nono's `Credential not found for route 'anthropic'` warning, and the checks only work because they seed a fake host key that nono replaces with a 64-hex placeholder.
+`curl` is not an escape hatch either — the substrate grants the `curl` package's default output while `bin/curl` lives in its separate `-bin` output, so the binary is absent.
+No check in the suite makes a live model call, and none can without a real host credential.
+That is a coverage gap for `M9` and the handbook rather than something `M8e` can resolve.
