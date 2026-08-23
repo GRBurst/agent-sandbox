@@ -1,0 +1,125 @@
+# FR-13. Every claim this repository makes, checked on a clean machine, for
+# every platform it supports, on every change.
+#
+# It deploys nothing and publishes nothing. The one artefact it uploads is the
+# reach each platform resolved, and it exists so that the next job can compare
+# the two — which is the single assertion in the suite that no one machine can
+# make (FR-20).
+#
+# `on` is quoted so that it stays the string it is: YAML 1.1 reads a bare `on`
+# as a boolean, and both yamllint and the check that reads this file would then
+# be looking at a key that is not there.
+name: verify
+
+"on":
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  # SC-8: one job, one command, two platforms. The matrix carries the system
+  # this repository names alongside the runner image that provides it, so the
+  # set of platforms verified is readable off this file and comparable against
+  # the flake's own outputs rather than restated in prose.
+  suite:
+    strategy:
+      # Both platforms report, always. Cancelling the second the moment the
+      # first goes red would leave the cross-platform comparison with one side.
+      fail-fast: false
+      matrix:
+        include:
+          - system: x86_64-linux
+            runner: ubuntu-latest
+          - system: aarch64-darwin
+            runner: macos-latest
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # The substituter the flake declares, passed explicitly. nix ignores a
+      # flake's own nixConfig for anyone who is not a trusted user — measured,
+      # it prints "ignoring untrusted flake configuration setting
+      # 'extra-substituters'" — and the runner is not one, so without these two
+      # lines every agent is compiled from source. `extra-` rather than plain,
+      # so cache.nixos.org is added to and not replaced.
+      - uses: cachix/install-nix-action@v27
+        with:
+          extra_nix_config: |
+            extra-substituters = https://cache.numtide.com
+            extra-trusted-public-keys = niks3.numtide.com-1:DTx8wZduET09hRmMtKdQDxNNthLQETkc/yaX7M4qK0g=
+
+      # SC-4: this is the whole report. No `continue-on-error`, no `|| true`,
+      # nothing conditional and nothing that reads a human — the job's exit
+      # status is the suite's, and a commit is accepted or rejected on it.
+      #
+      # No `--layer`. Restricting the run to the cheapest layer is exactly the
+      # violation plan.md records against `check_j7_1`, because a green run of
+      # the unit layer says nothing about the layers it skipped.
+      - name: Every layer of the suite
+        id: suite
+        shell: nix develop --accept-flake-config --command bash -e {0}
+        run: ./scripts/validate.sh
+
+      # FR-20: the reach this platform grants, with the execution substrate
+      # removed. What is left is the part that must be identical on both — the
+      # project's own grant, whatever the leak registry justifies, and the
+      # state redirection — while the substrate legitimately differs, since one
+      # platform's closure carries a locale archive and a tracer the other has
+      # no need of. Dropping every store path is what expresses the comparison
+      # in terms neither platform's semantics decides.
+      - name: The reach this platform grants
+        id: reach
+        shell: nix develop --accept-flake-config --command bash -e {0}
+        run: |
+          for a in $(nix eval --json --accept-flake-config '.#agents' \
+            --apply builtins.attrNames | jq -r '.[]'); do
+            nix build --no-link --print-out-paths --accept-flake-config \
+              ".#confinement-$a" |
+              xargs jq -S --arg a "$a" '{ ($a): walk(
+                if type == "array"
+                then map(select(type != "string"
+                  or (startswith("/nix/store/") | not)))
+                elif type == "object"
+                then with_entries(select(.value | type != "string"
+                  or (startswith("/nix/store/") | not)))
+                else . end) }'
+          done | jq -s add >reach.json
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: reach-${{ matrix.system }}
+          path: reach.json
+
+  # FR-20 and SC-8: the two platforms grant the same reach. This is the one
+  # assertion no single machine can make, which is why it lives here rather
+  # than in a check.
+  platforms:
+    needs: suite
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: reach-*
+          path: reach
+
+      # Two guards before the comparison, because an equality assertion is
+      # satisfied most easily by there being nothing to compare: fewer than two
+      # reports, or a report that is empty, both make a diff agree forever.
+      - name: The platforms grant the same reach
+        run: |
+          mapfile -t reports < <(printf '%s\n' reach/*/reach.json | sort)
+          if [ "${#reports[@]}" -lt 2 ]; then
+            printf 'only %s platform reported its reach\n' "${#reports[@]}"
+            exit 1
+          fi
+          for r in "${reports[@]}"; do
+            if [ ! -s "$r" ]; then
+              printf '%s is empty, so comparing it agrees with anything\n' "$r"
+              exit 1
+            fi
+          done
+          for r in "${reports[@]:1}"; do
+            diff -u "${reports[0]}" "$r"
+          done

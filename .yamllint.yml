@@ -1,0 +1,18 @@
+# AGENTS.md §4 names yamllint as the linter for YAML, and §3 says a tool that
+# resolves only from the developer's profile is not available to a stranger. The
+# same holds for its configuration: without this file the answer depends on
+# whose defaults are in whose home directory, so the two departures below are
+# written down rather than argued about per run.
+extends: default
+
+rules:
+  # A GitHub workflow carries no document start marker. Adding one to please a
+  # linter would make this repository's workflow unlike every other one a
+  # reader has met.
+  document-start: disable
+
+  # One line in the workflow cannot be shortened: a substituter's public key is
+  # a single 64-character token, `nix.conf` has no continuation syntax, and the
+  # key has to appear verbatim or it verifies nothing.
+  line-length:
+    max: 110

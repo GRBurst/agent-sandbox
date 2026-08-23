@@ -31,10 +31,18 @@ direnv reload                # after editing flake.nix or .envrc
 From a ref rather than a checkout, which is how a consumer will use it:
 
 ```sh
-nix develop github:HivemindTechnologies/sandbox-examples
+nix develop --accept-flake-config github:GRBurst/agent-sandbox
 ```
 
-That path is **untested**.
+`github:GRBurst/agent-sandbox` is the canonical published reference, and it is the same name everywhere — in this document, in `scripts/checks/e2e.sh` and in the remote `origin` points at.
+Earlier revisions of this document named a different owner and a different repository; both were wrong.
+
+`--accept-flake-config` is part of the command rather than an optimisation, because a stranger is not a trusted user and the declared substituter is otherwise ignored.
+See [Where the agents come from](#where-the-agents-come-from) for what that costs and for the two alternatives.
+
+That path is **checked but not yet green**.
+`check_j1_1` enters from that reference into a clean `$HOME`, and it fails today because the reference does not carry this environment yet: `origin/main` is still the Kafka playground this repository grew out of.
+Nothing about the check changes when it is pushed.
 The flake declares `x86_64-linux` and `aarch64-darwin`, which are the two systems for which the agents exist upstream, but only the first has been entered.
 See [Known drift](#known-drift).
 
@@ -320,7 +328,7 @@ It is the natural input to the first spec.
 **Portability.**
 
 - `aarch64-darwin` is declared and evaluates, but has never been entered, and macOS confinement is enforced by a different mechanism from Landlock. Nothing here has measured how strong it is.
-- Consuming from a ref is not exercised by any check yet, so the environment is only known to work from a checkout. The e2e layer is empty.
+- Consuming from a ref is now exercised — `check_j1_1` is the e2e layer — but it does not yet pass, because the published reference is still the Kafka playground this repository grew out of and carries none of this. The check fails saying so, and the fix is a push rather than an edit. Until then the environment is only *known* to work from a checkout.
 
 **Isolation.**
 

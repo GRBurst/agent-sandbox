@@ -4,7 +4,8 @@ This repository is a **consumable development environment**.
 Pointed at from a flake, a devenv configuration or a devcontainer, whether from GitHub or a local checkout, it sets a project up with agents already configured.
 **Project isolation is the product**: nothing — credentials, caches, history, agent state — leaks between the projects that use it.
 
-There is no cloud, no Kubernetes, no CD pipeline and no deployed service.
+There is no cloud, no Kubernetes and no deployed service, and nothing is ever delivered anywhere.
+CI exists, and it only runs the verification: it builds nothing a consumer receives, publishes nothing and mutates nothing outside its own runner.
 The goal of every change is a reproducible, verifiable environment that a stranger can enter with one command.
 
 This file describes **how we work**.

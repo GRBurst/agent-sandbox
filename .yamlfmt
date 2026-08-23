@@ -1,0 +1,7 @@
+# AGENTS.md §4 names yamlfmt as the formatter for YAML. Its default collapses
+# every blank line, which in a file whose comments carry the reasoning turns the
+# whole document into one block. A single blank line between items is kept, and
+# nothing else about the default changes.
+formatter:
+  type: basic
+  retain_line_breaks_single: true
