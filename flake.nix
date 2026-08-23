@@ -30,7 +30,11 @@
   };
 
   outputs =
-    { nixpkgs, llm-agents, ... }:
+    {
+      nixpkgs,
+      llm-agents,
+      ...
+    }:
     let
       inherit (nixpkgs) lib;
 
@@ -85,6 +89,7 @@
               # The agent's Bash tool reaches for git before anything else, and
               # until M4c it resolved from the host user profile or not at all.
               git
+              pinact
             ])
             ++ lib.optionals isLinux [ pkgs.strace ];
 
