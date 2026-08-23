@@ -89,6 +89,10 @@
               # The agent's Bash tool reaches for git before anything else, and
               # until M4c it resolved from the host user profile or not at all.
               git
+              # The workflow pins every action to a commit SHA, and `pinact run
+              # --check` is what proves a pin still matches the tag its comment
+              # claims. Under AGENTS.md §3 that proof may not depend on the
+              # maintainer having pinact in a user profile.
               pinact
             ])
             ++ lib.optionals isLinux [ pkgs.strace ];

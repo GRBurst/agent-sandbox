@@ -11,6 +11,13 @@ rules:
   # reader has met.
   document-start: disable
 
+  # The version a pinned action's SHA stands for is written as a trailing
+  # comment, and two tools already decide how it is spaced: pinact writes one
+  # space before the `#`, and yamlfmt normalises to one. Requiring two would
+  # leave the formatter and the linter undoing each other on every pin.
+  comments:
+    min-spaces-from-content: 1
+
   # One line in the workflow cannot be shortened: a substituter's public key is
   # a single 64-character token, `nix.conf` has no continuation syntax, and the
   # key has to appear verbatim or it verifies nothing.
