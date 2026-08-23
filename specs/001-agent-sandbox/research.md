@@ -2356,7 +2356,8 @@ Two of them are not satisfiable by an agent at all, and saying so here is the po
 `git ls-remote https://github.com/GRBurst/agent-sandbox HEAD` succeeds unauthenticated from inside a confined session, so a stranger can reach it.
 
 What is *at* the ref is the problem.
-`origin/main` is `1c8b15e`, "Add basic sdd files", and local `main` is **50 commits ahead of it**.
+`origin/main` is `1c8b15e`, "Add basic sdd files", whose flake describes itself as "Hivemind Kafka Playground", and local `main` is a long way ahead of it.
+The distance is deliberately not written down: it grows with every commit this feature lands, so the tip is the durable fact and the count is not.
 The pushed tree is `.envrc`, `.gitignore`, `AGENTS.md`, `docs/`, `flake.{nix,lock}` and `specs/templates/` — no `lib/`, no `scripts/` — and the pushed `flake.nix` is a *Kafka playground* shell holding `just`, `kcat`, `kafkactl`, `postgresql` and `maven`, with no agent, no `nono` and no `nixConfig`.
 
 So `check_j1_1` cannot go green until a human pushes.
@@ -2388,12 +2389,23 @@ Bare `nix` is unusable here — the ambient sandbox denies `$HOME`, so the fetch
 ```sh
 env -i HOME="$H" XDG_CONFIG_HOME="$H/.config" XDG_DATA_HOME="$H/.local/share" \
   XDG_CACHE_HOME="$H/.cache" TMPDIR="$H/tmp" USER="$(id -un)" \
-  PATH=/run/current-system/sw/bin \
-  nix develop '<ref>' --command sh -c '…'
+  PATH="$(dirname "$(command -v nix)")" \
+  nix develop --accept-flake-config '<ref>' --command sh -c '…'
 ```
 
 `$XDG_CONFIG_HOME` must exist before the run, or `nono` falls back to the host's real `~/.config` — the same trap [`M1e`](#m1e--machine-readable-resolved-policy) found, and already a checkbox on the task.
 Under this form the agentless ref reports no agent on `$PATH` at all, which is `check_j1_1`'s genuine RED.
+Measured directly: `claude`, `opencode`, `pi` and `nono` all report `ABSENT`, the ref's own `just`, `kcat`, `kafkactl` and `postgresql` occupy the front of `$PATH`, and the instrument's own directory is appended at the *end* rather than the front, which is the whole reason the contaminated form lied.
+
+Two parts of that command line are load-bearing in ways a later reader would otherwise simplify away.
+
+- **`PATH` is derived, not written down.**
+  `/run/current-system/sw/bin` is where NixOS puts it and is what this host resolves, but `/nix/var/nix/profiles/default/bin` — the multi-user installer's location, and the one a macOS runner has — **does not exist here at all**, so either literal is wrong on the other platform.
+  `dirname "$(command -v nix)"` is correct on both, and it is the same rule [AGENTS.md](../../AGENTS.md) § 4 states for assertions: derive the value from the system under test.
+  `M9c` runs on `macos-latest`, so this is not a hypothetical portability worry.
+- **`TMPDIR` is not tidiness.**
+  `env -i` strips it, `nix` falls back to `/tmp`, and a session confined by the ambient sandbox cannot write there: the run dies with `error: creating temporary file '/tmp/nix-shell.oDg5ip': Permission denied` before it fetches anything.
+  A stranger's `/tmp` is writable, so this one is a constraint on *developing* the check rather than on running it — which is exactly the kind of difference that makes a check pass for the author and fail for everyone else, or here the reverse.
 
 Run against the *current* flake by revision rather than by path — `git+file://$PWD?ref=main&rev=$(git rev-parse HEAD)` — the same form puts the four confined wrappers at positions **14–17**, at store paths identical to the direnv shell's.
 `writeShellApplication` names a wrapper after `mainProgram`, so `…-claude` is the confined entry point and not the raw `claude-code` package, and the check needs no extra step to tell them apart.
@@ -2421,6 +2433,8 @@ The honest reading is that `--accept-flake-config` is a load-bearing part of the
 - `scripts/checks/` holds `unit.sh`, `component.sh` and `integration.sh` only.
   **There is no `e2e.sh`**, though `e2e` is the fourth entry of `LAYERS`.
   `source_layers`, `list_checks` and `run_layers` each skip a layer whose file is absent, and the `found`-versus-`ran` guard added in `M8g` counts only files that exist, so creating the file is the whole of the harness work.
+  The contract that file has to satisfy is small and is written down here because nothing else states it: it is **sourced**, not executed, so it defines `check_*` functions and runs nothing at the top level; it inherits `SCRIPT_DIR`, `REPO_ROOT` and `SPEC`, and the helpers `die` (exits the whole suite, status 2), `fail` (prints a reason and returns 1) and `pinned_bin <attr>` (builds a flake output and prints its `bin` directory); a check returning **78** is reported `SKIP` and, per P2's anti-vacuity rule, is not counted as having run; and every check is invoked with its `stdin` on `/dev/null`, which is why no check can observe an interactive prompt.
+  Three of the four e2e checks this feature still owes live in that one file — `check_j1_1` from `M9a`, then `check_rep1` and `check_rep2` from `M9b` — so `M9a` creates it and `M9b` extends it, which fixes the order the two tasks run in.
 - **There is no `.github/`.** `M9c` starts from nothing.
 - `AGENTS.md`'s "no cloud, no Kubernetes, no CD pipeline and no deployed service" is the sentence `M9c` has to amend, and it is one sentence in one place.
 - `.gitignore` already excludes `.tmp/`, `.cache/`, `/.local/`, `/.config/`, `/.agents/`, `*.log` and `.direnv`, which is what `M9b`'s "tracked files unchanged" rests on.
