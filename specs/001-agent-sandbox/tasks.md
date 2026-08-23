@@ -1354,6 +1354,108 @@ The second arm is what makes this checkable at all: exit 0 alone is also what a 
 
 The suite is at `1 of 34 checks failed`: `check_sc3` green for the first time, and `check_j1_1` still waiting on a human to push the reference.
 
+### M9d — On macOS there is nowhere to put the outside (Status: IMPLEMENTING)
+
+**Scenario**: the same Journey 7.1 as [M9c](#m9c--the-claims-are-checked-on-clean-machines-per-platform-status-done), for the platform that run left unmeasured.
+
+**The limitation, in plain words**
+
+- To prove that a session cannot read your SSH key, a check plants a fake key somewhere the session is not allowed to look, and then tries to read it from inside the session. That somewhere has to be outside the project, because the project is the one place a session *is* allowed to look.
+- The property being checked is a difference, not a denial. `check_r1` runs the same probe twice against the same planted key: with the shipped description the read must be refused, and with the key's directory added to that description it must succeed. **Keys are unreachable by default and reachable when the description says so**, and neither half means anything without the other.
+- On Linux there is somewhere to put that fake key: `$XDG_RUNTIME_DIR`, which is `/run/user/1001` on the runner and which nothing grants.
+- On macOS there is no temporary directory that works at all. The floor grants `/private` for reading, and `/tmp`, `/var/folders` and `$TMPDIR` all resolve under `/private` there. So wherever `mktemp` puts the fake home, the session may already read it — and the mechanism then refuses to start, because a path it was asked to grant overlaps the state root it protects.
+- The consequence is that **23 of 33 checks fail on macOS, and every one of them fails before a session exists**. Confinement on macOS is therefore unmeasured in both directions: not the denial, and not the whitelisting. What is broken is the harness's ability to fabricate an outside, not the product.
+- The only writable place on macOS that nothing grants is under `/Users` — inside the real home. Using it would contradict this repository's own rule that nothing is written outside the project. The repository does already carry one exception of exactly this shape, the mechanism's own `$XDG_STATE_HOME/nono`, an accepted leak recorded in [lib/leak-registry.nix](../../lib/leak-registry.nix) and the handbook because it cannot be granted even in principle. Whether the harness's fake home is a second instance of that exception or something the rule must refuse is the open question, and it is a decision rather than a measurement.
+- So this task does not start with a directory to pick. It starts with whether the harness may have an outside at all, and that is what the directive below is for.
+
+**Measured** — third CI run, commit `e189d82`, the temporary probe step on both runners. `TMPDIR` is project-local on both platforms because the devshell sets it, so plain `mktemp` inside the environment is the one candidate that fails everywhere.
+
+| candidate | Linux | macOS |
+| --- | --- | --- |
+| `$XDG_RUNTIME_DIR` | ungranted, session starts | unset |
+| `$TMPDIR`, i.e. `<project>/.tmp` | granted, refused | granted, refused |
+| `/tmp` | write-granted, session starts | read-granted via `/private`, refused |
+| `$RUNNER_TEMP`, `$HOME` | ungranted, session starts | ungranted, session starts |
+
+The Linux column is the second finding: it is green only because the runner image happens to export `$XDG_RUNTIME_DIR`, and `/tmp` passes only because `system_write_linux` grants it write-only. Both platforms rest on the same unmeasured accident, and one image change turns Linux red the same way.
+
+**Research directive** — to be answered before anything here is implemented.
+
+```
+Research Directive: Establish where, on macOS, a verification harness can fabricate a
+host home that the confinement mechanism grants nothing on — or establish that no such
+location exists and what the assertion must become instead.
+
+Context: agent-sandbox confines coding agents with nono 0.74.0, granting a session its
+own project directory and nothing else. Its integration layer proves the boundary by
+planting a canary — an SSH private key, a credential, a shell history — in a fabricated
+host home outside the project, then reading it from inside a session and requiring the
+read to be refused; a second arm adds that directory to the description and requires the
+read to succeed. The fabricated home therefore has to sit somewhere the session is not
+granted. nono additionally treats $HOME/.nono as a protected state root candidate and
+refuses to start when any granted path overlaps it. On Linux $XDG_RUNTIME_DIR satisfies
+this. On macOS nothing conventional does: the floor group system_read_macos grants
+/private, system_write_macos grants /private/tmp, /var/folders and $TMPDIR, and every
+macOS temporary directory resolves under /private. Measured on a GitHub macos-26-arm64
+runner, 23 of 33 checks fail with either "Refusing to grant '/private' (source:
+group:system_read_macos) because it overlaps protected nono state root
+'/private/tmp/.../home/.nono'" or the same refusal naming the checkout, before any session
+starts. The only writable ungranted class found was /Users, which is the user's real home
+and which the project's own rule — nothing written outside the project — would forbid.
+
+Objective: Decide what the macOS integration layer should use as its outside, with the
+answer resting on measurement rather than on preference, and with the cost to the
+project's isolation rule stated explicitly if the answer lies outside the project.
+
+Core Investigation Areas:
+* How nono resolves its protected state root on darwin: which variables are consulted,
+  whether the candidate set includes $HOME/.nono unconditionally, and whether any flag or
+  variable lets a caller declare that root explicitly instead.
+* Whether the macOS floor groups are optional. Can system_read_macos be declined or
+  narrowed so /private is not granted wholesale, what stops working on darwin if it is,
+  and is the floor a property of nono or of the profile.
+* Whether a deny rule can override a group's grant for one subtree, making a path inside
+  /private ungranted again, and whether deny-overlap is enforceable on darwin at all —
+  the Linux refusal says it is not enforceable there, and the darwin answer is unknown.
+* Writable macOS locations outside both /private and /Users: getconf DARWIN_USER_TEMP_DIR
+  and DARWIN_USER_CACHE_DIR, a mounted disk image, an APFS volume, a directory created at
+  the root of the boot volume, and which of these a GitHub-hosted runner permits.
+* What macOS enforcement nono actually applies — Seatbelt, EndpointSecurity, something
+  else — and what tier of guarantee that gives compared with Landlock, since FR-11 has to
+  name it per platform either way.
+* Whether the assertion can be restructured to need no ungranted directory: for instance
+  a canary the session is granted to read but that the resolved policy must not name, or
+  an observation at the policy layer rather than at enforcement. State plainly what such
+  a restructuring stops proving, because the integration layer exists precisely to watch
+  enforcement rather than to read a description.
+* Whether the same reasoning leaves Linux fragile: $XDG_RUNTIME_DIR is a runner-image
+  accident and /tmp passes only because the grant there is write-only, so a portable
+  answer should hold on both platforms rather than fixing one.
+
+Deliverable Requirements: A recommendation naming one mechanism, with the measurement
+that supports it quoted verbatim — command, host, output — and the runner-up rejected on
+evidence rather than on taste. It must say whether the chosen location is inside the
+project or outside it; if outside, it must say what the project's isolation rule now
+permits that it did not, in the form the accepted-leak list already uses for
+$XDG_STATE_HOME/nono. It must also say what the answer is on Linux, so one mechanism
+serves both platforms, and it must name what remains unverifiable on macOS so that the
+gap is recorded rather than discovered.
+```
+
+- [x] The scratch root is **derived** rather than written down: no check names a directory that happens to work on one platform, and the derivation fails loudly rather than falling back to a granted path
+- [x] `integration.sh`'s precondition 2 restated to say what that directory is for and why macOS constrains it
+- [x] Violation planted — a root the description grants — seen to FAIL, reverted, recorded in [plan.md](plan.md#planted-violations). Two of them, because the two granted roots fail differently: the project, which the derivation rejects without asking, and `/tmp`, which nono answers `insufficient_access` for and which a session on Linux nevertheless starts in
+- [ ] The directive above answered, and its decision recorded in [plan.md](plan.md#decisions). **No longer a precondition on the checks, and that is a deliberate reversal**: the derivation asks the question of the host at run time instead of settling it in advance, so the harness stops depending on an answer nobody has. What the directive would still change is the *candidate list* — a macOS location better than the real home, or a restructuring that needs no ungranted directory at all — so it is carried into [M10a](#m10a--close-out-status-pending) for reconsideration rather than blocking here
+- [ ] The temporary probe step in `.github/workflows/verify.yml` deleted, its answer now living in the checks
+- [ ] The macOS job green, or every remaining macOS failure named in `docs/HANDBOOK.md` as a coverage gap with the reason it cannot be closed
+- [ ] `scripts/validate.sh` passes on both platforms, and the cross-platform reach comparison in the second job runs for the first time
+
+**What landed, ahead of the directive**
+
+`outside_root <label>` in [scripts/validate.sh](../../scripts/validate.sh) — in the driver rather than in a layer, because both the integration and the end-to-end layer fabricate host homes. It tries `$XDG_RUNTIME_DIR`, then `$RUNNER_TEMP`, then `$HOME/.agent-sandbox`, rejects any candidate under the checkout without asking, and takes the first that is writable and that `nono why --op readwrite` answers `path_not_granted` for. Anything else — a partial grant included — is refused with the verdict every candidate got. All 23 call sites now read `outside=$(outside_root <label>) || return 1`; `check_r6` and `check_substrate_denials`, which took an ambient `XDG_RUNTIME_DIR` directly, take theirs from the same helper. `check_j7_1` deliberately keeps a project-local directory, since it reads a file and starts no session.
+
+Two things this leaves open, both for [M10a](#m10a--close-out-status-pending) rather than for here. The last candidate writes under the real home, which is a write outside the project and so is the accepted-leak question the directive was posed to settle. And the derivation's answer is only as good as the list it tries: on a host offering none of the three, the suite refuses to run rather than reporting a boundary it could not observe — the right failure, but a failure.
+
 ______________________________________________________________________
 
 ## M10 — Documentation
@@ -1375,6 +1477,7 @@ ______________________________________________________________________
 - [ ] **Egress is mediated, not restricted**, and the handbook says so rather than letting a reader infer otherwise from the filesystem confinement: raw TCP is denied but arbitrary HTTPS through the injected proxy succeeds, so a session that asks an agent to fetch a package reaches the registry ([M8d](#m8d--pi-and-pre-provisioned-extensions-status-implemented)). The drift entry this task retires is the absence of that sentence, not the behaviour
 - [ ] The stranger's copyable command carries `--accept-flake-config`, because the declared substituter is ignored for anyone who is not a trusted user — measured, not assumed ([research.md](research.md#m9--preconditions-for-the-end-to-end-layer-measured-before-it-exists))
 - [ ] `docs/CONSTITUTION.md` P1's accepted-leak list amended to its second entry
+- [ ] **The harness's own outside reconsidered**, which [M9d](#m9d--on-macos-there-is-nowhere-to-put-the-outside-status-implementing) shipped ahead of its research directive. `outside_root` derives the location from the host rather than naming one, so the mechanism is not in question; the candidate list is. Three things to settle with the directive's answer in hand: whether `$HOME/.agent-sandbox` — a write outside the project, and the last resort on any host without `$XDG_RUNTIME_DIR` or `$RUNNER_TEMP`, which is every developer macOS — is a second accepted leak in P1's list beside `$XDG_STATE_HOME/nono` or something the rule must refuse; whether a macOS location exists that is neither under `/private` nor under `/Users`, which would remove the question entirely; and whether the directory the helper creates should be removed when the suite is done rather than left behind empty. If it stays a leak, it is enumerated with its justification like the other, and the handbook says a verification run writes there
 - [ ] `research.md` consolidated to what is still true, per AGENTS.md §1 — the decisions and the criteria kept, the record of how each was checked dropped; the `codex` findings kept, since they are the follow-up feature's head start
 - [ ] Touched files formatted and linted per [AGENTS.md](../../AGENTS.md#4-verify-every-change)
 - [ ] `scripts/validate.sh` passes

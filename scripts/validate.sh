@@ -53,6 +53,80 @@ pinned_bin() {
 	printf '%s\n' "${PINNED_BIN[$attr]}"
 }
 
+# A fresh directory a check may fabricate a host home in: writable, and covered
+# by no capability the session it is about will hold.
+#
+# Two layers need one and no single path provides it. A check that plants an
+# SSH key to prove a session cannot read it needs the key outside the session's
+# reach, and nono additionally treats `$HOME/.nono` as a protected state root:
+# any granted path above it makes nono refuse to start, so a location the floor
+# merely *reads* is as unusable as the project itself. Measured on both CI
+# runners (M9d):
+#
+#   candidate             Linux                       macOS
+#   $XDG_RUNTIME_DIR      ungranted                   unset
+#   $TMPDIR               the project, granted        the project, granted
+#   /tmp                  write-granted by the floor  read-granted via /private
+#   $RUNNER_TEMP, $HOME   ungranted                   ungranted
+#
+# So the location is derived and not written down: the candidates are tried in
+# order and the first one nono answers `path_not_granted` for is taken. A
+# partial grant is a rejection — /tmp on Linux is write-only to the floor and a
+# session there starts by that accident alone — and nothing falls back to a
+# granted path, so a host that offers no candidate fails here with the verdict
+# each one got rather than inside a check that then reports a refusal to read.
+#
+# The question is put to a generated description rather than to no profile at
+# all, so the answer cannot come from a nono configuration the host happens to
+# carry. Which agent's description is asked does not change it: every one of
+# them grants store paths and declares no groups, so what covers a path outside
+# the project is nono's floor in all of them. The one grant no `nono why`
+# answer accounts for is the working directory the session is handed by
+# `--allow-cwd`, so a candidate inside the checkout is rejected here rather
+# than asked about.
+outside_root() {
+	local label=$1 candidate profile reason root='' verdicts=''
+	profile=$(nix build --no-link --print-out-paths "$REPO_ROOT#confinement-claude-code") ||
+		die "cannot build the description the scratch root is derived against"
+
+	for candidate in "${XDG_RUNTIME_DIR:-}" "${RUNNER_TEMP:-}" "${HOME:+$HOME/.agent-sandbox}"; do
+		[ -n "$candidate" ] || continue
+		case "$candidate/" in
+		"$REPO_ROOT"/*)
+			verdicts+="  $candidate: inside the checkout, which the session is granted"$'\n'
+			continue
+			;;
+		esac
+		mkdir -p "$candidate" 2>/dev/null || {
+			verdicts+="  $candidate: cannot be created"$'\n'
+			continue
+		}
+		[ -w "$candidate" ] || {
+			verdicts+="  $candidate: not writable"$'\n'
+			continue
+		}
+		reason=$("$(pinned_bin nono)/nono" -s why --profile "$profile" \
+			--workdir "$REPO_ROOT" --path "$candidate" --op readwrite --json |
+			jq -r '.reason // .status')
+		if [ "$reason" = path_not_granted ]; then
+			root=$candidate
+			break
+		fi
+		verdicts+="  $candidate: $reason"$'\n'
+	done
+
+	if [ -z "$root" ]; then
+		# To stderr, because the caller reads this function's stdout for the
+		# directory: a diagnostic printed there would become the path.
+		fail "$(printf 'no location on this host can hold a fabricated home, so nothing can be planted beyond the reach of a session:\n%s' \
+			"$verdicts")" >&2
+		return 1
+	fi
+
+	# `mktemp -d TEMPLATE` rather than `-p DIR`: BSD mktemp has no -p.
+	mktemp -d "$root/agent-sandbox-$label.XXXXXX"
+}
+
 usage() {
 	cat <<'EOF'
 usage: validate.sh [--layer unit|component|integration|e2e] [--list]

@@ -12,7 +12,13 @@
 #
 #   1. TMPDIR inside the project, or the `system_write_linux` grant on $TMPDIR
 #      overlaps the state root and nono refuses to start.
-#   2. XDG_STATE_HOME outside the project, writable, and granted by no group.
+#   2. XDG_STATE_HOME, and every fabricated host home, in a location the
+#      session is granted nothing on — `outside_root` in scripts/validate.sh
+#      derives one and says why no path can simply be written down. nono
+#      protects its own state root by refusing to start when a granted path
+#      overlaps it, so a directory the floor merely reads is as unusable as the
+#      project itself, and on macOS that rules out every conventional
+#      temporary directory (M9d).
 #   3. The audit ledger exists before the run. This one is load-bearing for
 #      the whole layer: the migration that fails runs *after* the child exits
 #      and replaces the child's exit status with 1. A child exiting 0 would
@@ -129,7 +135,7 @@ reach_grants() {
 # child the pre-flight starts, because without it the pre-flight hangs for a
 # human and passes for this suite.
 check_r6() {
-	local preflight tmp state profile pinned rc out unwritable logged consenting found=0
+	local preflight tmp outside state profile pinned rc out unwritable logged consenting found=0
 	local -a SESSION_ENV
 	preflight="$REPO_ROOT/lib/preflight.sh"
 
@@ -139,10 +145,11 @@ check_r6() {
 	fi
 
 	tmp=$(mktemp -d "$REPO_ROOT/.tmp/integration.XXXXXX")
+	outside=$(outside_root r6) || return 1
 	# shellcheck disable=SC2064
-	trap "rm -rf '$tmp'" RETURN
+	trap "rm -rf '$tmp' '$outside'" RETURN
 
-	state="${XDG_RUNTIME_DIR:-$tmp}/agent-sandbox-check-state"
+	state="$outside/state"
 	session_env "$state"
 	profile=$(nix build --no-link --print-out-paths "$REPO_ROOT#confinement-claude-code")
 	# The pre-flight resolves `nono` from PATH, which is the whole mechanism the
@@ -199,13 +206,14 @@ check_r6() {
 	# exists for. That went unnoticed while the pre-flight granted no project.
 	# A host's home directory is not inside the checkout anyway, so this is the
 	# more faithful arrangement as well as the working one.
-	unwritable=$(mktemp -d -p "${XDG_RUNTIME_DIR:-/tmp}" agent-sandbox-r6.XXXXXX)
+	unwritable="$outside/unwritable"
+	mkdir -p "$unwritable"
 	chmod 500 "$unwritable"
-	# Supersedes the RETURN trap set above, and repeats its `rm -rf "$tmp"`
-	# because bash keeps one trap per signal rather than a list. The chmod comes
-	# first: `rm -rf` cannot empty a directory it may not write to.
+	# Supersedes the RETURN trap set above, and repeats its removals because
+	# bash keeps one trap per signal rather than a list. The chmod comes first:
+	# `rm -rf` cannot empty a directory it may not write to.
 	# shellcheck disable=SC2064
-	trap "chmod 700 '$unwritable'; rm -rf '$unwritable' '$tmp'" RETURN
+	trap "chmod 700 '$unwritable'; rm -rf '$tmp' '$outside'" RETURN
 	out=$(cd "$REPO_ROOT" && env "${SESSION_ENV[@]}" PATH="$pinned:$PATH" \
 		XDG_RUNTIME_DIR="$unwritable" HOME="$unwritable" PREFLIGHT_PROFILE="$profile" \
 		bash -c "source '$preflight'; preflight_or_die" 2>&1) && rc=0 || rc=$?
@@ -284,7 +292,7 @@ check_r6() {
 # session may run: a substrate missing either one cannot be observed at all.
 check_substrate_denials() {
 	local agent=claude-code
-	local tmp state profile substrate store claude strace arm rc
+	local tmp outside state profile substrate store claude strace arm rc
 	local -a SESSION_ENV
 
 	if [ "$(uname -s)" != Linux ]; then
@@ -317,8 +325,10 @@ check_substrate_denials() {
 	tmp=$REPO_ROOT/.tmp/substrate-denials
 	rm -rf "$tmp"
 	mkdir -p "$tmp"
-	state="${XDG_RUNTIME_DIR:-$tmp}/agent-sandbox-substrate-denials"
-	rm -rf "$state"
+	outside=$(outside_root substrate-denials) || return 1
+	# shellcheck disable=SC2064
+	trap "rm -rf '$outside'" RETURN
+	state="$outside/state"
 	session_env "$state"
 
 	cp "$profile" "$tmp/narrow.json"
@@ -356,7 +366,7 @@ check_substrate_denials() {
 
 # R1 — a private key outside the project is unreadable from inside a session.
 #
-# The key lives in a fake $HOME under $XDG_RUNTIME_DIR rather than in the
+# The key lives in a fake $HOME under a derived scratch root rather than in the
 # project's own scratch directory, and that is forced rather than tidiness: the
 # resolved description carries 48 $HOME-relative deny rules, so a $HOME under
 # the granted project makes every one of them overlap an allowed parent and
@@ -395,7 +405,7 @@ check_r1() {
 
 	session_fixture "$agent" || return 1
 
-	outside=$(mktemp -d -p "${XDG_RUNTIME_DIR:-/tmp}" agent-sandbox-r1.XXXXXX)
+	outside=$(outside_root r1) || return 1
 	scratch="$REPO_ROOT/.tmp/r1"
 	rm -rf "$scratch"
 	mkdir -p "$scratch"
@@ -524,7 +534,7 @@ check_r2() {
 
 	session_fixture "$agent" || return 1
 
-	outside=$(mktemp -d -p "${XDG_RUNTIME_DIR:-/tmp}" agent-sandbox-r2.XXXXXX)
+	outside=$(outside_root r2) || return 1
 	scratch="$REPO_ROOT/.tmp/r2"
 	rm -rf "$scratch"
 	mkdir -p "$scratch"
@@ -689,7 +699,7 @@ check_r3() {
 		return 1
 	}
 
-	outside=$(mktemp -d -p "${XDG_RUNTIME_DIR:-/tmp}" agent-sandbox-r3.XXXXXX)
+	outside=$(outside_root r3) || return 1
 	scratch="$REPO_ROOT/.tmp/r3"
 	rm -rf "$scratch"
 	mkdir -p "$scratch"
@@ -907,7 +917,7 @@ check_r4() {
 		esac
 	done
 
-	outside=$(mktemp -d -p "${XDG_RUNTIME_DIR:-/tmp}" agent-sandbox-r4.XXXXXX)
+	outside=$(outside_root r4) || return 1
 	scratch="$REPO_ROOT/.tmp/r4"
 	rm -rf "$scratch"
 	mkdir -p "$scratch"
@@ -1105,7 +1115,7 @@ check_r5() {
 		return 1
 	}
 
-	outside=$(mktemp -d -p "${XDG_RUNTIME_DIR:-/tmp}" agent-sandbox-r5.XXXXXX)
+	outside=$(outside_root r5) || return 1
 	scratch="$REPO_ROOT/.tmp/r5"
 	rm -rf "$scratch"
 	mkdir -p "$scratch"
@@ -1305,7 +1315,7 @@ check_j8_2() {
 	# $HOME-relative and nono refuses to start when a granted path overlaps
 	# one, and clean, because a stranger's home configures nothing yet — this
 	# check puts back only what it wants to be found.
-	outside=$(mktemp -d -p "${XDG_RUNTIME_DIR:-/tmp}" agent-sandbox-j8_2.XXXXXX)
+	outside=$(outside_root j8_2) || return 1
 	home="$outside/home"
 	state="$outside/state"
 	cfg="$outside/config"
@@ -1483,7 +1493,7 @@ check_r10() {
 	}
 	git="$gitdir/bin/git"
 
-	outside=$(mktemp -d -p "${XDG_RUNTIME_DIR:-/tmp}" agent-sandbox-r10.XXXXXX)
+	outside=$(outside_root r10) || return 1
 	# shellcheck disable=SC2064
 	trap "rm -rf '$outside'" RETURN
 
@@ -1747,7 +1757,7 @@ check_j2_1() {
 	# The fake home is outside the project and the project is its sibling, never
 	# beneath it: the description carries 48 $HOME-relative deny rules, and a
 	# granted directory under the home is unenforceable.
-	outside=$(mktemp -d -p "${XDG_RUNTIME_DIR:-/tmp}" agent-sandbox-j2_1.XXXXXX)
+	outside=$(outside_root j2_1) || return 1
 	# shellcheck disable=SC2064
 	trap "rm -rf '$outside'" RETURN
 	home="$outside/home"
@@ -1987,7 +1997,7 @@ check_j3_1() {
 	session_fixture "$agent" || return 1
 	entry=$(pinned_bin "$binary") || return 1
 
-	outside=$(mktemp -d -p "${XDG_RUNTIME_DIR:-/tmp}" agent-sandbox-j3_1.XXXXXX)
+	outside=$(outside_root j3_1) || return 1
 	# shellcheck disable=SC2064
 	trap "rm -rf '$outside'" RETURN
 	work="$outside/work"
@@ -2238,7 +2248,7 @@ check_j4_1() {
 		return 1
 	}
 
-	outside=$(mktemp -d -p "${XDG_RUNTIME_DIR:-/tmp}" agent-sandbox-j4_1.XXXXXX)
+	outside=$(outside_root j4_1) || return 1
 	# shellcheck disable=SC2064
 	trap "rm -rf '$outside'" RETURN
 
@@ -2463,7 +2473,7 @@ check_j5_1() {
 		return 1
 	fi
 
-	outside=$(mktemp -d -p "${XDG_RUNTIME_DIR:-/tmp}" agent-sandbox-j5_1.XXXXXX)
+	outside=$(outside_root j5_1) || return 1
 	# shellcheck disable=SC2064
 	trap "rm -rf '$outside'" RETURN
 
@@ -2689,7 +2699,7 @@ check_r8() {
 		return 1
 	}
 
-	outside=$(mktemp -d -p "${XDG_RUNTIME_DIR:-/tmp}" agent-sandbox-r8.XXXXXX)
+	outside=$(outside_root r8) || return 1
 	# shellcheck disable=SC2064
 	trap "rm -rf '$outside'" RETURN
 
@@ -2924,7 +2934,7 @@ check_rep3() {
 		return 1
 	}
 
-	outside=$(mktemp -d -p "${XDG_RUNTIME_DIR:-/tmp}" agent-sandbox-rep3.XXXXXX)
+	outside=$(outside_root rep3) || return 1
 	# shellcheck disable=SC2064
 	trap "rm -rf '$outside'" RETURN
 
@@ -3135,7 +3145,7 @@ check_j6_1() {
 		return 1
 	}
 
-	outside=$(mktemp -d -p "${XDG_RUNTIME_DIR:-/tmp}" agent-sandbox-j6_1.XXXXXX)
+	outside=$(outside_root j6_1) || return 1
 	# shellcheck disable=SC2064
 	trap "rm -rf '$outside'" RETURN
 
@@ -3409,7 +3419,7 @@ check_j6_2() {
 	local ARMS_PROJ
 	local head sig status denials
 
-	outside=$(mktemp -d -p "${XDG_RUNTIME_DIR:-/tmp}" agent-sandbox-j6_2.XXXXXX)
+	outside=$(outside_root j6_2) || return 1
 	# shellcheck disable=SC2064
 	trap "rm -rf '$outside'" RETURN
 
@@ -3481,7 +3491,7 @@ check_r11() {
 	local ARMS_PROJ
 	local objects head message
 
-	outside=$(mktemp -d -p "${XDG_RUNTIME_DIR:-/tmp}" agent-sandbox-r11.XXXXXX)
+	outside=$(outside_root r11) || return 1
 	# shellcheck disable=SC2064
 	trap "rm -rf '$outside'" RETURN
 
@@ -3584,7 +3594,7 @@ check_opencode() {
 	# Sibling of the fake home, never beneath it: the description carries
 	# $HOME-relative deny rules, and a granted directory under the home is
 	# unenforceable.
-	outside=$(mktemp -d -p "${XDG_RUNTIME_DIR:-/tmp}" agent-sandbox-opencode.XXXXXX)
+	outside=$(outside_root opencode) || return 1
 	# shellcheck disable=SC2064
 	trap "rm -rf '$outside'" RETURN
 	home="$outside/home"
@@ -3776,7 +3786,7 @@ check_pi() {
 	session_fixture "$agent" || return 1
 	entry=$(pinned_bin "$binary") || return 1
 
-	outside=$(mktemp -d -p "${XDG_RUNTIME_DIR:-/tmp}" agent-sandbox-pi.XXXXXX)
+	outside=$(outside_root pi) || return 1
 	# shellcheck disable=SC2064
 	trap "rm -rf '$outside'" RETURN
 	home="$outside/home"
@@ -3980,7 +3990,7 @@ check_j8_1() {
 
 	nono_bin=$(pinned_bin nono) || return 1
 
-	outside=$(mktemp -d -p "${XDG_RUNTIME_DIR:-/tmp}" agent-sandbox-j8_1.XXXXXX)
+	outside=$(outside_root j8_1) || return 1
 	# shellcheck disable=SC2064
 	trap "rm -rf '$outside'" RETURN
 
@@ -4248,7 +4258,7 @@ check_r9() {
 
 	nono_bin=$(pinned_bin nono) || return 1
 
-	outside=$(mktemp -d -p "${XDG_RUNTIME_DIR:-/tmp}" agent-sandbox-r9.XXXXXX)
+	outside=$(outside_root r9) || return 1
 	# shellcheck disable=SC2064
 	trap "rm -rf '$outside'" RETURN
 

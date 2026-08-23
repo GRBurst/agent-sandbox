@@ -284,7 +284,7 @@ check_j1_1() {
 	# Outside the project, because nono refuses to start when a granted path
 	# overlaps its own state root, and clean, because nono derives that root
 	# from the environment a stranger would arrive with rather than this one.
-	outside=$(mktemp -d -p "${XDG_RUNTIME_DIR:-/tmp}" agent-sandbox-j1_1.XXXXXX)
+	outside=$(outside_root j1_1) || return 1
 	# shellcheck disable=SC2064
 	trap "rm -rf '$outside'" RETURN
 	home="$outside/home"
@@ -493,7 +493,7 @@ check_rep1() {
 	# Outside the project, because nono refuses to start when a granted path
 	# overlaps its own state root, and clean, because nono derives that root
 	# from the environment a stranger arrives with rather than this one.
-	outside=$(mktemp -d -p "${XDG_RUNTIME_DIR:-/tmp}" agent-sandbox-rep1.XXXXXX)
+	outside=$(outside_root rep1) || return 1
 	# shellcheck disable=SC2064
 	trap "rm -rf '$outside'" RETURN
 	copy="$outside/checkout"
@@ -619,7 +619,7 @@ check_rep2() {
 	local outside copy home missing passed out rc found=0 i name
 	local -a runs=(1 2 3)
 
-	outside=$(mktemp -d -p "${XDG_RUNTIME_DIR:-/tmp}" agent-sandbox-rep2.XXXXXX)
+	outside=$(outside_root rep2) || return 1
 	# shellcheck disable=SC2064
 	trap "rm -rf '$outside'" RETURN
 	copy="$outside/checkout"
@@ -741,7 +741,10 @@ check_j7_1() {
 		return 1
 	fi
 
-	outside=$(mktemp -d -p "${XDG_RUNTIME_DIR:-/tmp}" agent-sandbox-j7_1.XXXXXX)
+	# Inside the project, unlike every other scratch directory in this layer:
+	# this check reads a file and starts no session, so it fabricates no host
+	# home and needs no location outside a session's reach.
+	outside=$(mktemp -d "$REPO_ROOT/.tmp/j7_1.XXXXXX")
 	# shellcheck disable=SC2064
 	trap "rm -rf '$outside'" RETURN
 
