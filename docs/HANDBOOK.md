@@ -161,11 +161,17 @@ The three agents are pointed at the granted directories by three different mecha
 | Agent | How it is pointed | What the environment writes |
 | --- | --- | --- |
 | `claude` | one symlink per skill, since it has no additive setting at all | `.agents/claude/skills/<name>` |
-| `opencode` | its `skills.paths` setting | `.config/opencode/opencode.json` |
+| `opencode` | its `skills.paths` setting, in a file of its own reached by `OPENCODE_CONFIG` | `.agents/opencode/config.json` |
 | `pi` | its `skills` setting | `.agents/pi/settings.json` |
 
-Those files are merged, never replaced, so anything else you keep in them survives.
+`.agents/pi/settings.json` is merged, never replaced, so anything else you keep in it survives.
 The `claude` case only ever creates symlinks in that directory, so a real skill directory you put there is yours and is left alone.
+
+`.agents/opencode/config.json` is the one file here this environment writes whole on every start, and it is the only one that is nobody else's.
+`opencode` reads it in addition to your own `opencode.json`, not instead of it, so your settings still apply and your file is never read, written or fingerprinted by this environment.
+The one exception is `skills.paths` itself: this file wins over your global one for that setting, and a project-scope `./opencode.json` in turn wins over this file, so a project that sets `skills.paths` gets what it asked for and none of `AGENT_SANDBOX_SKILLS`.
+It is written whole rather than merged because `opencode` also writes to it — it adds its own `$schema` to every configuration file it loads, through an editor that emits a trailing comma when the file was empty, which is not JSON any more.
+Anything you put in `.agents/opencode/config.json` yourself is lost on the next start; put it in `.config/opencode/opencode.json`, which is where it belongs and which is left alone.
 
 **Skills are the whole of it.** The other authoring surfaces these agents read — `agents/`, `commands/`, `output-styles/`, `rules/`, `workflows/` and `themes/` for `claude`, `prompts/` and `themes/` for `pi`, and `opencode`'s agents, commands and modes — are **not** carried in, and neither is anything executable: a plugin, a hook or a `.ts` extension arrives nowhere near this route.
 Those are code that runs, not directives that are read, and widening for them is a decision to make deliberately rather than one to inherit from a variable set months ago.

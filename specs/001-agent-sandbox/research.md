@@ -2433,3 +2433,84 @@ Recorded here so that a session picking up `M9` does not spend its budget discov
 1. **The push.** `check_j1_1` is RED until `main` reaches `origin/main`, and [AGENTS.md](../../AGENTS.md) forbids pushing unasked.
 1. **The second platform.** SC-8 compares the resolved reach *across* `ubuntu-latest` and `macos-latest`, and no single machine can make that comparison.
    It is the one assertion in the suite that only CI can run, which is why `M9c` exists as a task rather than as a check.
+
+## M9a — Starting an agent by hand, which nothing had done
+
+`M9a` began by trying to start the agents the way [docs/HANDBOOK.md](../../docs/HANDBOOK.md) tells a reader to, and none of the three started.
+Two defects sat in series, and each of them had been invisible to a suite of thirty-one green checks.
+Both are recorded here in full, because what they have in common is more useful than either: **every assertion in the suite was written from inside a fixture whose starting state the defect's precondition never occurs in.**
+
+### The first was the pre-flight's missing consent, and it is written up under [`M4a`](#the-three-states-of---allow-cwd)
+
+In short: `nono run` without `--allow-cwd` behaves differently depending on `stdin`, and the pre-flight sent its output to `/dev/null` while leaving `stdin` on the terminal, so a user got a cursor and no question.
+`scripts/validate.sh` runs every check under `</dev/null`, which is exactly the state in which the question is not asked.
+
+### The second: `opencode`'s configuration file is JSONC, and the agent writes to it
+
+`opencode` 1.18.18 parses `opencode.json` with microsoft's `jsonc-parser`, not with a JSON parser.
+Measured against the real binary with a scratch XDG environment — `--version` loads no configuration, `models` and every `debug` subcommand do:
+
+| file content | result |
+| --- | --- |
+| `{ "$schema": …,}` — a trailing comma | accepted, exit 0 |
+| `{ // a comment` then `"theme": "system",}` | accepted, exit 0 |
+| `{,,,}` | rejected, `PropertyNameExpected at line 1, column 4` |
+
+The third row is the control: the file is genuinely read, so the tolerance in the first two is tolerance and not a skipped file.
+
+It writes there too, and this is the half that matters.
+The agent ensures its own `$schema` key in every configuration file it loads, through `jsonc-parser`'s `modify`/`applyEdits`.
+Inserting a key into an **empty** object emits a trailing comma:
+
+```text
+{
+  "$schema": "https://opencode.ai/config.json",}
+```
+
+Inserting before an existing key emits a legal one, which is why a file that already had `skills.paths` in it came out valid.
+The filename is irrelevant — `config.json` and `mine.json` were both mangled — so this is not the write-target picker choosing `opencode.jsonc`.
+
+`M8e` had pointed `skillSurface.path` at that very file, on the reasoning that a consumer's own settings might already be there and so it must be merged rather than written whole.
+The reasoning was sound and the conclusion was the defect: the entry point's merge writes strict JSON with `jq`, `jq` cannot read JSONC, and the agent turns strict JSON into JSONC.
+The first start wrote `{}`, the agent made it `{…,}`, and the second start died on `jq: parse error: Expected another key-value pair at line 2, column 48` — a message naming neither this environment nor the file, with `set -e` taking the shell down before the `mv` and leaving a zero-byte `.agent-sandbox.tmp` for the next run.
+The developing checkout had been in that state since the day `M8f` landed.
+
+### The fix is ownership, and the precedence chain is what makes it available
+
+Measured, for the four scopes `opencode` merges:
+
+| scope | beats |
+| --- | --- |
+| global `$XDG_CONFIG_HOME/opencode/opencode.json` | nothing |
+| `OPENCODE_CONFIG=<file>` | global |
+| project `./opencode.json` | `OPENCODE_CONFIG` |
+| `OPENCODE_CONFIG_CONTENT=<inline json>` | everything |
+
+`OPENCODE_CONFIG` names an **additional** configuration file, not a replacement: a global file carrying `username` and the environment's file carrying `skills.paths` both took effect in the same session, and the global file was left byte-identical.
+Arrays are replaced rather than concatenated.
+A name that does not exist yet is not an error, so it can be pointed at unconditionally.
+
+So `opencode` is pointed at `.agents/opencode/config.json`, a file this environment owns outright, and `skillSurface` gains an `owned` flag that rewrites it from `{}` on every start instead of merging into it.
+That answers both halves at once: nothing this environment writes has to survive a round trip through the agent's editor, and the consumer's own `opencode.json` is no longer read, written or fingerprinted.
+It also lands the pointing two scopes higher than it was.
+
+`OPENCODE_CONFIG_CONTENT` was the alternative and was rejected: the content is computed at run time, `environment.set_vars` is Nix-static and `allow_vars` is default-deny, and a file on disk keeps FR-25's property that the pointing is a project artefact a consumer can read.
+Pre-parsing the JSONC was rejected as fragile, and making the file read-only was rejected because the agent's write would then fail in a way nobody has measured.
+
+**The limit that remains**: a consumer project whose own `./opencode.json` sets `skills.paths` shadows the environment's roots entirely.
+`OPENCODE_CONFIG_CONTENT` is the escape hatch if that is ever wanted, at the cost above.
+
+### Running a session twice is not a reproducer
+
+The obvious check — start the agent twice and require the second start to succeed — was written, run, and abandoned, because it is not deterministic:
+
+| subcommand, twice in a pristine project | file after | second run |
+| --- | --- | --- |
+| `debug paths` | `{}`, untouched | exit 0 |
+| `providers list` | `{}`, untouched | exit 0 |
+| `debug skill` | `{"$schema": …,}` | **exit 78** |
+
+And `debug skill` mangled the file on one occasion and left it alone on another, with `$HOME` and `AGENT_SANDBOX_SKILLS` held constant.
+Whether the agent persists the schema on a given run is not something a check can depend on.
+`check_opencode` therefore **seeds** the file with what the agent leaves behind and asserts the session starts anyway, and asserts separately with `jq -e .` that the file is still valid JSON when the session ends.
+Seeding the state is the deterministic form of a defect whose trigger is a previous run.

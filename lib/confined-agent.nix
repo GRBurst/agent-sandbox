@@ -189,11 +189,23 @@ pkgs.writeShellApplication {
         ''
           # Merged into whatever is already there. The agent rejects an unknown
           # top-level key outright, and this file also carries settings this
-          # environment did not put there, so writing it whole would discard
-          # them. The declared roots replace the previous ones rather than
-          # accumulating, which is what makes running this twice change nothing.
+          # environment did not put there — pi keeps its own under the same
+          # name — so writing it whole would discard them. The declared roots
+          # replace the previous ones rather than accumulating, which is what
+          # makes running this twice change nothing.
           mkdir -p "$(dirname "${target}")"
-          [ -f "${target}" ] || printf '{}\n' >"${target}"
+          ${
+            if s.owned then
+              ''
+                # Except where the file is this environment's alone. Then there is
+                # nothing in it to preserve and an agent's own edits in it to throw
+                # away, so it starts empty every time. `owned`'s description in
+                # lib/agents.nix records what opencode leaves behind on the way out
+                # and why a merge cannot survive reading it back.
+                printf '{}\n' >"${target}"''
+            else
+              ''[ -f "${target}" ] || printf '{}\n' >"${target}"''
+          }
           if [ "''${#agent_sandbox_surfaces[@]}" -gt 0 ]; then
             agent_sandbox_roots="$(jq -n '$ARGS.positional' --args "''${agent_sandbox_surfaces[@]}")"
           else
@@ -208,7 +220,20 @@ pkgs.writeShellApplication {
           # leaving `"skills": {}` behind would still be this environment's
           # fingerprint on a file it was asked to stop touching, and an empty
           # container carries no setting a consumer could lose.
-          jq --argjson roots "$agent_sandbox_roots" \
+          #
+          # The failure path is written out because M9a met it. jq reads strict
+          # JSON and nothing else, so a file with a comment or a trailing comma
+          # in it ends the entry point on `jq: parse error`, which names neither
+          # this environment nor the file it could not read, and `set -e` takes
+          # the shell down before the `mv`, leaving the half-written temporary
+          # behind for the next run to trip over. Both are answered here: the
+          # message says who failed, on what, and what to do (P9), and the
+          # temporary is removed on the way out (P8). Every file this reaches is
+          # one this environment owns, so a parse error is a real defect and not
+          # a consumer's formatting choice — which is the other half of M9a, and
+          # the reason `skillSurface.path` no longer names a file the agent
+          # itself edits.
+          if ! jq --argjson roots "$agent_sandbox_roots" \
             --argjson at ${lib.escapeShellArg (builtins.toJSON (lib.splitString "." (lib.removePrefix "." s.key)))} \
             'def prune($p):
                if ($p | length) == 0 then .
@@ -218,7 +243,14 @@ pkgs.writeShellApplication {
              then setpath($at; $roots)
              else delpaths([$at]) | prune($at[0:-1])
              end' \
-            "${target}" >"${target}.agent-sandbox.tmp"
+            "${target}" >"${target}.agent-sandbox.tmp"; then
+            rm -f "${target}.agent-sandbox.tmp"
+            printf 'agent-sandbox: cannot point %s at its skills.\n' ${lib.escapeShellArg name} >&2
+            printf '  file: %s\n' "${target}" >&2
+            printf '  reason: it is not valid JSON, and this environment writes that file.\n' >&2
+            printf '  fix: delete it and enter the environment again.\n' >&2
+            exit 78
+          fi
           mv "${target}.agent-sandbox.tmp" "${target}"
         ''
     }

@@ -3660,9 +3660,16 @@ check_r11() {
 #     zero stored credentials. Zero stored is the half that matters for D14:
 #     the credential arrived by the route, not from a store this environment
 #     would have had to grant.
+#
+#   * The session starts at all with the skill-surface file already in the state
+#     the agent leaves it in. That is not a detail: M9a found every entry point
+#     unable to start after its own first run, and nothing in this suite saw it,
+#     because every check began from a project where the file did not exist yet.
+#     The fixture below seeds it instead of hoping a subcommand persists it,
+#     which was measured to depend on which subcommand ran.
 check_opencode() {
 	local agent=opencode binary=opencode
-	local entry outside home proj cfg state project rc real
+	local entry outside home proj cfg state project rc real surface
 	local root value homeroot='' found=0
 	local -a rooted=() strayed=() landed=() changed=()
 
@@ -3688,6 +3695,23 @@ check_opencode() {
 	# nowhere and the diff below stays empty for the wrong reason.
 	mkdir -p "$home/.config/opencode" "$home/.local/share/opencode"
 	printf '{}\n' >"$home/.config/opencode/opencode.json"
+
+	# The project already holds the skill-surface file, in the state a session
+	# leaves it in. This agent edits its configuration through a JSONC editor,
+	# and inserting a key into an empty object leaves a trailing comma behind,
+	# so the file the first start wrote as `{}` comes back as `{…,}` — legal for
+	# the agent, unreadable to `jq`, and fatal to every start after the first.
+	# Seeded here rather than produced by running a session twice, because which
+	# subcommand persists the schema was measured to vary; the state is the
+	# subject, and how the agent arrives at it is not.
+	#
+	# The path comes from the agent table, so moving the surface moves this too.
+	surface=$(nix eval --raw "$REPO_ROOT#agents.$agent.skillSurface.path" \
+		--apply "f: f \"$project\"") || return 1
+	mkdir -p "$(dirname "$surface")"
+	# `$schema` is the agent's own key name and stays literal.
+	# shellcheck disable=SC2016
+	printf '{\n  "$schema": "https://opencode.ai/config.json",}\n' >"$surface"
 
 	find "$home" -printf '%p\t%s\t%T@\n' | sort >"$outside/before"
 
@@ -3788,6 +3812,18 @@ check_opencode() {
 		found=1
 		fail "$(printf 'the session changed the home directory:\n%s' \
 			"$(printf '%s\n' "${changed[@]}")")"
+	fi
+
+	# And the file is this environment's own product afterwards rather than the
+	# JSONC it was seeded with, which is what `skillSurface.owned` is for: the
+	# state the agent left is discarded on the next start instead of being
+	# merged into. Asserting it parses is asserting the start after this one
+	# reaches the agent — the property the two sessions above cannot show,
+	# because they succeeded before the file was rewritten.
+	if ! jq -e . "$surface" >/dev/null 2>&1; then
+		found=1
+		fail "$(printf 'the skill-surface file is not valid JSON after a session, so the next start cannot read it:\n%s\n%s' \
+			"$surface" "$(cat "$surface")")"
 	fi
 
 	[ "$found" -eq 0 ]

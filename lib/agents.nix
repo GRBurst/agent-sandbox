@@ -102,8 +102,32 @@ let
               description = ''
                 For `json-array`, the jq path of the array the roots are merged
                 into, as `.skills.paths`. Merged rather than written, because
-                the file also carries settings this environment did not put
+                the file may also carry settings this environment did not put
                 there. Empty for `symlink-children`, which has no file.
+              '';
+            };
+            owned = mkOption {
+              type = types.bool;
+              default = false;
+              description = ''
+                Whether `path` names a file this environment writes and nobody
+                else's settings live in, in which case it is regenerated from
+                nothing on every start rather than merged into.
+
+                `M9a` found why the distinction has to exist. Merging assumes
+                what it reads back is what it wrote, and an agent that edits its
+                own configuration breaks that assumption in a way jq cannot
+                survive: opencode writes `$schema` into every configuration file
+                it loads, through a JSONC editor, and inserting a key into an
+                empty object leaves a trailing comma. So the first start wrote
+                `{}`, the agent turned it into `{…,}`, and the second start died
+                on a parse error. Regenerating discards whatever the agent left
+                and cannot drift, because there is nothing in the file to lose.
+
+                False where the file is genuinely the agent's own settings — pi
+                keeps its under the same name this environment points at — and
+                there the merge is what stops a consumer's settings being
+                dropped.
               '';
             };
           };
@@ -228,22 +252,47 @@ lib.mapAttrs (_: checkAgent) {
     # deliberately absent. They gate downloads that land in the project's own
     # cache and bin roots, so they are not confinement's business, and setting
     # a variable that changes nothing here is the fallacy M8b corrected.
-    stateVars = _w: {
+    stateVars = w: {
       # P8, for claude-code's reason: nix owns the version, and an agent that
       # updates itself is not the agent this description was written against.
       OPENCODE_DISABLE_AUTOUPDATE = "1";
+
+      # The one exception to the paragraph above: this does not move a root,
+      # it adds a configuration file, and it is what lets the skill surface
+      # below be a file this environment owns outright rather than a file the
+      # agent also writes. M9a measured it as an extra scope merged onto the
+      # others, not a replacement, and a name that does not exist yet is not
+      # an error, so pointing at it unconditionally costs nothing.
+      OPENCODE_CONFIG = "${w}/.agents/opencode/config.json";
     };
 
     # `skills.paths`, which M8e found covers skills and only skills —
     # OPENCODE_CONFIG_DIR moves agents, commands, modes and plugins but not
-    # these. The file is the global configuration under the relocated config
-    # root, and the roots are merged into it rather than written over it,
-    # because the agent rejects an unknown top-level key outright and a
-    # consumer's own settings may already be there.
+    # these.
+    #
+    # The file is this environment's own, under the state root every agent
+    # already has, and not the agent's `opencode.json`. M8e chose the latter on
+    # the reasoning that a consumer's own settings may already be there, and
+    # that reasoning is what made it the wrong file: the agent writes that file
+    # too, through a JSONC editor, so what is already there can carry comments
+    # and a trailing comma. M9a found the developing checkout holding exactly
+    # that, `{ "$schema": …,}`, which no strict-JSON merge can read and no
+    # strict-JSON writer can preserve. Every entry point was unable to start.
+    #
+    # Owning the file removes both halves of that. Nothing this environment
+    # writes has to survive a round trip through someone else's editor, and the
+    # consumer's `opencode.json` is not read, not written and not fingerprinted.
+    # It also lands the pointing in a stronger scope than before: M9a measured
+    # global < OPENCODE_CONFIG < project `./opencode.json` <
+    # OPENCODE_CONFIG_CONTENT, and the old target was the weakest of the four.
     skillSurface = {
       kind = "json-array";
-      path = w: "${w}/.config/opencode/opencode.json";
+      path = w: "${w}/.agents/opencode/config.json";
       key = ".skills.paths";
+      # Nothing but the pointing is in this file, and the agent writes `$schema`
+      # into it as JSONC the moment it reads it, so it is rewritten rather than
+      # read back. `owned`'s description carries the measurement.
+      owned = true;
     };
   };
 
