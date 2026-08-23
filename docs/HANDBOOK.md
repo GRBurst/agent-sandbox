@@ -87,6 +87,13 @@ type claude                 # a wrapper in the store, not the upstream binary
 
 All three of the agents this repository names are on `PATH`.
 
+**`type claude` is the check that matters, and a shell alias defeats all of this silently.**
+An alias is resolved before `PATH` is consulted, so if your own shell configuration wraps an agent — `alias opencode='nono run --profile opencode-claude --allow-cwd -- opencode'` is a real example — then typing the name inside this environment never reaches the wrapper at all.
+What you get instead is your host's arrangement pointed at a checkout it knows nothing about, and its most likely first words are `nono: Profile not found: opencode-claude`, because the blanket `XDG_CONFIG_HOME` means your own confinement descriptions are not on the search path here.
+That message is your alias failing, not this repository refusing.
+Run `type claude`, `type opencode` and `type pi` on entering: each must report a path under `/nix/store`, and anything else — an alias, a function, a user profile — is what will actually run.
+Reach the wrapper past an alias with a leading backslash, as `\opencode --version`.
+
 The wrapper is the only entry point; the unconfined binary is reachable only by store path.
 If the host cannot enforce confinement the wrapper refuses to start the agent and exits 77, rather than running it unconfined.
 
@@ -219,6 +226,14 @@ Inside the project, that agent finds none of your `~/.config` settings, subagent
 This is a tracked violation of the constitution's "prefer the tool's own variable" rule, recorded as `C1` in the feature's plan, and it is kept only because `nono` has no variable of its own: pointed at a directory that does not exist it falls back to the host's `~/.config` silently, which would let host confinement descriptions decide what a confined session may reach.
 Skills you authored yourself come with you by the separate route above, declared once for the machine rather than by widening this; the other authoring surfaces do not, and that is the gap that section names.
 
+**`XDG_DATA_HOME` is a blanket too, and it splits direnv's own trust store in two.**
+direnv records which `.envrc` files you have approved under `$XDG_DATA_HOME/direnv/allow`, and `.envrc` moves that root inside the checkout before `use flake` runs — it has to, because nix reads `trusted-settings.json` from there before it will evaluate a flake that declares `nixConfig`.
+So from the moment the environment loads there are two trust stores: the host's, and this checkout's.
+Approving a directory from inside the project writes the token into `<project>/.local/share/direnv/allow`, where nothing outside can see it, and the reverse holds as well.
+The visible symptom is that `cd`-ing *out* of the checkout re-prompts you to `direnv allow` a directory you approved long ago: the shell hook evaluates the new directory while this project's `XDG_DATA_HOME` is still exported, so direnv looks for the token in the wrong store.
+Approve it and you have written a duplicate token that only exists while you are in this project.
+Nothing leaks and nothing breaks, but expect it, and prefer leaving the checkout in a shell that never entered it — start a session from outside if you intend to move around.
+
 **A confined session gets its own set, and none of the table above reaches it.**
 The variables in that table are the *shell's*, and the boundary passes almost nothing through: measured, a session inherits `HOME` and a handful of locale and terminal variables, and not one `XDG_*` root nor `TMPDIR`.
 So the session's redirection is declared in its confinement description instead, and is a superset of the shell's:
@@ -283,7 +298,13 @@ The unit and component layers have no such dependency.
 
 It **exits non-zero today, by design**: `check_sc3` asserts a scenario-to-check bijection and is the feature's progress bar, so it fails until the last scenario in the spec has a check.
 A task is judged by whether its own check passes and whether the set `check_sc3` names shrinks by exactly the scenarios that task covers.
-Today's baseline is `1 of 28 checks failed`, that one being `check_sc3`, and the set it names is 5 scenarios long: `j7_1 j8_1 r9 rep1 rep2`.
+Today's baseline is `1 of 31 checks failed`, that one being `check_sc3`, and the set it names is 3 scenarios long: `j7_1 rep1 rep2`.
+
+**No check can see an interactive prompt.**
+`validate.sh` runs every check with `stdin` on `/dev/null`, which it must — an agent started in print mode reads stdin and will otherwise drain the loop feeding it the list of checks to run.
+The cost is that a green suite says nothing about what happens on a terminal.
+This was not hypothetical: the agent entry points shipped for a while unable to start at all, hanging on a consent question the mechanism asked on `stdin` while the wrapper sent its text to `/dev/null`, and every check passed throughout.
+Where interactive behaviour is the criterion, assert on the arguments a command is invoked with instead — `check_r6`'s fourth arm logs the entry point's own `nono run` argv and requires the consent flag on every one — and enter the shell and type an agent's name by hand as well.
 
 ## Known drift
 

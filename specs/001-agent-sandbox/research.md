@@ -597,7 +597,7 @@ nono run -s --workdir "$PWD" --allow-cwd \
   --profile <path-or-name> -- <cmd>
 ```
 
-- **`nono run` refuses outright without `--allow-cwd` in non-interactive mode**, even when the description sets `workdir.access = "readwrite"`: `nono: CWD access requires --allow-cwd in non-interactive mode`. `M1g` already found the flag grants read-only unless the description says otherwise; this is the other half — without it there is no session at all. `M4b`'s entry point needs both facts.
+- **`nono run -s` refuses outright without `--allow-cwd`**, even when the description sets `workdir.access = "readwrite"`: `nono: CWD access requires --allow-cwd in non-interactive mode`, exit 1. `M1g` already found the flag grants read-only unless the description says otherwise; this is the other half — without it there is no session at all. `M4b`'s entry point needs both facts. The `-s` is load-bearing and this line named the wrong cause until `M9a`: see [the three states of `--allow-cwd`](#the-three-states-of---allow-cwd) for what happens without it.
 - **`--workdir` exists on `run` but not on `profile show`.** So a check that resolves a description reads whatever cwd it was invoked from, which is why `manifest_grants` runs from the repository root.
 
 ### nono's state root cannot be moved into the project, and nono cannot nest
@@ -629,6 +629,15 @@ Refusing to start with conflicting policy.
 nono expands the glob by walking the store, finds a million conflicts, and stops. An **exact** path deny fails identically with `1 deny rule(s) cannot apply`. Landlock rules only ever add access to a subtree; nothing subtracts from one. So the only way not to grant a path is not to grant its parent, and there is no pattern-based middle ground to reach for.
 
 Two consequences already carried into the tasks. `nono why` answers from the resolved policy and reported `denied` / `filesystem_deny` for a path Landlock cannot deny at all, so it is not a proxy for enforcement. And because `validate --strict` accepts the overlap, validation cannot be the observer either — `M3d` asserts the disjointness as a set property over the manifest.
+
+A third consequence surfaced at `M9a`, once the pre-flight started passing `--allow-cwd` and the project became a genuinely allowed parent: **the floor's dotfile denies are derived from `$HOME`, so a `$HOME` inside the granted project makes nono refuse to start.**
+
+```text
+nono: Sandbox initialization failed: Landlock deny-overlap is not enforceable on Linux.
+48 deny rule(s) cannot apply under an allowed parent directory.
+```
+
+A check that fabricates a home under `$REPO_ROOT/.tmp/` therefore never reaches the assertion it exists for — it trips assertion 1 instead. `check_r6` arm 3, which needs an unwritable `$HOME` to prove the pre-flight reports one, keeps its scratch home under `$XDG_RUNTIME_DIR`. That is no contrivance: a real user's home is never inside the checkout either.
 
 ### Closure versus whole store, measured by `strace`
 
@@ -744,11 +753,24 @@ The consequence for `M4b` is a criterion, not a note: the checks must invoke the
 
 So it responds to a widening from the description, from the CLI and from the working-directory consent alike, and it excludes the floor. It is `granted ∖ floor` — exactly the left-hand side of the property `plan.md` states for `SC-1`, now observable on a live session rather than only on a resolution. It is unordered, so it has to be sorted before comparison.
 
-### `--allow-cwd` is the consent, `workdir.access` is only the level
+### The three states of `--allow-cwd`
 
-`nono run --help`: `--allow-cwd` is "Allow CWD access without prompting (level set by profile, defaults to read-only)". Without it a non-interactive session prints `Skipping CWD prompt (non-interactive). Use --allow-cwd to include working directory.` and **the project is not granted at all** — a confined `: > .tmp/probe` leaves no file. The description's `workdir.access = "readwrite"` decides what the consent is worth, not whether it was given.
+`nono run --help`: `--allow-cwd` is "Allow CWD access without prompting (level set by profile, defaults to read-only)". It is the **consent**; the description's `workdir.access = "readwrite"` decides what the consent is worth, not whether it was given. The resolved manifest reports `readwrite <project>` either way, so **the manifest cannot detect a missing consent**. That is the concrete reason `check_j1_1` reads a session rather than a resolution.
 
-The resolved manifest reports `readwrite <project>` either way, so **the manifest cannot detect this**. That is the concrete reason `check_j1_1` reads a session rather than a resolution, and it corrects the reason `M4a` recorded for the pre-flight passing no `--allow-cwd` — the pre-flight is right to omit it because it writes nothing inside the project, not because `workdir.access` already covers it.
+Omitting the flag does not have one behaviour, it has three, and which one you get depends on `stdin` and on `-s`. Measured on nono 0.74.0 against the project's own opencode description, whose `workdir.access` is `readwrite`:
+
+| Invocation | `stdin` | Behaviour |
+| --- | --- | --- |
+| `--allow-cwd` | anything | Silent. Project granted `r+w`. Exit 0 |
+| no flag | not a TTY | `Skipping CWD prompt (non-interactive). Use --allow-cwd to include working directory.` on stderr, and **the project is not granted at all** — a confined `: > .tmp/probe` leaves no file. Exit 0 |
+| no flag | a TTY | **Blocks on a prompt**: `Share <project> with read+write access? … [y/N]`, with `use --allow-cwd to skip this prompt` beneath it |
+| `-s`, no flag | either | `nono: CWD access requires --allow-cwd in non-interactive mode`. Exit 1 |
+
+Both message strings live in the same binary, so the earlier reading of the refusal as *the* non-interactive behaviour was a conflation: `-s` suppresses the notice, and a run that cannot say it is skipping the prompt refuses instead of proceeding half-granted.
+
+The third row is the one that mattered. `M4a`'s pre-flight omitted the flag on the argument that it writes nothing inside the project — true of the *grant*, and silent about the *prompt*. It sent both streams to `/dev/null` while leaving `stdin` attached to the user's terminal, so a real session hung on a question whose text had been discarded, showing nothing at all. Nothing in the suite could see it: `validate.sh` runs every check under `</dev/null`, which is precisely row two. `M9a` gave the pre-flight the flag on both of its runs, and added `check_r6` arm 4 — an argv-logging `nono` stub asserting that every `nono run` the pre-flight makes carries `--allow-cwd`, a property that holds for invocations added later and needs no TTY to check.
+
+The general lesson is worth more than the fix: **a check suite that pins `stdin` to `/dev/null` is blind to every interactive prompt the product can produce**, and a wrapper that discards `stderr` turns such a prompt into a silent hang. Redirect what you must, but assert on the argv.
 
 ### The RED arrived by the wrong route, and the route is the finding
 

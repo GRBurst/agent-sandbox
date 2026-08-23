@@ -118,14 +118,18 @@ reach_grants() {
 
 # R6 — a host that cannot enforce confinement refuses, naming the primitive.
 #
-# Two arms, because an exit status of 77 on its own does not say what earned
+# Four arms, because an exit status of 77 on its own does not say what earned
 # it. The control arm runs the real pre-flight on this machine and must exit 0,
 # so a pre-flight that refused every host could not pass. The plant arm puts a
 # passthrough `nono` earlier on PATH — present, accepting the same arguments,
 # enforcing nothing — which is what an unenforceable host looks like from the
-# pre-flight's side, and must produce 77 and the primitive.
+# pre-flight's side, and must produce 77 and the primitive. The third arm takes
+# away the positive control's writable location, which the first two leave
+# untested. The fourth asserts the working-directory consent on every confined
+# child the pre-flight starts, because without it the pre-flight hangs for a
+# human and passes for this suite.
 check_r6() {
-	local preflight tmp state profile pinned rc out found=0
+	local preflight tmp state profile pinned rc out unwritable logged consenting found=0
 	local -a SESSION_ENV
 	preflight="$REPO_ROOT/lib/preflight.sh"
 
@@ -187,10 +191,23 @@ check_r6() {
 	# writable on this machine — so deleting that assertion would go unnoticed.
 	# A host offering nowhere to write the canary cannot demonstrate
 	# enforcement, and must refuse rather than report success (D5).
-	mkdir -p "$tmp/unwritable"
-	chmod 500 "$tmp/unwritable"
+	#
+	# The unwritable location is outside the project, which the arm originally
+	# was not. nono derives its dotfile deny rules from $HOME, so a $HOME inside
+	# a granted project makes every one of them overlap an allowed parent and
+	# nono refuses to start at all — assertion 1, not the assertion 2 this arm
+	# exists for. That went unnoticed while the pre-flight granted no project.
+	# A host's home directory is not inside the checkout anyway, so this is the
+	# more faithful arrangement as well as the working one.
+	unwritable=$(mktemp -d -p "${XDG_RUNTIME_DIR:-/tmp}" agent-sandbox-r6.XXXXXX)
+	chmod 500 "$unwritable"
+	# Supersedes the RETURN trap set above, and repeats its `rm -rf "$tmp"`
+	# because bash keeps one trap per signal rather than a list. The chmod comes
+	# first: `rm -rf` cannot empty a directory it may not write to.
+	# shellcheck disable=SC2064
+	trap "chmod 700 '$unwritable'; rm -rf '$unwritable' '$tmp'" RETURN
 	out=$(cd "$REPO_ROOT" && env "${SESSION_ENV[@]}" PATH="$pinned:$PATH" \
-		XDG_RUNTIME_DIR="$tmp/unwritable" HOME="$tmp/unwritable" PREFLIGHT_PROFILE="$profile" \
+		XDG_RUNTIME_DIR="$unwritable" HOME="$unwritable" PREFLIGHT_PROFILE="$profile" \
 		bash -c "source '$preflight'; preflight_or_die" 2>&1) && rc=0 || rc=$?
 	if [ "$rc" -ne 77 ]; then
 		found=1
@@ -199,6 +216,49 @@ check_r6() {
 	if ! printf '%s' "$out" | grep -q 'cannot verify confinement'; then
 		found=1
 		fail "$(printf 'the refusal does not say the canary was unwritable:\n%s' "$out")"
+	fi
+
+	# The fourth arm covers what no other arm here can reach: the pre-flight on
+	# a terminal. `--allow-cwd` is the working-directory consent, and a
+	# `nono run` without it *asks* — on stdin, in a message the pre-flight sends
+	# to /dev/null with everything else. An interactive user got a cursor and no
+	# explanation. Every arm above, and every check in this suite, runs under
+	# validate.sh's `</dev/null`, so all of them take nono's non-interactive
+	# path and none of them can ever see the question.
+	#
+	# Allocating a pty would be the direct observation, and it is not available:
+	# a nested sandbox denies /dev/ptmx, so the check would skip on exactly the
+	# machine most likely to run it. So the arm observes the argv the pre-flight
+	# builds instead — the real invocation, through a stub that logs and
+	# delegates, rather than the source text of this file — and asserts the
+	# property over every `run` it makes, so an invocation added later is
+	# covered without this arm being touched.
+	mkdir -p "$tmp/logging"
+	cat >"$tmp/logging/nono" <<-STUB
+		#!/usr/bin/env bash
+		printf '%s\t' "\$@" >>'$tmp/argv.log'
+		printf '\n' >>'$tmp/argv.log'
+		exec '$pinned/nono' "\$@"
+	STUB
+	chmod +x "$tmp/logging/nono"
+
+	out=$(cd "$REPO_ROOT" && env "${SESSION_ENV[@]}" PATH="$tmp/logging:$pinned:$PATH" \
+		PREFLIGHT_PROFILE="$profile" \
+		bash -c "source '$preflight'; preflight_or_die" 2>&1) && rc=0 || rc=$?
+	if [ "$rc" -ne 0 ]; then
+		found=1
+		fail "$(printf 'the pre-flight refused a host that does enforce confinement: exit %s\n%s' "$rc" "$out")"
+	fi
+
+	logged=$(grep -c $'^run\t' "$tmp/argv.log" 2>/dev/null || true)
+	consenting=$(grep $'^run\t' "$tmp/argv.log" 2>/dev/null | grep -c $'\t--allow-cwd\t' || true)
+	if [ "${logged:-0}" -eq 0 ]; then
+		found=1
+		fail 'the pre-flight ran no confined child; there is nothing to assert consent about'
+	elif [ "$consenting" -ne "$logged" ]; then
+		found=1
+		fail "$(printf '%s of the pre-flight'"'"'s %s confined runs pass --allow-cwd; without it nono asks for the working directory on a stdin the pre-flight has sent to /dev/null, and an interactive terminal hangs on a prompt it cannot see:\n%s' \
+			"$consenting" "$logged" "$(cat "$tmp/argv.log")")"
 	fi
 
 	[ "$found" -eq 0 ]
