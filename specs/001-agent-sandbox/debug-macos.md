@@ -27,8 +27,17 @@ Run 7 is the first run of the five class fixes — `ec31fbe`, `66edce3`, `937b97
 It moved macOS from eleven failures to three and Linux from none to one.
 Classes A, B and C are settled: `check_r1`, `check_r2`, `check_r8`, `check_j2_1`, `check_j3_1`, `check_r9`, `check_j8_1`, `check_opencode` and `check_pi` all pass on Linux, and on macOS every class A, B and C row either passes or skips for a reason the platform forces.
 
-What remains is two root causes, neither of them a confinement defect.
-Both are defects in what the checks *measure*, and each is described in its own section below.
+What remained was two root causes, neither of them a confinement defect.
+Both were defects in what the checks *measure*, and each is described in its own section below.
+
+**Both have since been fixed, and run 8 is the run that answers them.**
+`d5d333d` moved every capture a confined child inherits into the project (class D); `dc5e938` gave each commit arm a session of its own so the denial assertion covers the commit Journey 6.2 names (class E).
+On a NixOS host the unit, component and integration layers pass — 6, 3 and 22 checks — with `check_j6_2`, `check_r11`, `check_opencode` and `check_pi` among them.
+Two plants are owed to the runner rather than to a host, and both are stated where they belong in [tasks.md](tasks.md) § M9e: class D's, because Landlock cannot express it, and class E's literal Ubuntu case, because a NixOS `gpg` is `path_not_granted` and the `execve` fails before the locale read.
+
+When run 8's logs land, the first question is whether these two rows are gone.
+If they are, what is left is class B's two boxes and *Closing the arm*.
+If they are not, the sections below are still the description of what was wrong.
 
 ## Reproducing a confined session by hand
 
@@ -205,8 +214,10 @@ The banner, with `--read`, `--allow` and `--write` given three different paths:
 
 ## Risks still open
 
-- **A host-dependent check is a check that lies.** `check_j6_2` passes on a NixOS developer host and fails on ubuntu-latest for a reason neither host states, because the outcome turns on what `PATH` resolves `gpg` to. Narrowing the span fixes this instance; the general hazard is that `session_env` does not set `PATH`, so any session can exec a host binary whose grant status varies by machine. Nothing currently asserts that it does not.
-- Class D is not implemented, so `check_opencode`, `check_pi` and the macOS half of `check_j6_2` will fail again exactly as they did.
+- **A host-dependent check is a check that lies.** `check_j6_2` passed on a NixOS developer host and failed on ubuntu-latest for a reason neither host states, because the outcome turned on what `PATH` resolves `gpg` to. Narrowing the span fixed that instance. The general hazard is larger than `PATH` and is now measured: nono's own `system_read_linux_core` group grants read over `/bin`, `/usr/bin`, `/lib`, `/etc/ssl` and two dozen more **for every one of them that exists on the host**, while the shipped description declares `groups.include: []`. The same description is therefore a different boundary on every machine, and `flake.nix`'s sentence about `PATH` and grants is not true of a host that carries `/usr/bin`. `M10a` carries it.
+- **Two plants are owed to a runner, not to a host.** Class D's — the capture put back outside the granted set — cannot bite on Linux at all, because Landlock does not re-check an already-open descriptor; that invisibility is why the class survived six runs. Class E's literal case needs a `gpg` the profile grants. Both are stood in for by weaker plants that do run here, recorded in [tasks.md](tasks.md) § M9e.
+- **`find -printf` is GNU-only, and its absence is silent.** `check_opencode` and `check_pi` build their home manifests with it. Where it is unsupported both manifests are empty and the comparison passes having compared nothing.
+- **`check_opencode`'s `landed` control is partly self-satisfied**, because the check seeds the skill-surface file into the project before the session runs. 22 of the 23 entries measured were the session's own, so it is not vacuous — but it does not assert what it says.
 - `check_r9`'s `nohost` plant is unrun, so the one assertion that compares two sessions' capability sets is unproven. Three attempts were defeated by an intermittent `cannot open SQLite database … fetcher-cache-v4.sqlite`, which leaves a check reporting its own anti-vacuity control rather than the planted failure.
 - `outside_root` is only as good as its three-candidate list, and its last candidate writes under the real home. `M10a` carries this.
 - The `+`-summarised group paths are never passed on to `check_r9`'s replayed session, so the FR-21 arm asserts unreadability of a session that was never granted them. Reading the grant off argv had the same hole, so this is inherited rather than introduced.

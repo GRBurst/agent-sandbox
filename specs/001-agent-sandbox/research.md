@@ -3094,4 +3094,60 @@ Adding `execve` to the same trace turns it into a process census and makes the n
 Phase markers cost one line and make a trace bucketable: `mark() { : <"/AGENTSANDBOX_MARK_$1" 2>/dev/null || true; }` opens a path that cannot exist, so the failed `openat` lands in the stream as a labelled boundary and a span is extracted with `awk`.
 This is how the plain-commit span was measured separately from the session's — `[0 paths, from 170 traced lines]` — which is the evidence that narrowing the span is sufficient.
 
-A check that passes locally and fails in CI should have its *precondition* tested before its logic. Here `nono -s why --path /usr/bin/gpg --op read` against the profile answered the whole question in one call, and it answers on a host where `/usr/bin/gpg` does not exist, because the profile is a description rather than a scan of the filesystem.
+A check that passes locally and fails in CI should have its *precondition* tested before its logic.
+Here `nono -s why --path /usr/bin/gpg --op read` against the profile answered the whole question in one call, and it answers on a host where `/usr/bin/gpg` does not exist, because the verdict follows from the granted prefix rather than from the file.
+
+## M9e — What fixing classes D and E measured, and the grant nobody declared
+
+### The reach a session has is not the reach the description declares
+
+The shipped description declares `groups.include: []` and contains no `/usr`, `/bin`, `/lib` or `/etc` string anywhere.
+`nono -s why` nonetheless answers `granted_path` for `/usr/bin/gpg`, with `"source": "group:system_read_linux_core"`.
+
+That group is one of the thirty `nono profile groups` lists.
+It is marked `Required: no`, described as "Linux core system paths required for normal CLI execution", and its `allow.read` names `/bin`, `/sbin`, `/usr/bin`, `/usr/sbin`, `/usr/local/bin`, `/lib`, `/lib64`, the two multiarch library directories, `/usr/lib`, `/usr/lib64`, `/usr/local/lib`, `/etc/ssl`, `/etc/pki`, `/etc/ca-certificates`, `/etc/ld.so.*`, `/etc/localtime`, `/etc/os-release` and a dozen more.
+`/usr/share` is not among them, which is the whole of why the locale read was refused while gpg itself was not.
+
+**A group path is granted exactly when it exists on the host.**
+Ten samples on NixOS, every one consistent: `/bin`, `/usr/bin`, `/lib` and `/lib64` exist and answer `granted_path`; `/usr/sbin`, `/usr/lib`, `/usr/local/bin`, `/etc/localtime` and `/etc/ld.so.cache` do not exist and answer `path_not_granted`; `/usr/share` is in no group and answers `path_not_granted` either way.
+Separately, `/bin/sh` and `/usr/bin/env` answer `path_not_granted` on NixOS **although their parents are granted**, because both are symlinks into `/nix/store` and the verdict follows the resolved target.
+
+Two things follow.
+The reach is host-shaped, so the same description is a different boundary on a developer machine and on a runner — which is the mechanism behind the whole `PATH` finding above, stated without reference to `gpg`.
+And `flake.nix`'s claim that every tool a session finds on `PATH` is one it was granted is not true of a host that carries `/usr/bin`; the substrate is what this environment *provides*, not the whole of what a session may *read*.
+That contradiction is the product's to resolve and is carried in `tasks.md` under M10a.
+
+### Pinning `PATH` would have hidden this rather than fixed it
+
+The obvious repair for a check whose verdict varies by machine is to stop the variation: pin `PATH` to the substrate in `session_env`.
+It would have worked, in the sense that the check would agree on both platforms.
+It would also have left the grant exactly where it is, so a session would still be able to read `/usr/bin` — the suite would simply have stopped saying so.
+A check made agreeable by narrowing what it looks at is the same failure as a check made green by deleting its assertion.
+
+### Narrowing a span is falsifiable in both directions
+
+The class E fix gives each arm a session of its own.
+Two plants measure it, and they are worth recording as a pair because either alone is weak.
+
+A read of `$HOME/.gitconfig` — a path the session is granted nothing on — placed in the **ordinary** arm makes `check_j6_2` fail, naming that file.
+The same read moved to the **demand** arm leaves `check_j6_2` passing.
+Together they say that the assertion still bites and that it now bites on the arm the journey names, which is the regression reproduced and removed in one pair of runs.
+Neither plant needs `gpg`, so both run on a host where the original failure cannot be reproduced at all.
+
+### A floor that reported nothing is not a floor
+
+The subtraction the darwin branch performs is only a measurement if the baseline session was itself observed.
+`session_reported` was already applied to the measured session for exactly this reason and was not applied to the baseline, so a baseline that produced no trailer would have subtracted an empty set and looked like a baseline that found nothing.
+`check_j6_2` now refuses it with its own message.
+`ARMS_NOISE` is assigned only on the branch that creates the file, so the variable no longer names an observation Linux never made.
+
+### The capture directory needed a control of its own
+
+Moving the captures inside the project puts them inside the listing that proves the session wrote something, and `mkdir -p "$capture"` runs before the session — so left unexcluded it would satisfy that control by construction.
+Excluded, the control still holds on the sessions' own writes: 23 entries for `check_opencode` and 4 for `check_pi`, none under the capture directory.
+
+The exclusion cannot be plant-tested from Linux, and neither can the class itself: Landlock does not re-check an already-open descriptor, which is why six CI runs passed on Linux while the same code failed on macOS.
+A class whose whole signature is invisible on the platform that runs the suite unattended is one the runner has to answer.
+
+While measuring this, `check_opencode`'s control turned out to be partly self-satisfied for an unrelated reason: the check seeds the skill-surface file into the project *before* the session, so one of the 23 entries was never the session's.
+It is not vacuous, but it does not say what it claims, and it is recorded as open.
