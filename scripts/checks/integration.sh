@@ -3613,15 +3613,20 @@ check_j6_1() {
 	[ "$found" -eq 0 ]
 }
 
-# One session, two commits, so that each is the other's control (D9).
+# Two commits under one description, so that each is the other's control (D9).
 #
 # Journey 6.2 and R11 differ in exactly one thing — whether the checkout's own
 # configuration demands a signature — and neither is evidence on its own. A
 # session that cannot commit at all satisfies R11's refusal, and a session that
 # read no configuration whatever satisfies Journey 6.2's success. Running both
-# commits in one session is what makes the difference attributable to the
-# demand, so the two checks share this helper rather than each building a
-# session of its own.
+# commits against the same profile, home and checkout is what makes the
+# difference attributable to the demand, so the two checks share this helper
+# rather than each building a session of its own.
+#
+# They run as two sessions, not one. What the sessions have in common is what
+# the control needs; what separates them is that Journey 6.2 measures the reach
+# of the arm it names, and the demand arm reaches for signing material by
+# design.
 #
 # The checkout is one this environment configured: the entry point runs first
 # and writes `.agents/git/config` out of the host identity (FR-23), which is
@@ -3632,15 +3637,15 @@ check_j6_1() {
 # (D11), so a check that planted it there would watch the commit succeed and
 # report a refusal it never provoked.
 #
-# Sets ARMS_PROJ to the project the session ran in, ARMS_TRACE to the syscall
-# trace where the platform has a tracer and empty where it has none, and
-# ARMS_NOISE to the trailer of a session that made no commit. Leaves the
-# session's own report in $outside/probe.out and its stderr, nono's trailer
-# included, in $outside/probe.err.
+# Sets ARMS_OUT to both arms' answers, ARMS_ERR to the ordinary arm's stderr
+# with nono's trailer in it, ARMS_PROJ to the checkout both ran in, ARMS_TRACE
+# to the ordinary arm's syscall trace where the platform has a tracer and empty
+# where it has none, and ARMS_NOISE to the trailer of a session that made no
+# commit — that one only on the platform whose instrument is the trailer.
 commit_session() {
 	local outside=$1
 	local agent=claude-code binary=claude
-	local entry home proj cfg gitdir git strace rc
+	local entry home proj cfg capture gitdir git strace rc
 	local FIXTURE_PROFILE FIXTURE_SUBSTRATE FIXTURE_BASH
 	local -a SESSION_ENV traced
 
@@ -3664,7 +3669,15 @@ commit_session() {
 	home="$outside/home"
 	proj="$outside/proj"
 	cfg="$outside/cfg"
-	mkdir -p "$home" "$cfg" "$proj/plain" "$proj/demand"
+
+	# Where every stream the supervisor redirects is captured, inside the one
+	# directory these sessions are granted. A child resolves the paths of the
+	# descriptors it inherits when it starts, and Seatbelt answers by path, so a
+	# capture file outside the granted reach is reported as a refused read
+	# before the program has run at all. Landlock does not re-check a descriptor
+	# that is already open, which is why only macOS ever saw this.
+	capture="$proj/capture"
+	mkdir -p "$home" "$cfg" "$capture" "$proj/plain" "$proj/demand"
 
 	printf '[user]\n\tname = Commit Person %s\n\temail = commit-%s@example.invalid\n' \
 		"$RANDOM" "$RANDOM" >"$home/.gitconfig"
@@ -3680,7 +3693,7 @@ commit_session() {
 		return 1
 	fi
 
-	cat >"$proj/probe.sh" <<-'PROBE'
+	cat >"$proj/plain.sh" <<-'PLAIN'
 		git=$1
 		work=$2
 
@@ -3695,6 +3708,15 @@ commit_session() {
 		printf 'PLAIN_HEAD :: %s\n' "$("$git" rev-parse --verify HEAD 2>/dev/null || printf none)"
 		printf 'PLAIN_GPGSIG :: %s\n' "$("$git" cat-file commit HEAD 2>/dev/null | grep -c '^gpgsig')"
 		printf 'PLAIN_SIGSTATUS :: %s\n' "$("$git" log -1 --format='%G?' 2>/dev/null)"
+	PLAIN
+
+	# The demand arm, in a script of its own so that it can be given a session
+	# of its own below. It is R11's subject and it is deliberately a failure:
+	# the commit it attempts reaches for signing material, so anything it is
+	# refused belongs to the refusal rather than to Journey 6.2's commit.
+	cat >"$proj/demand.sh" <<-'DEMAND'
+		git=$1
+		work=$2
 
 		cd "$work/demand" || exit 1
 		"$git" init -q .
@@ -3705,44 +3727,67 @@ commit_session() {
 		printf 'DEMAND_RC :: %s\n' "$?"
 		printf 'DEMAND_HEAD :: %s\n' "$("$git" rev-parse --verify HEAD 2>/dev/null || printf none)"
 		printf 'DEMAND_OBJECTS :: %s\n' "$("$git" rev-list --count --all 2>/dev/null)"
-	PROBE
+	DEMAND
 
-	# The tracer wraps the whole session rather than the one commit inside it, so
-	# that what it observes is the span nono's trailer observes where there is no
-	# tracer: everything the session did, both commits included.
+	# Two sessions, one per arm, rather than one session holding both. Journey
+	# 6.2 scopes its third Then to the commit that session just made, so the span
+	# the denial assertion covers has to be the plain commit's and nothing else.
+	# The demand arm reaches for signing material by design; a span holding both
+	# arms charges that reach to the plain commit, which is what a single session
+	# did until a runner whose host gpg the profile grants measured it. Only the
+	# plain session is traced, and only its stderr is ever read for denials.
 	traced=()
 	if [ -n "$strace" ]; then
-		traced=("$strace/bin/strace" -f -e trace=openat -o "$proj/session.trace")
+		traced=("$strace/bin/strace" -f -e trace=openat -o "$proj/plain.trace")
 	else
 		# The noise floor, for the platform whose supervisor is the instrument.
 		# macOS refuses a handful of paths to every process there is, the
 		# text-encoding file each CoreFoundation program opens among them, and a
 		# session measured against zero would be failed by its platform rather
-		# than by its own reach. Same profile, same home, and git rather than
-		# `true` so that git's own startup is inside the floor — but no commit.
+		# than by its own reach. Same profile, same home, same capture directory,
+		# and git rather than `true` so that git's own startup is inside the
+		# floor — but no commit. Assigned only here, because this is the only
+		# branch that produces one.
 		env "${SESSION_ENV[@]}" "HOME=$home" \
 			"$(pinned_bin nono)/nono" run \
 			--profile "$FIXTURE_PROFILE" --workdir "$proj" --allow-cwd -- \
-			"$git" --version >/dev/null 2>"$outside/noise.err" || :
+			"$git" --version >"$capture/noise.out" 2>"$capture/noise.err" || :
+		ARMS_NOISE="$capture/noise.err"
 	fi
 
 	env "${SESSION_ENV[@]}" "HOME=$home" \
 		"$(pinned_bin nono)/nono" run \
 		--profile "$FIXTURE_PROFILE" --workdir "$proj" --allow-cwd -- \
-		"${traced[@]}" "$FIXTURE_BASH/bin/bash" "$proj/probe.sh" "$git" "$proj" \
-		>"$outside/probe.out" 2>"$outside/probe.err" && rc=0 || rc=$?
+		"${traced[@]}" "$FIXTURE_BASH/bin/bash" "$proj/plain.sh" "$git" "$proj" \
+		>"$capture/plain.out" 2>"$capture/plain.err" && rc=0 || rc=$?
 
-	# The last line the probe writes. A session that died halfway would
-	# otherwise leave both checks asserting against an absence.
-	if ! grep -qF 'DEMAND_OBJECTS ::' "$outside/probe.out"; then
-		fail "$(printf 'the session did not run both commits to the end (exit %s):\n%s\n%s' \
-			"$rc" "$(cat "$outside/probe.out")" "$(tail -20 "$outside/probe.err")")"
+	# The last line each arm writes. A session that died halfway would otherwise
+	# leave both checks asserting against an absence.
+	if ! grep -qF 'PLAIN_SIGSTATUS ::' "$capture/plain.out"; then
+		fail "$(printf 'the session did not run the ordinary commit to the end (exit %s):\n%s\n%s' \
+			"$rc" "$(cat "$capture/plain.out")" "$(tail -20 "$capture/plain.err")")"
 		return 1
 	fi
 
+	env "${SESSION_ENV[@]}" "HOME=$home" \
+		"$(pinned_bin nono)/nono" run \
+		--profile "$FIXTURE_PROFILE" --workdir "$proj" --allow-cwd -- \
+		"$FIXTURE_BASH/bin/bash" "$proj/demand.sh" "$git" "$proj" \
+		>"$capture/demand.out" 2>"$capture/demand.err" && rc=0 || rc=$?
+
+	if ! grep -qF 'DEMAND_OBJECTS ::' "$capture/demand.out"; then
+		fail "$(printf 'the session did not run the demanded commit to the end (exit %s):\n%s\n%s' \
+			"$rc" "$(cat "$capture/demand.out")" "$(tail -20 "$capture/demand.err")")"
+		return 1
+	fi
+
+	# One report for both callers, so that each still reads its own arm's answers
+	# and the other arm's as its control.
+	ARMS_OUT="$capture/arms.out"
+	cat "$capture/plain.out" "$capture/demand.out" >"$ARMS_OUT"
+	ARMS_ERR="$capture/plain.err"
 	ARMS_PROJ=$proj
-	ARMS_TRACE=${strace:+$proj/session.trace}
-	ARMS_NOISE="$outside/noise.err"
+	ARMS_TRACE=${strace:+$proj/plain.trace}
 }
 
 # Journey 6.2 — a commit made inside a session succeeds, carries no signature,
@@ -3762,12 +3807,18 @@ commit_session() {
 # root, so there the observable is nono's own trailer, measured against the
 # floor a session that made no commit was refused.
 #
+# Both instruments are pointed at the same span, and that span is the session
+# holding the ordinary commit alone. The trailer cannot be narrowed to part of
+# a session, so the narrowing is done by giving the arm a session of its own
+# rather than by delimiting one inside it, which is the only form both
+# platforms can express.
+#
 # FR-24's default is asserted against the configuration this environment wrote
 # and not only against the object: a session that happened to commit unsigned
 # because it had no key would pass on the object alone.
 check_j6_2() {
 	local outside out proj found=0
-	local ARMS_PROJ ARMS_TRACE ARMS_NOISE
+	local ARMS_OUT ARMS_ERR ARMS_PROJ ARMS_TRACE ARMS_NOISE
 	local head sig status denials=''
 
 	outside=$(outside_root j6_2) || return 1
@@ -3775,7 +3826,7 @@ check_j6_2() {
 	trap "rm -rf '$outside'" RETURN
 
 	commit_session "$outside" || return 1
-	out="$outside/probe.out"
+	out=$ARMS_OUT
 	proj=$ARMS_PROJ
 
 	if ! grep -qF 'PLAIN_RC :: 0' "$out"; then
@@ -3817,18 +3868,25 @@ check_j6_2() {
 		else
 			denials=$(trace_denials "$ARMS_TRACE")
 		fi
-	elif ! session_reported "$outside/probe.err"; then
+	elif ! session_reported "$ARMS_ERR"; then
 		found=1
 		fail "$(printf 'nono said nothing about what the session was refused, so an empty set of denials would mean nothing:\n%s' \
-			"$(tail -20 "$outside/probe.err")")"
+			"$(tail -20 "$ARMS_ERR")")"
+	elif ! session_reported "$ARMS_NOISE"; then
+		# The floor answers the same question the measured session does, and a
+		# floor that reported nothing subtracts nothing while looking like a
+		# floor that found nothing.
+		found=1
+		fail "$(printf 'nono said nothing about what the baseline session was refused, so the floor subtracted from this one is not a measurement:\n%s' \
+			"$(tail -20 "$ARMS_NOISE")")"
 	else
-		denials=$(session_denials "$outside/probe.err" |
+		denials=$(session_denials "$ARMS_ERR" |
 			{ grep -vxF -f <(session_denials "$ARMS_NOISE") || true; })
 	fi
 
 	if [ -n "$denials" ]; then
 		found=1
-		fail "$(printf 'producing the commits reached for something outside the session:\n%s' "$denials")"
+		fail "$(printf 'producing the commit reached for something outside the session:\n%s' "$denials")"
 	fi
 
 	# Control. The same session is refused when the checkout's own
@@ -3852,7 +3910,7 @@ check_j6_2() {
 # case FR-24 configures away, and it is not this one.
 check_r11() {
 	local outside out proj found=0
-	local ARMS_PROJ ARMS_TRACE ARMS_NOISE
+	local ARMS_OUT ARMS_ERR ARMS_PROJ ARMS_TRACE ARMS_NOISE
 	local objects head message
 
 	outside=$(outside_root r11) || return 1
@@ -3860,7 +3918,7 @@ check_r11() {
 	trap "rm -rf '$outside'" RETURN
 
 	commit_session "$outside" || return 1
-	out="$outside/probe.out"
+	out=$ARMS_OUT
 	proj=$ARMS_PROJ
 
 	# Control, and it comes first because everything below is about a failure.
@@ -3948,7 +4006,7 @@ check_r11() {
 #     which was measured to depend on which subcommand ran.
 check_opencode() {
 	local agent=opencode binary=opencode
-	local entry outside home proj cfg state project rc real surface
+	local entry outside home proj cfg state project capture rc real surface
 	local root value homeroot='' found=0
 	local -a rooted=() strayed=() landed=() changed=()
 
