@@ -2528,3 +2528,197 @@ And `debug skill` mangled the file on one occasion and left it alone on another,
 Whether the agent persists the schema on a given run is not something a check can depend on.
 `check_opencode` therefore **seeds** the file with what the agent leaves behind and asserts the session starts anyway, and asserts separately with `jq -e .` that the file is still valid JSON when the session ends.
 Seeding the state is the deterministic form of a defect whose trigger is a previous run.
+
+## M9d — The macOS arm, and the eleven failures behind it
+
+This section is the working record for the macOS side of `M9d`, written so that a session picking the work up needs nothing but this file, and so that nothing already measured is measured again.
+`M9d`'s task entry carries the decision and the criteria; what follows is the evidence.
+
+### How the arm got here, in five runs
+
+The workflow itself is new in `M9`, so no macOS run predates this feature.
+Each row is a pushed commit and the two jobs it produced.
+
+| run | commit | Linux | macOS |
+| --- | --- | --- | --- |
+| 1 | `5d221cc` | 34 passed | the job died in the nix installer, two steps before the suite |
+| 2 | `4c362f8` | 34 passed | 23 of 33 failed, every session refused to start |
+| 3 | `e189d82` | 34 passed | the same 23, plus the probe step's answers |
+| 4 | `518ed2d` | 34 passed | **11 of 33 failed**, sessions start |
+| 5 | `a8316ed` | 34 passed | the same 11, with the tracing that classified them |
+
+Run 1 was `cachix/install-nix-action@v27`, which installs nix 2.22.1, whose darwin installer assigns `_nixbld1` the UID 301.
+macOS 15 and later reserve 300–304 for Apple's own daemon users, so `dscl . create /Users/_nixbld1 UniqueID 301` failed with `eDSRecordAlreadyExists`.
+Upstream fixed it in 2.24.7 by moving the first build UID to 351.
+No repository code was implicated, and the pinning commit that followed made the installer a non-issue.
+
+Runs 2 and 3 were the scratch-root refusal that `M9d` exists for, and run 4 is the derived `outside_root` landing.
+Runs 4 and 5 are the same eleven failures; run 5 differs only in what the failures say about themselves.
+
+### The instruments are mirror images, and neither platform has both
+
+This is the single most useful finding here, because it decides how three of the four classes can be fixed at all.
+
+| instrument | what it observes | Linux | macOS |
+| --- | --- | --- | --- |
+| `strace` | denied opens, and reads that succeeded | present, from `flake.nix`'s `lib.optionals isLinux` | **absent**, along with `ltrace dtruss ktrace dtrace sc_usage fs_usage` |
+| nono's supervisor trailer | the paths a session was refused, with the operation | **absent**: `No path denials were observed during this session.` | present: `Sandbox denial: N paths blocked. <path> (read); …` |
+| nono's capability banner, on the session's stderr | every grant, as mode and path | present | expected present, unmeasured |
+| the audit trail | that a session ran, and its exit status | present | present |
+
+The trailer is not compiled out on Linux.
+Both strings live in the one Linux binary — `grep -a -c` on nono 0.74.0 finds `paths blocked` once, `No path denials were observed` once, `Sandbox denial` three times — so the reporting exists and Landlock simply does not feed it, while Seatbelt does.
+That makes the trailer the darwin counterpart of `strace`, available for exactly the assertions that ask *which paths were refused* and useless for the ones that ask *which paths were read*.
+
+The audit trail was tested as a third option and is not one.
+With the denied path kept out of argv and out of the environment, `$XDG_STATE_HOME/nono/audit/<id>/audit-events.ndjson` held two records, `session_started` with the command and `session_ended` with the exit status, and nothing anywhere under the state root named the file that was refused.
+`nono audit show <id> --json` offers `command_policy_events`, `network_events`, `tracked_paths` and `merkle_roots`, none of them filesystem denials.
+
+The capability banner was measured on Linux and does carry what two of the checks currently read out of `execve` argv:
+
+```text
+  nono v0.74.0
+  Capabilities:
+    r   /nix/store/… (dir)
+    r   …/skillA (dir)
+    w   …/skillB (dir)
+```
+
+Grants passed on the command line appear there beside the ones the description carries, which is what makes it a candidate replacement.
+A check reading it has to drop the `/nix/store/` lines, which are hundreds.
+
+### Class A — three checks assert the Linux word for a denial
+
+`check_r1`, `check_r2`, `check_r8`.
+The boundary holds and the assertion does not travel: Landlock surfaces `EACCES`, Seatbelt surfaces `EPERM`, and the checks `grep` for `Permission denied`.
+
+Traced on the runner, with the arm and the errno the check actually saw:
+
+```text
+DBG r1 shipped: errno wording: Operation not permitted/
+DBG r1 shipped: supervisor denial lines: 1
+DBG r8 denial message: cat: /Users/runner/work/_temp/agent-sandbox-r8.B8p6re/secret.txt: Operation not permitted
+DBG r8 auth message: HTTP/1.1 401 Unauthorized
+```
+
+Both `check_r1` arms behaved correctly otherwise — the planted key read as empty under the shipped description and read back its canary once granted — so the refusal is a wording mismatch and nothing else.
+The literal appears at `integration.sh` lines 518, 647, 2879 and once more at 3284, and in three prose comments.
+
+### Class B — four checks need a tracer that darwin does not have
+
+`check_j6_2`, `check_r11`, `check_j8_1`, `check_r9` fail on `substrate_member … strace` before doing any work.
+All seven tracer candidates print `absent`, which is by construction: `flake.nix` adds `strace` under `lib.optionals isLinux` so that the darwin devshell keeps evaluating.
+`check_substrate_denials` asks for the same thing and escapes only because it is gated on `uname -s = Linux`.
+
+What each site actually observes decides whether it can be salvaged, and the four are not alike:
+
+| site | what it reads out of the trace | darwin substitute |
+| --- | --- | --- |
+| `check_substrate_denials` (352) | the set of denied paths | the trailer, or keep the existing skip |
+| `commit_session` (3444), shared by `check_j6_2` and `check_r11` | that the trace is non-empty, then that the denied set is empty | the trailer, for the assertion; **the non-emptiness control has no substitute** |
+| `check_j8_1` (4147), first arm | that a declared surface directory *was opened*, `O_RDONLY` returning a descriptor | none — a positive syscall observation |
+| `check_j8_1` (4230) and `check_r9` (4434), grant arms | `--read`/`--allow`/`--write` in the `execve` argv the wrapper built | the capability banner |
+
+The awkward one is `commit_session`'s control.
+Its assertion is *no denials*, and an absent instrument satisfies that vacuously, which is why the check first requires the trace to be non-empty.
+The trailer can carry the assertion; something else has to carry the control, and the obvious candidate is that the commit itself demonstrably happened, which the check can already see from `git log`.
+
+`check_r9`'s control has the same shape: `grep -qE 'execve\("[^"]*/nono"'` proves the wrapper reached the mechanism at all, and on darwin that has to come from somewhere else — the banner's presence being the natural answer, since only a started session prints it.
+
+### Class C — the fabricated home's mtime moves, and the cause is in the product
+
+`check_j2_1` and `check_j3_1` compare the fabricated home before and after a session, subtract the leak registry, and require nothing to remain.
+On macOS one line remains, and it is the home directory itself:
+
+```text
+DBG j2_1 home diff: 1c1
+<   /Users/runner/work/_temp/agent-sandbox-j2_1.flZnGV/home	128	1787564526.678024061
+>   /Users/runner/work/_temp/agent-sandbox-j2_1.flZnGV/home	128	1787564531.437078681
+```
+
+Modification time moved, size is identical, and no child differs — `check_j3_1`'s home is empty throughout.
+So something was created inside it and removed again within the session.
+
+**The cause is `lib/preflight.sh:35`**, and it was reproduced on Linux rather than inferred:
+
+```sh
+canary="${XDG_RUNTIME_DIR:-$HOME}/.agent-sandbox-preflight.$$"
+```
+
+Every agent entry point embeds the pre-flight and runs it before starting.
+Assertion 2 writes that canary unconfined as a positive control, removes it, and assertion 3 requires the same write to fail under confinement.
+With `XDG_RUNTIME_DIR` unset the canary lands in `$HOME`, which on the macOS runner is the check's fabricated home.
+
+Three cases, run against the real pre-flight with a fabricated home:
+
+| `XDG_RUNTIME_DIR` | result | the home afterwards |
+| --- | --- | --- |
+| unset | `preflight: passed` | **mtime moved, size unchanged, no residue** — the macOS signature, on Linux |
+| a directory inside the project | **exit 77**, `confinement is not enforced: a confined process wrote outside the project.` | untouched |
+| an ungranted runtime directory | passed | unchanged |
+
+The middle row is the more serious finding, and it was not what the experiment was looking for.
+The canary has to be both writable *and* ungranted, or assertion 3's confined write succeeds and the pre-flight refuses to start a session that is perfectly well confined.
+`$XDG_RUNTIME_DIR` being unset is therefore not the whole hazard: a consumer who exports it to something inside their project breaks every agent with a message accusing the mechanism.
+The product carries the same derivation problem that `outside_root` solved for the harness, one layer down and with a worse failure mode, because the harness fails loudly to the maintainer while this fails loudly to the user.
+
+On macOS the consequence is sharper still.
+The floor grants `/private`, `/tmp`, `/var/folders` and `$TMPDIR` is the project, so the only ungranted writable class is under `/Users`.
+The `${XDG_RUNTIME_DIR:-$HOME}` fallback is thus not a convenience default on darwin — it is the only location that can work, and it writes into the user's real home on every agent start.
+That is a write outside the project, transient but real, and it is neither in the leak registry nor in `P1`'s accepted-leak list.
+
+So `check_j2_1` and `check_j3_1` are **right**, and they are the first checks in this feature to catch the product rather than the fixture.
+
+### Class D — bun cannot read the capture it was handed, and the `M9d` fix caused it
+
+`check_opencode` and `check_pi` redirect the agent's stdout and stderr into files beside the fabricated home, and on macOS both agents die on startup.
+nono's trailer names the capture files and every ancestor as refused **reads**:
+
+```text
+Sandbox denial: 8 paths blocked. /Users (read); /Users/runner (read); /Users/runner/work (read);
+/Users/runner/work/_temp (read); …/agent-sandbox-opencode.5wL1MN (read); …/paths.err (read); …/paths.out (read)
+```
+
+The same command with the capture redirected into the granted project exits 0 and answers correctly — `opencode debug paths` printing every root inside the project, `pi auth check` printing `{"status":"ready","authType":"api_key",…}`.
+That rerun is what makes this a location problem and not an agent-under-confinement problem.
+
+It is bun-specific.
+`claude-code` captures into the same directory in `check_j2_1` and is unaffected, as is every plain `bash` probe in the layer.
+Bun evidently resolves the path of its inherited standard descriptors at startup; Seatbelt checks by path and refuses, while Landlock does not re-check an already-open descriptor.
+Both agents are bun binaries — `Bun v1.3.14 (macOS arm64)` for `opencode`, `Bun v1.3.13` for `pi`.
+
+The class was **introduced by the `M9d` fix**: the captures used to live under `/tmp`, which `system_read_macos` grants through `/private`, and they now live somewhere granted nothing, which is precisely the property that makes the scratch root usable.
+
+Where a relocated capture may go is constrained, and the constraint is easy to miss.
+In these two checks the session's `--workdir` is the fabricated *project*, so that project is the only granted writable place — `$REPO_ROOT` is not granted here.
+And `check_opencode:3832` and `check_pi:4002` both carry an anti-vacuity control:
+
+```sh
+mapfile -t landed < <(find "$project" -mindepth 1 | sort)
+[ ${#landed[@]} -eq 0 ] && fail "the session wrote nothing inside the project, so an unchanged home directory would prove nothing"
+```
+
+Capturing straight into the project would make that control true by construction.
+A relocation therefore needs its own subdirectory, excluded from that listing and from the home comparison, or a mechanism with no path at all — piping the session's output through an unconfined `cat`, so the child holds a pipe rather than a file, which is unmeasured on darwin.
+
+### What a Linux host cannot close
+
+Four things remain, and each needs the macOS runner rather than more reading.
+They are listed here so the next run is designed to answer all four at once rather than one per push.
+
+| id | question | why it matters |
+| --- | --- | --- |
+| U1 | does the darwin trailer enumerate **write** denials as well as reads, and is it complete rather than truncated at some count | it replaces `trace_denials` in `commit_session` only if it is complete |
+| U2 | can *any* positive read observation be made on darwin without disabling SIP — `dtruss` needs it off, `fs_usage` needs root | decides whether `check_j8_1`'s first arm becomes a restructured assertion or a recorded gap |
+| U3 | does the capability banner print identically on darwin | it is the substitute for two checks' argv reading |
+| U4 | which capture relocation keeps the `landed` control honest | the pipe variant has no measurement at all |
+
+### Method notes worth keeping
+
+- `run_check` prints a check's output **only when it fails or skips**, so diagnostics are invisible on the platform where the check passes.
+  That is convenient here and it is also a trap: a `dbg` line proves nothing until the check has been made to fail deliberately.
+- A background poller started inside a command substitution hangs the check outright.
+  `watcher=$(dbg_watch_start …)` waits for an EOF the backgrounded subshell never sends unless its own output is redirected, and the symptom is a 15-minute run that produces nothing.
+- The CI logs carry a `2026-…Z ` prefix on every line; strip it with `sed 's/^2026[^ ]* //'` before reading.
+  A macOS log is roughly twice the length of the Linux one for the same suite, because nono prints its whole capability table to each session's stderr and every failure message quotes it.
+- `nix build .#nono.src` fails in this environment (`cannot open SQLite database … fetcher-cache-v4.sqlite`), so nono's behaviour was established from its binary and its own subcommands rather than from its source.

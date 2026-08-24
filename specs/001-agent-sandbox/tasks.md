@@ -1354,7 +1354,7 @@ The second arm is what makes this checkable at all: exit 0 alone is also what a 
 
 The suite is at `1 of 34 checks failed`: `check_sc3` green for the first time, and `check_j1_1` still waiting on a human to push the reference.
 
-### M9d — On macOS there is nowhere to put the outside (Status: IMPLEMENTING)
+### M9d — On macOS there is nowhere to put the outside (Status: IMPLEMENTED)
 
 **Scenario**: the same Journey 7.1 as [M9c](#m9c--the-claims-are-checked-on-clean-machines-per-platform-status-done), for the platform that run left unmeasured.
 
@@ -1445,16 +1445,78 @@ gap is recorded rather than discovered.
 - [x] The scratch root is **derived** rather than written down: no check names a directory that happens to work on one platform, and the derivation fails loudly rather than falling back to a granted path
 - [x] `integration.sh`'s precondition 2 restated to say what that directory is for and why macOS constrains it
 - [x] Violation planted — a root the description grants — seen to FAIL, reverted, recorded in [plan.md](plan.md#planted-violations). Two of them, because the two granted roots fail differently: the project, which the derivation rejects without asking, and `/tmp`, which nono answers `insufficient_access` for and which a session on Linux nevertheless starts in
+- [x] Sessions start on macOS, measured in CI: the fourth run takes `$RUNNER_TEMP` as the root and the failures drop from 23 to 11, none of them a refusal to start
 - [ ] The directive above answered, and its decision recorded in [plan.md](plan.md#decisions). **No longer a precondition on the checks, and that is a deliberate reversal**: the derivation asks the question of the host at run time instead of settling it in advance, so the harness stops depending on an answer nobody has. What the directive would still change is the *candidate list* — a macOS location better than the real home, or a restructuring that needs no ungranted directory at all — so it is carried into [M10a](#m10a--close-out-status-pending) for reconsideration rather than blocking here
-- [ ] The temporary probe step in `.github/workflows/verify.yml` deleted, its answer now living in the checks
-- [ ] The macOS job green, or every remaining macOS failure named in `docs/HANDBOOK.md` as a coverage gap with the reason it cannot be closed
-- [ ] `scripts/validate.sh` passes on both platforms, and the cross-platform reach comparison in the second job runs for the first time
+
+The three criteria this task used to carry about the macOS job being green now belong to [M9e](#m9e--the-eleven-failures-the-macos-arm-found-status-pending), because the derived root is what made them reachable in the first place.
 
 **What landed, ahead of the directive**
 
 `outside_root <label>` in [scripts/validate.sh](../../scripts/validate.sh) — in the driver rather than in a layer, because both the integration and the end-to-end layer fabricate host homes. It tries `$XDG_RUNTIME_DIR`, then `$RUNNER_TEMP`, then `$HOME/.agent-sandbox`, rejects any candidate under the checkout without asking, and takes the first that is writable and that `nono why --op readwrite` answers `path_not_granted` for. Anything else — a partial grant included — is refused with the verdict every candidate got. All 23 call sites now read `outside=$(outside_root <label>) || return 1`; `check_r6` and `check_substrate_denials`, which took an ambient `XDG_RUNTIME_DIR` directly, take theirs from the same helper. `check_j7_1` deliberately keeps a project-local directory, since it reads a file and starts no session.
 
 Two things this leaves open, both for [M10a](#m10a--close-out-status-pending) rather than for here. The last candidate writes under the real home, which is a write outside the project and so is the accepted-leak question the directive was posed to settle. And the derivation's answer is only as good as the list it tries: on a host offering none of the three, the suite refuses to run rather than reporting a boundary it could not observe — the right failure, but a failure.
+
+______________________________________________________________________
+
+### M9e — The eleven failures the macOS arm found (Status: PENDING)
+
+**Scenario**: the same Journey 7.1. With [M9d](#m9d--on-macos-there-is-nowhere-to-put-the-outside-status-implemented)'s derived root in place, sessions start on darwin and the suite reaches the assertions for the first time. Eleven of them fail, and they are four unrelated things wearing one colour.
+
+The evidence is in [research.md § M9d](research.md#m9d--the-macos-arm-and-the-eleven-failures-behind-it), which is written to be read cold. What follows is only what has to change. Each class is one commit; C is a change to the product and is the one to do first.
+
+| class | checks | what is actually wrong |
+| --- | --- | --- |
+| A | `check_r1` `check_r2` `check_r8` | the assertion greps `Permission denied`; Seatbelt says `Operation not permitted` |
+| B | `check_j6_2` `check_r11` `check_j8_1` `check_r9` | they need `strace`, which the darwin substrate does not carry |
+| C | `check_j2_1` `check_j3_1` | the pre-flight writes a canary into `$HOME` when `$XDG_RUNTIME_DIR` is unset — the check is right and the product is wrong |
+| D | `check_opencode` `check_pi` | the bun agents cannot read the capture files they were handed, because those now sit somewhere the session is granted nothing |
+
+**C — the pre-flight's canary, which is a defect and not a fixture problem**
+
+- [ ] `lib/preflight.sh` derives its canary location instead of falling back to `$HOME`, and refuses with `cannot verify confinement` rather than proceeding when no location qualifies. **Both halves are measured**: with `XDG_RUNTIME_DIR` unset the canary lands in the home directory, and with it pointing anywhere inside the project assertion 3's confined write *succeeds* and the pre-flight accuses a correctly confined session — `confinement is not enforced: a confined process wrote outside the project.` So the requirement is the same one `outside_root` meets, writable and granted nothing, and the failure mode is worse here because it is the user who reads it
+- [ ] The derivation stays inside the pre-flight's budget. It is embedded in every wrapper by `lib/confined-agent.nix` and runs before every agent start, so it may not spend a `nix build` or a second `nono` invocation the way the harness's helper does
+- [ ] Whether the answer on macOS is unavoidably under `/Users` is stated, and if it is, `$HOME/.agent-sandbox` — or whatever the answer turns out to be — is enumerated in the leak registry or in `P1`'s accepted-leak list with its justification, and the handbook says starting an agent writes there. This is the same question [M10a](#m10a--close-out-status-pending) already carries for the harness, and the two answers should be the same answer
+- [ ] `check_pf`'s arms cover the two new cases: no qualifying location, and a qualifying one that a session is granted. The second is the false-alarm case and it has no coverage today
+- [ ] Violation planted and recorded: the canary put somewhere granted, seen to produce the false alarm, reverted
+
+**A — one denial, two spellings**
+
+- [ ] The three checks accept either wording, and the acceptance is derived rather than a second literal — the platform decides which errno its enforcement returns, so a check that lists both is stating a fact about `EACCES` and `EPERM` and should say so in a comment
+- [ ] The refusal message a reader sees still names what was refused, not which errno was matched
+- [ ] Violation planted: a probe that fails for a reason other than permission, which must still fail the check on both platforms
+
+**B — an instrument per platform, chosen per assertion**
+
+The four sites do not want the same thing, and reading them as one is what makes this look impossible:
+
+| site | what it observes | substitute measured on Linux |
+| --- | --- | --- |
+| `commit_session` (`check_j6_2`, `check_r11`) | that the denied set is empty, plus a control that the trace is non-empty | nono's supervisor trailer carries the assertion; the control needs replacing, and `git log` already shows the commit happened |
+| `check_j8_1` first arm | that a declared surface *was read* | none — no positive observation exists on darwin without disabling SIP |
+| `check_j8_1` grant arm, `check_r9` | `--read`/`--allow`/`--write` in the wrapper's `execve` argv | the capability banner on the session's own stderr, which lists mode and path for every grant |
+
+- [ ] The denial-set assertions use `strace` on Linux and the supervisor trailer on darwin, behind one helper, with the platform split in one place. Both feeds are the same code in one binary — Landlock starves it and Seatbelt feeds it, confirmed from the strings in the Linux binary — so this is one property observed two ways, not two properties
+- [ ] Every assertion that reads grants out of argv reads the banner instead, on both platforms, so the split shrinks to the denial checks alone. The banner prints hundreds of `/nix/store/` lines and a check must drop them
+- [ ] `check_r9`'s control that the wrapper reached the mechanism at all survives the change — the banner exists only if a session started, which is the same proof by another route
+- [ ] `check_j8_1`'s positive read arm either finds an observation that works on darwin or **skips on darwin with the reason**, and the gap is named in `docs/HANDBOOK.md` rather than left to be discovered. `check_substrate_denials` is the precedent for the skip and for where the `uname` gate goes
+- [ ] Violations planted per instrument: a session that touches something outside its grants must fail through the trailer as it does through `strace`, and a wrapper missing a declared grant must fail through the banner
+
+**D — the captures the bun agents cannot read**
+
+- [ ] `check_opencode` and `check_pi` capture somewhere the session can read, without making their own anti-vacuity control vacuous. `mapfile -t landed < <(find "$project" -mindepth 1 …)` is the control at stake, and capturing into the project satisfies it by construction — so a dedicated subdirectory excluded from that listing, or a pipe through an unconfined reader so the child holds no path at all. **Measured**: the identical command with its capture inside the granted project exits 0 and answers correctly, so this is where the file lives and nothing else
+- [ ] The comparison of the fabricated home and of the project excludes whatever the harness itself wrote there, and the exclusion is narrow enough that a real write by the agent to the same directory is still caught
+- [ ] Why the two bun agents need this and `claude-code` does not is recorded in a comment: Seatbelt checks by path and bun resolves the path of its own standard descriptors at startup, while Landlock does not re-check a descriptor that is already open
+- [ ] Violation planted: the capture put back where a session is granted nothing, seen to reproduce the startup failure
+
+**Closing the arm**
+
+- [ ] The temporary instrumentation is gone — `dbg` from `scripts/validate.sh`, `dbg_watch_start`/`dbg_watch_stop` and their call sites from `scripts/checks/integration.sh`, and the probe step from `.github/workflows/verify.yml`, whose answer now lives in `outside_root`
+- [ ] The macOS job green, or every remaining macOS failure named in `docs/HANDBOOK.md` as a coverage gap with the reason it cannot be closed
+- [ ] `scripts/validate.sh` passes on both platforms, and the cross-platform reach comparison in the second job runs for the first time
+- [ ] `docs/HANDBOOK.md` states the per-platform instrument split, so a reader who runs the suite on a Mac knows which assertions their run does not make
+- [ ] FR-11's per-platform enforcement tiers, which [M10a](#m10a--close-out-status-pending) already owes, gain the sentence this task measured: the two enforcements differ in what they *report*, not only in what they permit
+
+**What a fresh session should not redo.** Four things were measured and hold: the pre-flight canary reproduces the macOS symptom on Linux with `XDG_RUNTIME_DIR` unset; nono reports no denials on Linux and enumerates them on darwin from the same binary; the audit trail records no denied paths at all, so it is not a third instrument; and the capability banner carries command-line grants. Four things cannot be closed without a macOS runner and should be answered in one push rather than four: whether the trailer enumerates writes and is complete, whether any positive read observation is possible on darwin, whether the banner prints identically there, and which capture relocation keeps the `landed` control honest.
 
 ______________________________________________________________________
 
@@ -1477,7 +1539,7 @@ ______________________________________________________________________
 - [ ] **Egress is mediated, not restricted**, and the handbook says so rather than letting a reader infer otherwise from the filesystem confinement: raw TCP is denied but arbitrary HTTPS through the injected proxy succeeds, so a session that asks an agent to fetch a package reaches the registry ([M8d](#m8d--pi-and-pre-provisioned-extensions-status-implemented)). The drift entry this task retires is the absence of that sentence, not the behaviour
 - [ ] The stranger's copyable command carries `--accept-flake-config`, because the declared substituter is ignored for anyone who is not a trusted user — measured, not assumed ([research.md](research.md#m9--preconditions-for-the-end-to-end-layer-measured-before-it-exists))
 - [ ] `docs/CONSTITUTION.md` P1's accepted-leak list amended to its second entry
-- [ ] **The harness's own outside reconsidered**, which [M9d](#m9d--on-macos-there-is-nowhere-to-put-the-outside-status-implementing) shipped ahead of its research directive. `outside_root` derives the location from the host rather than naming one, so the mechanism is not in question; the candidate list is. Three things to settle with the directive's answer in hand: whether `$HOME/.agent-sandbox` — a write outside the project, and the last resort on any host without `$XDG_RUNTIME_DIR` or `$RUNNER_TEMP`, which is every developer macOS — is a second accepted leak in P1's list beside `$XDG_STATE_HOME/nono` or something the rule must refuse; whether a macOS location exists that is neither under `/private` nor under `/Users`, which would remove the question entirely; and whether the directory the helper creates should be removed when the suite is done rather than left behind empty. If it stays a leak, it is enumerated with its justification like the other, and the handbook says a verification run writes there
+- [ ] **The harness's own outside reconsidered**, which [M9d](#m9d--on-macos-there-is-nowhere-to-put-the-outside-status-implemented) shipped ahead of its research directive. `outside_root` derives the location from the host rather than naming one, so the mechanism is not in question; the candidate list is. Three things to settle with the directive's answer in hand: whether `$HOME/.agent-sandbox` — a write outside the project, and the last resort on any host without `$XDG_RUNTIME_DIR` or `$RUNNER_TEMP`, which is every developer macOS — is a second accepted leak in P1's list beside `$XDG_STATE_HOME/nono` or something the rule must refuse; whether a macOS location exists that is neither under `/private` nor under `/Users`, which would remove the question entirely; and whether the directory the helper creates should be removed when the suite is done rather than left behind empty. If it stays a leak, it is enumerated with its justification like the other, and the handbook says a verification run writes there
 - [ ] `research.md` consolidated to what is still true, per AGENTS.md §1 — the decisions and the criteria kept, the record of how each was checked dropped; the `codex` findings kept, since they are the follow-up feature's head start
 - [ ] Touched files formatted and linted per [AGENTS.md](../../AGENTS.md#4-verify-every-change)
 - [ ] `scripts/validate.sh` passes
