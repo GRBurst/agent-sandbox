@@ -2838,7 +2838,7 @@ if [ -e "$H/.probe" ]; then exit 12; fi               # denied but landed
 exit 0
 ```
 
-Against an ungranted path it returns 0; pointed at a granted one it returns 10, which is the false-alarm arm `check_pf` was told to grow, available as a planted violation without writing a fixture.
+Against an ungranted path it returns 0; pointed at a granted one it returns 10, which is the false-alarm arm `check_r6` was told to grow, available as a planted violation without writing a fixture.
 `127` stays distinguishable as a missing probe command rather than a denial.
 Two confined runs cost 236 ms, and the pre-flight already spends two, so nothing about its budget changes and neither a `nix build` nor a `nono why` is needed.
 
@@ -2918,3 +2918,114 @@ That is the same claim `[ -s plain.trace ]` makes on Linux — the instrument wa
 - `sessionTools` in `flake.nix` carries no `findutils`, yet the harness uses GNU-only `find -printf` and it works on the darwin runner because `nix develop`'s stdenv puts GNU findutils on `PATH` implicitly.
   Meanwhile `outside_root` avoids GNU-only `mktemp -p` for BSD's sake.
   Both cannot be right: under AGENTS.md §3 a tool that resolves incidentally is not available, so either `findutils` is declared or the dependency is recorded as known drift.
+
+______
+
+## M9e — What implementing the four classes measured
+
+The four classes were designed from a CI log and from experiments on a Linux host, and implementing them changed several of the conclusions.
+This section records only what the implementation measured that the section above did not, so where the two disagree this one is later.
+
+### The class map changed: `check_r1` is not class A
+
+`check_r1` was filed under class A, the errno wording. The wording was the smaller of two defects.
+
+The larger one is that **nono protects `$HOME/.ssh` of its own accord**, and neither platform's description asks it to: `jq '.filesystem.deny'` on the built profile is `null`, `jq '.filesystem | keys'` is `["allow","read"]`, and nothing under `lib/` names `.ssh`.
+So a key refused inside a session says nothing about the *project boundary* — a session with no boundary at all would refuse it too, which made the shipped arm potentially vacuous as a test of reach.
+
+The two platforms then disagree about what a grant does to that protection, measured on this Linux host against a fabricated home:
+
+| arm | Linux (Landlock) | macOS (Seatbelt), from the run-6 log |
+| --- | --- | --- |
+| shipped | refused, no `deny` row in the banner, trailer says no denials | refused |
+| `.ssh` granted | **the key reads out**, rc=0, banner shows `r …/.ssh (dir)` | refused, banner says `deny 1 sensitive path kept blocked inside your grants (-v to show)`, trailer marks it `[permanently restricted]` and points at `filesystem.bypass_protection` |
+
+`nono why` sides with macOS on both platforms: `{"status":"denied","reason":"filesystem_deny","policy_source":"filesystem.deny","details":"Path is covered by filesystem.deny rule: …/.ssh"}`, whether or not a grant exists.
+So the policy layer and the Linux boundary disagree with each other, which is a P9-shaped divergence worth a sentence in FR-11's tiers: on this path macOS is the more restrictive of the two.
+Binary string counts on the one Linux build, for the record: `bypass_protection` 18, `landlock` 17, `seatbelt` 15, `permanently restricted` 2, `protected_paths` 1, and `sensitive path kept blocked` **0** — the banner phrase macOS prints is not a literal in the Linux binary.
+
+The check now reads a **plain file beside the key**, denied by reach and by nothing else, and grants that file's directory in the positive-control arm.
+Each read reports its own status so neither hides behind a shared exit code, and the granted arm additionally asserts the key stays unreadable, which is what says the grant stayed as narrow as written.
+That assertion is what fails when the arm is pointed back at `$home/.ssh`, and it demonstrates the Linux half of the divergence in situ.
+
+### Class C — probing `$HOME` alone refuses a correct host
+
+The design above proposed probing `$HOME`. Implemented that way it refused this very host: a session **nested inside another sandbox** cannot read its own `$HOME` unconfined, so the positive control fails and the pre-flight exits 77 on a host whose confinement is enforced.
+The old code did not have this problem because it used `$XDG_RUNTIME_DIR`, which the outer session can read and no inner grant covers.
+
+So the landed pre-flight walks two candidates, `$XDG_RUNTIME_DIR` then `$HOME`, skipping any that cannot serve with its reason recorded, and refusing only when the list is exhausted.
+`$XDG_RUNTIME_DIR` is first both to stay away from the home directory and because it is what survives nesting; macOS sets it nowhere, so there `$HOME` carries the proof and the read is what keeps that harmless.
+
+Six arms were measured, each with no residue afterwards:
+
+| arm | outcome |
+| --- | --- |
+| runtime dir readable and ungranted | rc=0 |
+| **no `XDG_RUNTIME_DIR`, home readable and ungranted** — the macOS shape | rc=0 |
+| both candidates `chmod 000` | rc=77, both verdicts listed, one per line |
+| both unset | rc=77, but from assertion 1: nono itself refuses with `Environment variable 'HOME' validation failed: not set` |
+| runtime dir inside the project, home usable | rc=0 — the first is skipped, the second carries the proof |
+| runtime dir **granted** | rc=77, `the confined read was not refused` |
+
+Two nono behaviours bound the design and bear on `outside_root` and on M10a's question about fabricating a home:
+
+- Granting a directory that holds nono's own state root is refused before the sandbox starts — `Refusing to grant '…/home' (source: Profile) because it overlaps protected nono state root '…/home/.nono'.` This is emitted by `nono why` as well as by `nono run`, so a `why` query can fail for a reason unrelated to its path.
+- Pointing `HOME` **inside** the project makes nono refuse with `Landlock deny-overlap is not enforceable on Linux. Refusing to start with conflicting policy. 48 deny rule(s) cannot apply under an allowed parent directory.` So the guard against a project that is its own home states more clearly something nono already refuses on Linux.
+
+### A latent defect the rewrite exposed
+
+`:` is a POSIX **special builtin**, so a redirection failure on it exits a non-interactive shell outright rather than setting a status, and `2>/dev/null` is never installed because redirections apply left to right.
+The assertion the rewrite replaced was `sh -c ": > \"$canary\""`, which therefore **passed by reading the shell's own abort as the child's denial**.
+The subshell form `( : > … ) 2>/dev/null` is what actually observes the child.
+
+### Class A — a derived wording needs a control of its own
+
+`check_r2` lost its wording assertion outright, because controls 2 and 3 write that exact path successfully from outside the boundary and from inside a granted session.
+Planting a target whose parent never existed fails the check on control 2, which is where that failure belongs.
+
+`check_r8` keeps a wording, because FR-16 asks that an authentication failure and a confinement denial not read alike and a reader tells them apart by what they say.
+It measures the phrase from the host: one extra confined session reads a second file outside the project with the same program the probe uses, its stderr redirected into its own granted workdir so nono's capability table cannot be mistaken for a refusal, and the phrase is the text after the last `: `.
+
+The first implementation of that derivation had no control, and it was measured wrong: deleting the sample file made the derived phrase `No such file or directory`, and the check then failed **downstream** naming the wrong cause.
+So the derivation asserts the file is readable from outside the boundary first — with that control the same plant fails as `the file the denial wording is measured from is not readable outside the boundary, so the wording would not be a denial`.
+
+### Class B — a Linux `nono run` prints no trailer at all
+
+The section above records `No path denials were observed during this session.` as present on Linux. **That does not hold for a `nono run` session on this host.**
+A forced no-tracer run ends its stderr at `Applying sandbox...` with no trailer header and no such sentence.
+Two consequences: the darwin trailer branch cannot be smoke-tested by starting a session on Linux, which is why `check_trailer_parse` is a **unit** check over five recorded stderr fixtures; and `session_reported` is proven to bite by that very run, refusing to read silence as evidence.
+
+The completeness self-check was hardened from comparing the last header's count to **summing every header**, so a stderr carrying more than one trailer is checked as a whole.
+
+### The capability set is the wider observation, and it exposed what argv had hidden
+
+`check_j8_1` and `check_r9` both read the grant out of the wrapper's `execve` argv, a Landlock-only observation.
+Both now read it off the capability set every session prints to its own stderr, through the **existing** `granted_reach` and `reach_grants` helpers — no parser was written.
+Their vocabulary is wider than the design above assumed: `{r, w, x, r+w, net, +}`, and after whitespace squeezing a line is `<mode> <path> (dir)`, so no `(dir|file)` regex is needed.
+`check_r9` needs no tracer at all now; its wrapper-reached-the-mechanism control survives as the capability set being non-empty, since only a session that started prints one.
+
+Reading the wider set immediately failed `check_r9`'s self-referential arm with `+ 34 system/group paths` against `+ 33`, and the accusation — that deleting the host confinement description changed the session's reach — is **false**:
+
+- Under `-v`, both arms enumerate **163 paths, identical apart from each session's own `/proc/<pid>` entries**. `$HOME/.config/nono` appears in neither.
+- A direct two-arm `nono run` with and without `$HOME/.config/nono` gives byte-identical 132-line sets, both summarising `+ 33`.
+- `-v` prints no summary line at all, and its lines carry a `[group:<name>]` suffix the plain form omits.
+
+So the summary count moves for reasons unrelated to the declared reach, and a session's own pid differs on every run by construction.
+Both classes of line are dropped where the grant is recorded, with the measurement in a comment.
+The remaining hole is that a `+` path cannot be replayed, because there is no path to pass on — the argv reading had the same hole, so `check_r9`'s FR-21 arm asserts of a replay that was never granted the summarised floor.
+
+Three nono facilities were checked as better instruments and none serves:
+
+| facility | what it is | why not |
+| --- | --- | --- |
+| `--cap-file` / `NONO_CAP_FILE` | *input* — a fully-resolved capability manifest, mutually exclusive with every other sandbox flag | nono reads it, never writes it, and it cannot be combined with `--profile` |
+| `nono profile show --format manifest` | the capability manifest of a **description** | resolves a description, not a session |
+| `nono run --diagnostics-json` | session diagnostics as JSON on stderr after the run | the flag would have to be added to the **wrapper's** own invocation, not the check's; unmeasured |
+
+### Method notes
+
+The evaluator's `cannot open SQLite database … fetcher-cache-v4.sqlite` failure is **intermittent**, recurring within a minute of a successful `nix eval`.
+A check that hits it reports `the agent table has 0 entries and 0 commands`, its own anti-vacuity control firing on an unusable evaluator rather than the property failing, so the answer is to retry rather than to diagnose.
+It is what left `check_r9`'s `nohost` plant unrun across three attempts.
+
+The shell also fails heredocs with `can't create temp file for here document`, so a commit message goes to a file read back with `git commit -F`.
