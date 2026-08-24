@@ -18,11 +18,14 @@ The workflow is new in `M9`, so no run predates the feature and there is no gree
 | 2 | `4c362f8` | 23 of 33 failed, no session started |
 | 3 | `e189d82` | the same 23, plus the candidate-path probe's answers |
 | 4 | `518ed2d` | **11 of 33 failed, sessions start** |
-| 5 | `a8316ed` | the same 11, with tracing — every symptom quoted here is from this run |
+| 5 | `a8316ed` | the same 11, with tracing |
+| 6 | `413e849` | the same 11 again — every symptom quoted here is from this run |
 
 Run 1's cause is worth keeping because it is not this repository's bug: `cachix/install-nix-action@v27` installed nix 2.22.1, whose darwin installer assigns `_nixbld1` the UID 301 that macOS 15 reserves. Nix 2.24.7 moved the range to 351. The action is now pinned.
 
-`5e0f1ca` and `4dcd8c3` have not been run in CI, so run 5 remains the current state of the arm.
+Run 6 is the first run of the amended tracing commit, and its failing set is identical to run 5's, so the eleven are stable rather than drifting with each push.
+Five commits have landed against them since — `8983986`, `a1cd5f8`, `83c4825`, `f98d91e` and `c1d63b7` — and **none of them has been run in CI**, so every symptom below is still the last thing the runner said rather than the current state of the code.
+What each one changed is in [tasks.md](tasks.md) § M9e.
 
 ## Reproducing a confined session by hand
 
@@ -69,11 +72,12 @@ gh run view <id> --log > .tmp/verify.log       # both jobs, gitignored and denie
 
 ## The eleven failures
 
-Line numbers are from `scripts/checks/integration.sh` as of `4dcd8c3` and drift with every edit to that file — re-derive them rather than trusting them.
+Line numbers are from `scripts/checks/integration.sh` as of `413e849` and drift with every edit to that file — re-derive them rather than trusting them.
+The five commits listed above have since moved every one of them.
 
 | check | class | what the log shows | cause | reproducible on Linux |
 | --- | --- | --- | --- | --- |
-| `check_r1` | A | `DBG r1 shipped: EPERM wording present: 1` — the darwin wording was there and the assertion wanted the other one | asserts `Permission denied` at :525 | no — Landlock returns `EACCES` |
+| `check_r1` | its own | `DBG r1 shipped: EPERM wording present: 1`, **and** `the probe cannot read the key even when the boundary grants it (exit 1)` | asserts `Permission denied` at :525, and its granted arm requires a behaviour only Landlock has | the wording, no; the grant, **yes** — on Linux the grant wins and the key reads out |
 | `check_r2` | A | `DBG r2 shipped: uname=Darwin errno wording: Operation not permitted/` | asserts `Permission denied` at :651 | no |
 | `check_r8` | A | `cat: …/secret.txt: Operation not permitted`, beside its auth arm's `HTTP/1.1 401 Unauthorized` | asserts `Permission denied` at :2937 and :2941 | no |
 | `check_j2_1` | C | `the session changed the home directory outside the leak registry: …/agent-sandbox-j2_1.72kP4U/home`, with `DBG j2_1 home diff: 1c1` | the pre-flight's canary, `lib/preflight.sh:35` | **yes**, with `XDG_RUNTIME_DIR` unset |
@@ -92,6 +96,13 @@ Two failures deserve their diff rather than a summary, because the size column i
 `check_j2_1`'s home changed only in its own mtime — `1787564526.678024061` to `1787564531.437078681`, size 128 on both sides, with the fixture's `.claude` and its 26-byte `.claude.json` untouched.
 `check_j3_1`'s home is **empty** throughout and still reports as shared state, mtime `1787564580.359287508` to `1787564581.834609547`, size 64 both sides.
 A transient file created and removed inside a directory moves that directory's mtime and leaves nothing behind, which is exactly what the pre-flight canary does and why the two checks accuse a session that behaved.
+
+`check_r1` is the row the class map got wrong.
+Its wording assertion was the smaller of two defects: nono protects `$HOME/.ssh` of its own accord, so a key refused inside a session said nothing about the project boundary, and the granted arm asserting that the key becomes readable when granted encodes Landlock's answer as the requirement — macOS keeps it `[permanently restricted]` and cannot pass.
+Deleting the wording assertion alone would therefore have left the check red.
+
+One symptom in run 6 is an artifact of the debug instrumentation rather than a defect: `check_j3_1`'s second message, `expected one session record per concurrent agent session, found 3`, is the temporary third session the tracing block starts before the record scan.
+Removing the instrumentation removes it.
 
 ## The instruments, per platform
 
@@ -131,9 +142,14 @@ The banner, with `--read`, `--allow` and `--write` given three different paths:
 - **A positive read observation on darwin at all.** `dtruss` needs SIP disabled and `fs_usage` needs root, neither available to a CI runner or acceptable to ask of a user.
 - **Piping the captures through an unconfined reader.** Landlock does not re-check an already-open descriptor, so a Linux run proves nothing about whether bun resolves a pipe's path at startup on darwin. Unverifiable from here, and the project-subdirectory alternative is already supported by the run's own trailers.
 - **`nix build .#nono.src`.** It fails in this environment; read the binary instead.
+- **`NONO_CAP_FILE` as a capability-set instrument.** `--cap-file` is an *input* nono reads, a fully-resolved specification mutually exclusive with `--profile`, not an output it writes.
+- **`nono profile show --format manifest` for what a session was granted.** It resolves a description, not a session.
 
 ## Risks still open
 
-- Run 5 is two commits behind `HEAD`, so the eleven are the failures of `a8316ed` and not necessarily of what is now on `main`.
+- None of the five fixes has been run in CI, so the arm's real state is unknown until the next push. Run 6 is the last measurement, and it predates all of them.
+- `check_r9`'s `nohost` plant is unrun, so the one assertion that compares two sessions' capability sets is unproven. Three attempts were defeated by an intermittent `cannot open SQLite database … fetcher-cache-v4.sqlite`, which leaves a check reporting its own anti-vacuity control rather than the planted failure.
+- Class D is not implemented, so `check_opencode` and `check_pi` will fail again exactly as they did.
 - `outside_root` is only as good as its three-candidate list, and its last candidate writes under the real home. `M10a` carries this.
+- The `+`-summarised group paths are never passed on to `check_r9`'s replayed session, so the FR-21 arm asserts unreadability of a session that was never granted them. Reading the grant off argv had the same hole, so this is inherited rather than introduced.
 - The cross-platform reach comparison job has never run, because it is gated on both platform jobs passing. Whatever it finds will be found for the first time after these eleven are fixed.
