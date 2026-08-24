@@ -158,18 +158,20 @@ reach_grants() {
 
 # R6 — a host that cannot enforce confinement refuses, naming the primitive.
 #
-# Four arms, because an exit status of 77 on its own does not say what earned
+# Five arms, because an exit status of 77 on its own does not say what earned
 # it. The control arm runs the real pre-flight on this machine and must exit 0,
 # so a pre-flight that refused every host could not pass. The plant arm puts a
 # passthrough `nono` earlier on PATH — present, accepting the same arguments,
 # enforcing nothing — which is what an unenforceable host looks like from the
 # pre-flight's side, and must produce 77 and the primitive. The third arm takes
-# away the positive control's writable location, which the first two leave
-# untested. The fourth asserts the working-directory consent on every confined
-# child the pre-flight starts, because without it the pre-flight hangs for a
-# human and passes for this suite.
+# away the positive control, which the first two leave untested. The fourth
+# grants the location the pre-flight probes, which is the one way a working
+# boundary can look broken, and the arm exists because the pre-flight used to
+# call that case a violation. The fifth asserts the working-directory consent on
+# every confined child the pre-flight starts, because without it the pre-flight
+# hangs for a human and passes for this suite.
 check_r6() {
-	local preflight tmp outside state profile pinned rc out unwritable logged consenting found=0
+	local preflight tmp outside state profile pinned rc out unreadable granted logged consenting found=0
 	local -a SESSION_ENV
 	preflight="$REPO_ROOT/lib/preflight.sh"
 
@@ -201,7 +203,7 @@ check_r6() {
 	fi
 
 	# The plant. A passthrough nono runs the child with nothing applied, so the
-	# canary write succeeds and the pre-flight must refuse.
+	# probe reads and writes freely and the pre-flight must refuse.
 	cat >"$tmp/nono" <<-'STUB'
 		#!/usr/bin/env bash
 		# Accept `run --profile P --workdir W [--allow-cwd] -- cmd...` and exec cmd.
@@ -226,41 +228,97 @@ check_r6() {
 		found=1
 		fail "$(printf 'the refusal does not name the missing primitive:\n%s' "$out")"
 	fi
+	# The refusal carries a verdict per location tried, so it says which way the
+	# host failed rather than only that it did. Without this, a pre-flight that
+	# lost the probe entirely and refused every host would still satisfy the
+	# assertions above.
+	if ! printf '%s' "$out" | grep -q 'was not refused'; then
+		found=1
+		fail "$(printf 'the refusal does not say the probe went through:\n%s' "$out")"
+	fi
 
 	# The third arm covers the positive control itself. Arms one and two both
-	# leave assertion 2 untested, because the canary location happens to be
-	# writable on this machine — so deleting that assertion would go unnoticed.
-	# A host offering nowhere to write the canary cannot demonstrate
-	# enforcement, and must refuse rather than report success (D5).
+	# leave it untested, because every location the pre-flight probes happens to
+	# be readable on this machine — so deleting that assertion would go
+	# unnoticed. A host where no location outside the project can be read
+	# unconfined cannot demonstrate enforcement, because a denial there would be
+	# indistinguishable from the same refusal without a boundary, and it must
+	# refuse rather than report success (D5).
 	#
-	# The unwritable location is outside the project, which the arm originally
-	# was not. nono derives its dotfile deny rules from $HOME, so a $HOME inside
-	# a granted project makes every one of them overlap an allowed parent and
-	# nono refuses to start at all — assertion 1, not the assertion 2 this arm
-	# exists for. That went unnoticed while the pre-flight granted no project.
-	# A host's home directory is not inside the checkout anyway, so this is the
-	# more faithful arrangement as well as the working one.
-	unwritable="$outside/unwritable"
-	mkdir -p "$unwritable"
-	chmod 500 "$unwritable"
+	# Both locations the pre-flight tries are pointed at the unreadable one, so
+	# neither can carry the proof and the refusal has to list both. They are
+	# outside the project, which the arm originally was not. nono derives its
+	# dotfile deny rules from $HOME, so a $HOME inside a granted project makes
+	# every one of them overlap an allowed parent and nono refuses to start at
+	# all — assertion 1, not the positive control this arm exists for. That went
+	# unnoticed while the pre-flight granted no project. A host's home directory
+	# is not inside the checkout anyway, so this is the more faithful
+	# arrangement as well as the working one.
+	unreadable="$outside/unreadable"
+	mkdir -p "$unreadable"
+	chmod 000 "$unreadable"
 	# Supersedes the RETURN trap set above, and repeats its removals because
 	# bash keeps one trap per signal rather than a list. The chmod comes first:
-	# `rm -rf` cannot empty a directory it may not write to.
+	# `rm -rf` cannot descend into a directory it may not read.
 	# shellcheck disable=SC2064
-	trap "chmod 700 '$unwritable'; rm -rf '$tmp' '$outside'" RETURN
+	trap "chmod 700 '$unreadable'; rm -rf '$tmp' '$outside'" RETURN
 	out=$(cd "$REPO_ROOT" && env "${SESSION_ENV[@]}" PATH="$pinned:$PATH" \
-		XDG_RUNTIME_DIR="$unwritable" HOME="$unwritable" PREFLIGHT_PROFILE="$profile" \
+		XDG_RUNTIME_DIR="$unreadable" HOME="$unreadable" PREFLIGHT_PROFILE="$profile" \
 		bash -c "source '$preflight'; preflight_or_die" 2>&1) && rc=0 || rc=$?
 	if [ "$rc" -ne 77 ]; then
 		found=1
-		fail "$(printf 'a host with nowhere to write the canary was not refused with 77: exit %s\n%s' "$rc" "$out")"
+		fail "$(printf 'a host with no positive control was not refused with 77: exit %s\n%s' "$rc" "$out")"
 	fi
 	if ! printf '%s' "$out" | grep -q 'cannot verify confinement'; then
 		found=1
-		fail "$(printf 'the refusal does not say the canary was unwritable:\n%s' "$out")"
+		fail "$(printf 'the refusal does not say confinement could not be verified:\n%s' "$out")"
+	fi
+	if ! printf '%s' "$out" | grep -q 'not readable from here'; then
+		found=1
+		fail "$(printf 'the refusal does not say why the location could not serve:\n%s' "$out")"
 	fi
 
-	# The fourth arm covers what no other arm here can reach: the pre-flight on
+	# The fourth arm is the case the pre-flight used to get backwards. Where
+	# something grants the location being probed, the probe reads it and the
+	# boundary is working exactly as asked — the observation is void, not
+	# violated. The canary this replaced called that "a confined process wrote
+	# outside the project", accusing a correctly confined session, and no arm
+	# noticed because on this machine nothing grants that location.
+	#
+	# The grant goes on the profile rather than the command line, so the
+	# pre-flight's own invocation is what carries it, and it goes on the
+	# XDG_RUNTIME_DIR candidate rather than $HOME because nono refuses to grant
+	# a directory holding its own state root, which $HOME does.
+	#
+	# $HOME keeps arm three's unreadable directory, so the pre-flight runs out
+	# of locations instead of falling through to a home that would demonstrate
+	# enforcement honestly and hide what this arm is about. That the granted
+	# location is reported at all is the assertion; the host's real home would
+	# make it a passing run with an unread verdict.
+	granted="$outside/granted"
+	mkdir -p "$granted"
+	jq --arg d "$granted" '.filesystem.read += [$d]' "$profile" >"$tmp/granted.json"
+	out=$(cd "$REPO_ROOT" && env "${SESSION_ENV[@]}" PATH="$pinned:$PATH" \
+		XDG_RUNTIME_DIR="$granted" HOME="$unreadable" PREFLIGHT_PROFILE="$tmp/granted.json" \
+		bash -c "source '$preflight'; preflight_or_die" 2>&1) && rc=0 || rc=$?
+	if [ "$rc" -ne 77 ]; then
+		found=1
+		fail "$(printf 'a granted probe location did not refuse with 77: exit %s\n%s' "$rc" "$out")"
+	fi
+	if ! printf '%s' "$out" | grep -q 'cannot verify confinement'; then
+		found=1
+		fail "$(printf 'a granted probe location was reported as a boundary failure rather than an unusable observation:\n%s' "$out")"
+	fi
+	if ! printf '%s' "$out" | grep -q 'the confined read was not refused'; then
+		found=1
+		fail "$(printf 'the refusal does not name the granted location as the one that answered:\n%s' "$out")"
+	fi
+	if printf '%s' "$out" | grep -q 'confinement is not enforced'; then
+		found=1
+		fail "$(printf 'the pre-flight accused a session that was confined as asked:\n%s' "$out")"
+	fi
+
+	# The fifth arm covers what no other arm here can reach: the pre-flight on
 	# a terminal. `--allow-cwd` is the working-directory consent, and a
 	# `nono run` without it *asks* — on stdin, in a message the pre-flight sends
 	# to /dev/null with everything else. An interactive user got a cursor and no
