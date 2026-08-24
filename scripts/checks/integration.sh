@@ -126,6 +126,56 @@ trace_denials() {
 	}' "$trace" | sort -u
 }
 
+# Whether nono reported on the denials of a session at all.
+#
+# The supervisor closes every session with either a count of what it blocked or
+# a line saying it blocked nothing, so this is the trailer's answer to the
+# question a syscall trace answers by existing: was anything watching. Without
+# it, an empty denial set is silence rather than evidence.
+session_reported() {
+	local err=$1
+	grep -qaE '[0-9]+ paths? blocked|No path denials were observed' "$err"
+}
+
+# The paths a session was refused, one `<path> (<mode>)` per line, sorted.
+#
+# Landlock tells nono nothing about what it blocked, so on Linux this is always
+# empty and a syscall trace is the instrument. Seatbelt reports every refusal to
+# it, so on macOS this is the only instrument there is — no tracer runs there
+# without SIP disabled or root.
+#
+# The header's own count is asserted against the number of lines parsed, and a
+# disagreement is reported in the set itself. A trailer that summarised instead
+# of enumerating would otherwise read as a short list of denials rather than as
+# an unknown one, which is the silent pass P9 forbids.
+session_denials() {
+	local err=$1
+	awk '
+		/[0-9]+ paths? blocked/ {
+			for (i = 1; i <= NF; i++) if ($i ~ /^[0-9]+$/) { want += $i; counted = 1; break }
+			inside = 1
+			next
+		}
+		inside && /^[[:space:]]+.+ \((read|write|execute)\)/ {
+			line = $0
+			sub(/^[[:space:]]+/, "", line)
+			sub(/[[:space:]]*\[[^]]*\][[:space:]]*$/, "", line)
+			print line
+			seen++
+			next
+		}
+		inside && /^[[:space:]]*$/ { next }
+		inside { inside = 0 }
+		END {
+			# Summed rather than taken from the last header, so a stderr
+			# carrying more than one trailer is checked as a whole.
+			if (counted && want + 0 != seen + 0) {
+				printf "the trailer counts %s blocked path(s) and enumerates %s\n", want + 0, seen + 0
+			}
+		}
+	' "$err" | sort
+}
+
 # The capability set a session was started with, one grant per line, sorted.
 #
 # nono prints it to stderr before the program runs, so a session's whole
@@ -3582,14 +3632,17 @@ check_j6_1() {
 # (D11), so a check that planted it there would watch the commit succeed and
 # report a refusal it never provoked.
 #
-# Sets ARMS_PROJ to the project the session ran in, and leaves the session's
-# own report in $outside/probe.out.
+# Sets ARMS_PROJ to the project the session ran in, ARMS_TRACE to the syscall
+# trace where the platform has a tracer and empty where it has none, and
+# ARMS_NOISE to the trailer of a session that made no commit. Leaves the
+# session's own report in $outside/probe.out and its stderr, nono's trailer
+# included, in $outside/probe.err.
 commit_session() {
 	local outside=$1
 	local agent=claude-code binary=claude
 	local entry home proj cfg gitdir git strace rc
 	local FIXTURE_PROFILE FIXTURE_SUBSTRATE FIXTURE_BASH
-	local -a SESSION_ENV
+	local -a SESSION_ENV traced
 
 	entry=$(pinned_bin "$binary")
 	session_fixture "$agent" || return 1
@@ -3598,10 +3651,12 @@ commit_session() {
 		return 1
 	}
 	git="$gitdir/bin/git"
-	strace=$(substrate_member "$FIXTURE_SUBSTRATE" strace) || {
-		fail "the substrate for $agent provides no strace, so what the commit reached for cannot be observed"
-		return 1
-	}
+
+	# A tracer where the platform has one. Its absence is not a failure here:
+	# R11 reads only what the probe reports, and Journey 6.2 has nono's own
+	# supervisor to fall back on, so a helper that refused without strace failed
+	# both checks on macOS over an instrument only one of them uses.
+	strace=$(substrate_member "$FIXTURE_SUBSTRATE" strace) || strace=
 
 	# A sibling of the fake home rather than a directory inside it: the
 	# description carries $HOME-relative deny rules, and nono refuses to start
@@ -3628,14 +3683,12 @@ commit_session() {
 	cat >"$proj/probe.sh" <<-'PROBE'
 		git=$1
 		work=$2
-		strace=$3
 
 		cd "$work/plain" || exit 1
 		"$git" init -q .
 		printf 'a\n' >f
 		"$git" add f
-		"$strace/bin/strace" -f -e trace=openat -o "$work/plain.trace" \
-			"$git" commit -m "an ordinary commit" >"$work/plain.log" 2>&1
+		"$git" commit -m "an ordinary commit" >"$work/plain.log" 2>&1
 		printf 'PLAIN_RC :: %s\n' "$?"
 		"$git" config --get commit.gpgsign >"$work/plain.gpgsign" 2>&1
 		printf 'PLAIN_DEMAND_RC :: %s\n' "$?"
@@ -3654,10 +3707,29 @@ commit_session() {
 		printf 'DEMAND_OBJECTS :: %s\n' "$("$git" rev-list --count --all 2>/dev/null)"
 	PROBE
 
+	# The tracer wraps the whole session rather than the one commit inside it, so
+	# that what it observes is the span nono's trailer observes where there is no
+	# tracer: everything the session did, both commits included.
+	traced=()
+	if [ -n "$strace" ]; then
+		traced=("$strace/bin/strace" -f -e trace=openat -o "$proj/session.trace")
+	else
+		# The noise floor, for the platform whose supervisor is the instrument.
+		# macOS refuses a handful of paths to every process there is, the
+		# text-encoding file each CoreFoundation program opens among them, and a
+		# session measured against zero would be failed by its platform rather
+		# than by its own reach. Same profile, same home, and git rather than
+		# `true` so that git's own startup is inside the floor — but no commit.
+		env "${SESSION_ENV[@]}" "HOME=$home" \
+			"$(pinned_bin nono)/nono" run \
+			--profile "$FIXTURE_PROFILE" --workdir "$proj" --allow-cwd -- \
+			"$git" --version >/dev/null 2>"$outside/noise.err" || :
+	fi
+
 	env "${SESSION_ENV[@]}" "HOME=$home" \
 		"$(pinned_bin nono)/nono" run \
 		--profile "$FIXTURE_PROFILE" --workdir "$proj" --allow-cwd -- \
-		"$FIXTURE_BASH/bin/bash" "$proj/probe.sh" "$git" "$proj" "$strace" \
+		"${traced[@]}" "$FIXTURE_BASH/bin/bash" "$proj/probe.sh" "$git" "$proj" \
 		>"$outside/probe.out" 2>"$outside/probe.err" && rc=0 || rc=$?
 
 	# The last line the probe writes. A session that died halfway would
@@ -3669,26 +3741,34 @@ commit_session() {
 	fi
 
 	ARMS_PROJ=$proj
+	ARMS_TRACE=${strace:+$proj/session.trace}
+	ARMS_NOISE="$outside/noise.err"
 }
 
 # Journey 6.2 — a commit made inside a session succeeds, carries no signature,
 # and reaches for nothing it is refused.
 #
 # The third Then is asserted as the absence of a denial rather than as a list
-# of files, and under Landlock that is the whole of it: a read outside the
-# session's reach cannot succeed, so the only way producing the commit could
-# have depended on one is by being refused. An empty denial set is therefore
-# the statement that the commit needed nothing from outside — and it is not
-# vacuous, because the demand arm in the same session is a commit that does
-# reach outside and is refused for it.
+# of files: a read outside the session's reach cannot succeed, so the only way
+# producing the commit could have depended on one is by being refused. An empty
+# denial set is therefore the statement that the commit needed nothing from
+# outside — and it is not vacuous, because the commit in the same session
+# succeeded, which a session denied what it needed could not have managed.
+#
+# Which instrument answers that is the platform's to decide, and this is the
+# one place the two are named. Landlock tells nono nothing about what it
+# blocked, so on Linux the observable is a syscall trace. Seatbelt reports
+# every refusal to it, and no tracer runs on macOS without SIP disabled or
+# root, so there the observable is nono's own trailer, measured against the
+# floor a session that made no commit was refused.
 #
 # FR-24's default is asserted against the configuration this environment wrote
 # and not only against the object: a session that happened to commit unsigned
 # because it had no key would pass on the object alone.
 check_j6_2() {
 	local outside out proj found=0
-	local ARMS_PROJ
-	local head sig status denials
+	local ARMS_PROJ ARMS_TRACE ARMS_NOISE
+	local head sig status denials=''
 
 	outside=$(outside_root j6_2) || return 1
 	# shellcheck disable=SC2064
@@ -3727,15 +3807,28 @@ check_j6_2() {
 			"$(cat "$proj/plain.gpgsign" 2>/dev/null)")"
 	fi
 
-	if [ ! -s "$proj/plain.trace" ]; then
-		found=1
-		fail "the commit was not observed at all, so an empty set of denials would mean nothing"
-	else
-		denials=$(trace_denials "$proj/plain.trace")
-		if [ -n "$denials" ]; then
+	# One claim, whichever instrument the platform has. Each arm carries its own
+	# answer to "was anything watching", because an empty denial set from an
+	# instrument that never ran is silence dressed as evidence.
+	if [ -n "$ARMS_TRACE" ]; then
+		if [ ! -s "$ARMS_TRACE" ]; then
 			found=1
-			fail "$(printf 'producing the commit reached for something outside the session:\n%s' "$denials")"
+			fail 'the session was not traced at all, so an empty set of denials would mean nothing'
+		else
+			denials=$(trace_denials "$ARMS_TRACE")
 		fi
+	elif ! session_reported "$outside/probe.err"; then
+		found=1
+		fail "$(printf 'nono said nothing about what the session was refused, so an empty set of denials would mean nothing:\n%s' \
+			"$(tail -20 "$outside/probe.err")")"
+	else
+		denials=$(session_denials "$outside/probe.err" |
+			{ grep -vxF -f <(session_denials "$ARMS_NOISE") || true; })
+	fi
+
+	if [ -n "$denials" ]; then
+		found=1
+		fail "$(printf 'producing the commits reached for something outside the session:\n%s' "$denials")"
 	fi
 
 	# Control. The same session is refused when the checkout's own
@@ -3759,7 +3852,7 @@ check_j6_2() {
 # case FR-24 configures away, and it is not this one.
 check_r11() {
 	local outside out proj found=0
-	local ARMS_PROJ
+	local ARMS_PROJ ARMS_TRACE ARMS_NOISE
 	local objects head message
 
 	outside=$(outside_root r11) || return 1

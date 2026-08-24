@@ -272,6 +272,126 @@ check_registry() {
 	[ "$found" -eq 0 ]
 }
 
+# The parser that reads nono's closing report, against recorded output.
+#
+# On macOS that report is the only instrument there is for what a session was
+# refused: Seatbelt tells nono every denial, while no tracer runs there without
+# SIP disabled or root. On Linux it is the other way around — Landlock tells
+# nono nothing, and a session here prints no trailer at all, which is why the
+# parser cannot be exercised by starting a session on the platform that can run
+# this suite unattended. So it is exercised against output recorded from a
+# macOS runner instead, which keeps the darwin-only branch of `check_j6_2`
+# falsifiable from either platform rather than only from the one that breaks.
+#
+# The fixtures are quoted verbatim, and here that is the point rather than a
+# shortcut: the criterion is the exact text a macOS session emits, so a change
+# in nono's wording must fail this check rather than be absorbed by it.
+check_trailer_parse() {
+	local dir found=0 out
+	dir="$REPO_ROOT/.tmp/trailer"
+	rm -rf "$dir"
+	mkdir -p "$dir"
+	# shellcheck disable=SC2064
+	trap "rm -rf '$dir'" RETURN
+
+	# A session that was refused two paths, as a macOS runner reported it.
+	cat >"$dir/blocked.err" <<-'EOF'
+		  Sandbox denial: 2 paths blocked.
+		    /Users/runner/.CFUserTextEncoding (read)
+		    /Users/runner/work/_temp/agent-sandbox-r1.tdM7xE/home/.ssh/id_ed25519 (read)  [permanently restricted]
+		  Fix flags: --read-file /Users/runner/.CFUserTextEncoding
+
+		  1 path is permanently restricted — override via a user profile with filesystem.bypass_protection.
+	EOF
+
+	# The same session, refused nothing.
+	cat >"$dir/clean.err" <<-'EOF'
+		  No path denials were observed during this session.
+	EOF
+
+	# A session on a host whose enforcement reports nothing, which is this
+	# Linux. Recorded from a real session, banner and all, cut to its tail.
+	cat >"$dir/silent.err" <<-'EOF'
+		    r+w  /home/runner/work/agent-sandbox (dir)
+		  ────────────────────────────────────────
+		  mode supervised (proxy, supervisor)
+		  Applying sandbox...
+	EOF
+
+	# What a session that did nothing was refused anyway: the noise floor a
+	# macOS runner reports to every process, which `commit_session` measures
+	# with a session of its own so it can be subtracted.
+	cat >"$dir/floor.err" <<-'EOF'
+		  Sandbox denial: 1 path blocked.
+		    /Users/runner/.CFUserTextEncoding (read)
+	EOF
+
+	# A trailer that counted more than it named. No runner has produced one;
+	# it is the shape a summarising trailer would take, and the parser must
+	# not read it as a short list of denials.
+	cat >"$dir/short.err" <<-'EOF'
+		  Sandbox denial: 8 paths blocked.
+		    /Users/runner/.CFUserTextEncoding (read)
+		    /Users/runner/work/_temp/scratch/paths.out (read)
+	EOF
+
+	# 1. Whether anything was watching, which is what the trailer answers and
+	#    silence does not. The clean and blocked cases are the positive
+	#    controls: without them, a recogniser that never matched would pass on
+	#    the silent case alone.
+	if ! session_reported "$dir/blocked.err"; then
+		printf 'a trailer naming two blocked paths was not recognised as a report\n'
+		found=1
+	fi
+	if ! session_reported "$dir/clean.err"; then
+		printf 'a trailer saying nothing was blocked was not recognised as a report\n'
+		found=1
+	fi
+	if session_reported "$dir/silent.err"; then
+		printf 'a session that reported nothing was read as having reported\n'
+		found=1
+	fi
+
+	# 2. The paths, the modes, and neither the marker nor the fix flags.
+	out=$(session_denials "$dir/blocked.err")
+	local expected
+	expected=$(
+		printf '%s\n' \
+			'/Users/runner/.CFUserTextEncoding (read)' \
+			'/Users/runner/work/_temp/agent-sandbox-r1.tdM7xE/home/.ssh/id_ed25519 (read)' | sort
+	)
+	if [ "$out" != "$expected" ]; then
+		printf 'the trailer parsed to something other than the paths it named\nwanted:\n%s\ngot:\n%s\n' \
+			"$expected" "$out"
+		found=1
+	fi
+
+	# 3. Nothing blocked parses to nothing, so an emptiness assertion can hold.
+	if [ -n "$(session_denials "$dir/clean.err")" ]; then
+		printf 'a session refused nothing parsed to a non-empty denial set\n'
+		found=1
+	fi
+
+	# 4. A count that disagrees with the enumeration is reported in the set, so
+	#    a caller asserting emptiness fails rather than reading a short list.
+	out=$(session_denials "$dir/short.err")
+	if ! printf '%s' "$out" | grep -qF 'counts 8 blocked path(s) and enumerates 2'; then
+		printf 'a trailer that counted more paths than it named did not say so:\n%s\n' "$out"
+		found=1
+	fi
+
+	# 5. The arithmetic `check_j6_2` does on macOS: a path refused to every
+	#    process there cancels against the floor, and a real denial survives.
+	out=$(session_denials "$dir/blocked.err" |
+		{ grep -vxF -f <(session_denials "$dir/floor.err") || true; })
+	if [ "$out" != '/Users/runner/work/_temp/agent-sandbox-r1.tdM7xE/home/.ssh/id_ed25519 (read)' ]; then
+		printf 'subtracting the ambient floor did not leave the session own denial:\n%s\n' "$out"
+		found=1
+	fi
+
+	[ "$found" -eq 0 ]
+}
+
 # Every refusal check, and whether its own body carries a control marker.
 # Emits "<check>\t<file>\t<0|1>", one row per check_r* found in any layer.
 #
