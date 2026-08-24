@@ -57,17 +57,38 @@ substrate_member() {
 	return 1
 }
 
-# TEMPORARY (M9d iteration 2). Which tracer the substrate carries, if any.
-# Four checks call `fail` when there is no strace, and strace is added to the
-# session tools under `lib.optionals isLinux`, so on macOS they fail for want of
-# an instrument rather than for want of the property they assert. This says
-# whether any other tracer is there to reach for.
-dbg_tracers() {
-	local substrate=$1 tracer found
-	for tracer in strace ltrace dtruss ktrace dtrace sc_usage fs_usage; do
-		found=$(substrate_member "$substrate" "$tracer") || found=absent
-		dbg "substrate tracer $tracer: $found"
-	done
+# TEMPORARY (M9d iteration 3). What appears in a fabricated home while sessions
+# run against it. The macOS run reported the home directory's own line differing
+# in modification time alone, with its size and every child identical, so
+# something was created and removed inside the window rather than left behind.
+# A poller beside the session names it; a directory listing afterwards cannot.
+#
+# The poller is started before the first session and stopped before the
+# comparison, and its findings are printed by `dbg_watch_stop`, which the driver
+# shows only when the check fails.
+dbg_watch_start() {
+	local dir=$1 seen=$2
+	: >"$seen"
+	# Both streams are closed in the child, and the reason is measured: the
+	# caller reads this function through a command substitution, and a
+	# background process holding that pipe open keeps the substitution waiting
+	# for an EOF that never comes. The first draft hung the whole check.
+	(
+		while :; do
+			ls -A "$dir" >>"$seen" 2>/dev/null
+			# Fractional sleep where the platform has one, a tight loop where
+			# it does not: an unsupported argument must not print per pass.
+			sleep 0.02 2>/dev/null || :
+		done
+	) >/dev/null 2>&1 &
+	printf '%s\n' "$!"
+}
+
+dbg_watch_stop() {
+	local label=$1 pid=$2 seen=$3 dir=$4
+	{ kill "$pid" && wait "$pid"; } 2>/dev/null || true
+	dbg "$label: entries ever seen: $(sort -u "$seen" | tr '\n' ' ')"
+	dbg "$label: entries now: $(find "$dir" -mindepth 1 -maxdepth 1 -printf '%f ')"
 }
 
 # Everything a check needs before it can run a probe inside a session: the
@@ -471,20 +492,6 @@ check_r1() {
 			--profile "$description" --workdir "$REPO_ROOT" --allow-cwd -- \
 			"$FIXTURE_BASH/bin/bash" "$probe" "$key" "$inside" 2>&1) && rc=0 || rc=$?
 
-		# TEMPORARY (M9d iteration 2). Which errno wording the platform's
-		# enforcement produces, and whether nono's own audit ledger recorded
-		# the refusal — the ledger is the only candidate instrument that exists
-		# on both platforms, and four checks currently need strace, which the
-		# substrate carries on Linux only.
-		dbg "r1 $arm: uname=$(uname -s) rc=$rc"
-		dbg "r1 $arm: errno wording: $(printf '%s' "$out" |
-			grep -oE 'Permission denied|Operation not permitted' | sort -u | tr '\n' '/')"
-		dbg "r1 $arm: supervisor denial lines: $(printf '%s' "$out" |
-			grep -c 'Sandbox denial')"
-		dbg "r1 $arm: ledger records: $(wc -l <"$outside/state/nono/audit/ledger.ndjson")"
-		dbg "r1 $arm: last ledger record: $(tail -1 "$outside/state/nono/audit/ledger.ndjson" |
-			cut -c1-800)"
-
 		# The in-project read is asserted in both arms: it is what says the
 		# session started and the probe ran, and the granted arm needs that
 		# said as much as the shipped one.
@@ -519,11 +526,6 @@ check_r1() {
 			found=1
 			fail "$(printf 'the read did not fail on permission, so the key may simply not have been there:\n%s' "$out")"
 		fi
-		# TEMPORARY (M9d iteration 2): the same question asked of the other
-		# errno, so the report distinguishes "the denial reads differently" from
-		# "there was no denial".
-		dbg "r1 $arm: EPERM wording present: $(printf '%s' "$out" |
-			grep -c 'Operation not permitted')"
 	done
 
 	[ "$found" -eq 0 ]
@@ -650,9 +652,6 @@ check_r2() {
 			found=1
 			fail "$(printf 'the write did not fail on permission, so the target may simply not have been there:\n%s' "$out")"
 		fi
-		# TEMPORARY (M9d iteration 2).
-		dbg "r2 $arm: uname=$(uname -s) errno wording: $(printf '%s' "$out" |
-			grep -oE 'Permission denied|Operation not permitted|Read-only file system' | sort -u | tr '\n' '/')"
 		# The half of the scenario the session cannot be asked about.
 		if [ -e "$target" ]; then
 			found=1
@@ -1784,6 +1783,8 @@ check_j2_1() {
 	local agent=claude-code binary=claude
 	local entry outside home proj cfg state probe project registry rc
 	local root want got write entry_path covered found=0
+	# TEMPORARY (M9d iteration 3).
+	local watcher before_t after_t
 	local -a landed=() roots=() changed=() spawned=()
 
 	session_fixture "$agent" || return 1
@@ -1818,6 +1819,14 @@ check_j2_1() {
 	# Every path, not only files, so a directory the session creates and leaves
 	# empty counts too.
 	find "$home" -printf '%p\t%s\t%T@\n' | sort >"$outside/before"
+
+	# TEMPORARY (M9d iteration 3). Started before the first session, stopped
+	# before the comparison below. The trap is replaced rather than added to,
+	# so a check that returns early on one of the arms above still takes the
+	# poller with it.
+	watcher=$(dbg_watch_start "$home" "$outside/seen")
+	# shellcheck disable=SC2064
+	trap "{ kill $watcher; } 2>/dev/null; rm -rf '$outside'" RETURN
 
 	env "${SESSION_ENV[@]}" "HOME=$home" "XDG_CONFIG_HOME=$cfg" \
 		env -C "$proj" "$entry/$binary" plugin list \
@@ -1893,6 +1902,9 @@ check_j2_1() {
 	# entry added later relaxes this comparison by exactly what it declares and
 	# by nothing else. $HOME is expanded because an entry names the variable
 	# while the diff carries the resolved path.
+	# TEMPORARY (M9d iteration 3).
+	dbg_watch_stop "j2_1 home" "$watcher" "$outside/seen" "$home"
+
 	find "$home" -printf '%p\t%s\t%T@\n' | sort >"$outside/after"
 	registry=$(nix eval --json "$REPO_ROOT#leakRegistry" \
 		--apply "es: builtins.filter (e: builtins.elem \"$agent\" e.agents) es" |
@@ -1927,6 +1939,28 @@ check_j2_1() {
 		while IFS= read -r line; do
 			dbg "j2_1 home now: $line"
 		done < <(find "$home" -maxdepth 1 -printf '%y\t%p\t%s\t%T@\n' | sort)
+
+		# TEMPORARY (M9d iteration 3). The hypothesis, put to the run rather
+		# than reasoned about: lib/preflight.sh writes its positive-control
+		# canary to `${XDG_RUNTIME_DIR:-$HOME}`, and every agent entry point
+		# runs that pre-flight. Where XDG_RUNTIME_DIR is unset — the macOS
+		# runner, not the Linux one — the canary is created and removed inside
+		# this fabricated home, which moves the directory's own modification
+		# time and returns its size to where it started. So the same session is
+		# run once more with that variable pointing somewhere else: a home
+		# whose time stops moving confirms the canary, and one that moves
+		# anyway refutes it.
+		dbg "j2_1 XDG_RUNTIME_DIR as the check saw it: ${XDG_RUNTIME_DIR:-<unset>}"
+		mkdir -p "$outside/run"
+		before_t=$(find "$home" -maxdepth 0 -printf '%s\t%T@\n')
+		env "${SESSION_ENV[@]}" "HOME=$home" "XDG_CONFIG_HOME=$cfg" \
+			"XDG_RUNTIME_DIR=$outside/run" \
+			env -C "$proj" "$entry/$binary" plugin list \
+			>"$outside/rerun.out" 2>"$outside/rerun.err" || true
+		after_t=$(find "$home" -maxdepth 0 -printf '%s\t%T@\n')
+		dbg "j2_1 with XDG_RUNTIME_DIR set: $before_t -> $after_t"
+		dbg "j2_1 with XDG_RUNTIME_DIR set: it now holds: $(find "$outside/run" -mindepth 1 -printf '%f ')"
+
 		fail "$(printf 'the session changed the home directory outside the leak registry:\n%s' \
 			"$(printf '%s\n' "${changed[@]}")")"
 	fi
@@ -2040,6 +2074,8 @@ check_j3_1() {
 	local agent=claude-code binary=claude
 	local entry outside work home cfg state probe registry rc_a rc_b
 	local name other root canary_a canary_b entry_path covered record seen found=0
+	# TEMPORARY (M9d iteration 3).
+	local watcher before_t after_t
 	local -a landed=() changed=() records=() reached=()
 	local -A projects=()
 
@@ -2070,6 +2106,11 @@ check_j3_1() {
 		find "${projects[$name]}" -printf '%p\t%s\t%T@\n' | sort >"$outside/before.$name"
 	done
 	find "$home" -printf '%p\t%s\t%T@\n' | sort >"$outside/home.before"
+
+	# TEMPORARY (M9d iteration 3), for check_j2_1's reason.
+	watcher=$(dbg_watch_start "$home" "$outside/seen")
+	# shellcheck disable=SC2064
+	trap "{ kill $watcher; } 2>/dev/null; rm -rf '$outside'" RETURN
 
 	# Genuinely concurrent, per the RED. Each status is collected separately so
 	# a pair where only one session survived cannot read as a pair that did not
@@ -2106,6 +2147,9 @@ check_j3_1() {
 	# them, so state that was not project-scoped would have collided there.
 	# The registry is subtracted rather than assumed empty, exactly as
 	# check_j2_1 does, so an entry added later relaxes this by what it declares.
+	# TEMPORARY (M9d iteration 3).
+	dbg_watch_stop "j3_1 home" "$watcher" "$outside/seen" "$home"
+
 	find "$home" -printf '%p\t%s\t%T@\n' | sort >"$outside/home.after"
 	registry=$(nix eval --json "$REPO_ROOT#leakRegistry" \
 		--apply "es: builtins.filter (e: builtins.elem \"$agent\" e.agents) es" |
@@ -2133,6 +2177,20 @@ check_j3_1() {
 		while IFS= read -r line; do
 			dbg "j3_1 home now: $line"
 		done < <(find "$home" -maxdepth 1 -printf '%y\t%p\t%s\t%T@\n' | sort)
+
+		# TEMPORARY (M9d iteration 3), for check_j2_1's reason: the pre-flight
+		# canary put to the run. One session, not the pair, because the
+		# question is where the canary lands and not whether two collide.
+		dbg "j3_1 XDG_RUNTIME_DIR as the check saw it: ${XDG_RUNTIME_DIR:-<unset>}"
+		mkdir -p "$outside/run"
+		before_t=$(find "$home" -maxdepth 0 -printf '%s\t%T@\n')
+		env "${SESSION_ENV[@]}" "HOME=$home" "XDG_CONFIG_HOME=$cfg" \
+			"XDG_RUNTIME_DIR=$outside/run" \
+			env -C "${projects[alpha]}" "$entry/$binary" plugin list \
+			>"$outside/rerun.out" 2>"$outside/rerun.err" || true
+		after_t=$(find "$home" -maxdepth 0 -printf '%s\t%T@\n')
+		dbg "j3_1 with XDG_RUNTIME_DIR set: $before_t -> $after_t"
+
 		fail "$(printf 'two concurrent sessions shared state in the home directory, outside the leak registry:\n%s' \
 			"$(printf '%s\n' "${changed[@]}")")"
 	fi
@@ -2885,12 +2943,6 @@ check_r8() {
 			fail "$(printf 'reading a path outside the project did not fail on permission, so there is no denial to be distinguished from:\n%s' \
 				"$denial")"
 		fi
-		# TEMPORARY (M9d iteration 2). Both messages verbatim: this check's
-		# subject is that a reader can tell them apart, so which words each one
-		# actually carries on this platform is the whole question.
-		dbg "r8 $arm: uname=$(uname -s)"
-		dbg "r8 $arm: auth message: $(printf '%s' "$auth" | tr '\n' '|')"
-		dbg "r8 $arm: denial message: $(printf '%s' "$denial" | tr '\n' '|')"
 		if printf '%s' "$denial" | grep -qE '\b(401|407|[Uu]nauthorized)\b'; then
 			found=1
 			fail "$(printf 'the confinement denial reads as an authentication failure:\n%s' "$denial")"
@@ -3390,7 +3442,6 @@ commit_session() {
 	}
 	git="$gitdir/bin/git"
 	strace=$(substrate_member "$FIXTURE_SUBSTRATE" strace) || {
-		dbg_tracers "$FIXTURE_SUBSTRATE"
 		fail "the substrate for $agent provides no strace, so what the commit reached for cannot be observed"
 		return 1
 	}
@@ -3649,8 +3700,6 @@ check_opencode() {
 	local agent=opencode binary=opencode
 	local entry outside home proj cfg state project rc real surface
 	local root value homeroot='' found=0
-	# TEMPORARY (M9d iteration 2): the capture-location rerun's status.
-	local rc2=0
 	local -a rooted=() strayed=() landed=() changed=()
 
 	session_fixture "$agent" || return 1
@@ -3704,24 +3753,6 @@ check_opencode() {
 		env -C "$proj" "$entry/$binary" debug paths \
 		>"$outside/paths.out" 2>"$outside/paths.err" && rc=0 || rc=$?
 	if [ "$rc" -ne 0 ]; then
-		# TEMPORARY (M9d iteration 2). Two things the 20-line tail cannot say.
-		# First the head, because the runtime prints its own first error line
-		# above any stack and the tail cut it off. Then the same command with
-		# its capture inside the granted project: the macOS run's denial
-		# trailer named these very capture files as refused *reads*, and the
-		# scratch root is ungranted by construction, so this separates "the
-		# agent cannot run confined" from "the agent cannot use a capture the
-		# session may not read".
-		dbg "opencode stderr head:"
-		dbg "$(head -40 "$outside/paths.err")"
-		dbg "opencode stdout head:"
-		dbg "$(head -20 "$outside/paths.out")"
-		env "${SESSION_ENV[@]}" "HOME=$home" "XDG_CONFIG_HOME=$cfg" "ANTHROPIC_API_KEY=$real" \
-			env -C "$proj" "$entry/$binary" debug paths \
-			>"$proj/dbg.out" 2>"$proj/dbg.err" && rc2=0 || rc2=$?
-		dbg "opencode with the capture inside the project: exit $rc2"
-		dbg "$(head -40 "$proj/dbg.err")"
-		dbg "$(head -20 "$proj/dbg.out")"
 		fail "$(printf 'the agent did not answer where it writes (exit %s):\n%s' \
 			"$rc" "$(tail -20 "$outside/paths.err")")"
 		return 1
@@ -3864,8 +3895,6 @@ check_pi() {
 	local agent=pi binary=pi
 	local entry outside home proj cfg state project rc real root cred
 	local found=0
-	# TEMPORARY (M9d iteration 2): the capture-location rerun's status.
-	local rc2=0
 	local -a landed=() changed=() strayed=()
 
 	session_fixture "$agent" || return 1
@@ -3901,17 +3930,6 @@ check_pi() {
 		env -C "$proj" "$entry/$binary" auth check --provider anthropic --json --credentials \
 		>"$outside/auth.out" 2>"$outside/auth.err" && rc=0 || rc=$?
 	if [ "$rc" -ne 0 ]; then
-		# TEMPORARY (M9d iteration 2), for check_opencode's reason: the head as
-		# well as the tail, then the same command with its capture inside the
-		# granted project.
-		dbg "pi stderr head:"
-		dbg "$(head -40 "$outside/auth.err")"
-		env "${SESSION_ENV[@]}" "HOME=$home" "XDG_CONFIG_HOME=$cfg" "ANTHROPIC_API_KEY=$real" \
-			env -C "$proj" "$entry/$binary" auth check --provider anthropic --json --credentials \
-			>"$proj/dbg.out" 2>"$proj/dbg.err" && rc2=0 || rc2=$?
-		dbg "pi with the capture inside the project: exit $rc2"
-		dbg "$(head -40 "$proj/dbg.err")"
-		dbg "$(head -20 "$proj/dbg.out")"
 		fail "$(printf 'the agent reports its anthropic credential is unusable (exit %s):\n%s\n%s' \
 			"$rc" "$(cat "$outside/auth.out")" "$(tail -20 "$outside/auth.err")")"
 		return 1
@@ -4127,7 +4145,6 @@ check_j8_1() {
 		entry=$(pinned_bin "$binary") || return 1
 		session_fixture "$agent" || return 1
 		strace_bin=$(substrate_member "$FIXTURE_SUBSTRATE" strace) || {
-			dbg_tracers "$FIXTURE_SUBSTRATE"
 			fail "the substrate for $agent provides no strace, so what the $agent session opened cannot be observed"
 			return 1
 		}
@@ -4415,7 +4432,6 @@ check_r9() {
 		entry=$(pinned_bin "$binary") || return 1
 		session_fixture "$agent" || return 1
 		strace_bin=$(substrate_member "$FIXTURE_SUBSTRATE" strace) || {
-			dbg_tracers "$FIXTURE_SUBSTRATE"
 			fail "the substrate for $agent provides no strace, so the grant it was given cannot be observed"
 			return 1
 		}
