@@ -643,9 +643,15 @@ check_r1() {
 # Both halves of the scenario are asserted, and the second half is asserted
 # from outside the session, after it has exited: a refusal reported inside the
 # sandbox is the sandbox's own account of itself, while the file's absence on
-# the host is the fact the scenario is about. A non-zero exit is not enough on
-# its own either, so the refusal must say `Permission denied` — a write to a
-# path that had never existed would fail just as convincingly.
+# the host is the fact the scenario is about.
+#
+# The refusal's wording is deliberately not asserted. It reads `Permission
+# denied` where Landlock enforces and `Operation not permitted` where Seatbelt
+# does, because each returns the errno its own mechanism reports, and pinning
+# either one describes a platform rather than the property. What that assertion
+# was guarding against — a write that failed because the path had never been
+# writable — is what controls 2 and 3 below rule out, each by writing that exact
+# path successfully.
 #
 # Two controls, because the observable is a failure (D9):
 #
@@ -747,10 +753,6 @@ check_r2() {
 		if printf '%s' "$out" | grep -qF 'OUTSIDE :: 0'; then
 			found=1
 			fail "$(printf 'a write outside the project succeeded:\n%s' "$out")"
-		fi
-		if ! printf '%s' "$out" | grep -q 'Permission denied'; then
-			found=1
-			fail "$(printf 'the write did not fail on permission, so the target may simply not have been there:\n%s' "$out")"
 		fi
 		# The half of the scenario the session cannot be asked about.
 		if [ -e "$target" ]; then
@@ -2885,7 +2887,16 @@ check_j5_1() {
 # measurement's first attempt put it in `SECRET` and the probe read
 # `/nonexistent` instead, which fails for the wrong reason.
 #
-# Three controls, because two of the three observables are failures (D9):
+# The denial is recognised by the wording the platform refuses with, and that
+# wording is measured on the host rather than written down here: Landlock
+# returns EACCES and Seatbelt EPERM, so the one refusal reads `Permission
+# denied` and the other `Operation not permitted`. FR-16 is about a reader
+# being able to tell the two failures apart, so what the denial says is the
+# criterion here and not an implementation detail — but it is this platform's
+# phrase that has to be asserted, and the derivation carries a control of its
+# own so no phrase can be taken off a line that was not a refusal.
+#
+# Four controls, because two of the three observables are failures (D9):
 #
 #   1. In the same session, a file inside the project is read successfully, so a
 #      session that died at startup or a probe that could read nothing at all
@@ -2899,10 +2910,15 @@ check_j5_1() {
 #      satisfy the first arm. It also draws the line the scenario is on: a
 #      credential that was never there is a different answer again from one that
 #      is no longer valid.
+#   4. The file the wording is measured from is read once from outside the
+#      boundary too, and the line it is taken from has to name that file.
+#      Without the first, the phrase could be `No such file or directory` and
+#      every assertion below would be looking for the wrong thing; without the
+#      second, it could be taken off nono's own report instead.
 check_r8() {
 	local agent=claude-code
 	local outside home proj denied inside cu desc rc arm i
-	local canary stale auth denial status
+	local canary stale auth denial status phrase_src vocab phrase
 	local found=0
 	local FIXTURE_PROFILE FIXTURE_SUBSTRATE FIXTURE_BASH
 	local -a SESSION_ENV cred=()
@@ -2934,6 +2950,47 @@ check_r8() {
 	# Control 2.
 	if ! grep -q . "$denied"; then
 		fail 'the denial target is not readable outside the boundary, so a refusal inside it would prove nothing'
+		return 1
+	fi
+
+	# The vocabulary a denial is written in belongs to the platform, not to this
+	# check: Landlock refuses with EACCES and Seatbelt with EPERM, so the same
+	# refusal reads `Permission denied` on one and `Operation not permitted` on
+	# the other. So it is measured on the host the check is running on, from a
+	# second file outside the project read by the same program the probe reads
+	# with — a phrase written down here would describe whichever platform it was
+	# written on.
+	#
+	# The child redirects its own stderr into its granted workdir rather than
+	# letting it join the harness's, because nono writes its capability table
+	# there too and the phrase would be taken from that instead.
+	phrase_src="$outside/vocabulary.txt"
+	printf 'a second file the session was never granted\n' >"$phrase_src"
+	# Control 4, and the derivation's whole footing: unconfined, this file reads.
+	# Without it the phrase could be measured off a path that was not there, and
+	# every assertion below would then be looking for `No such file or directory`
+	# in a message that correctly says nothing of the kind.
+	if ! grep -q . "$phrase_src"; then
+		fail 'the file the denial wording is measured from is not readable outside the boundary, so the wording would not be a denial'
+		return 1
+	fi
+	# The positional parameters belong to the shell inside the session, so the
+	# script text must reach it unexpanded.
+	# shellcheck disable=SC2016
+	env "${SESSION_ENV[@]}" "HOME=$home" \
+		"$(pinned_bin nono)/nono" run \
+		--profile "$FIXTURE_PROFILE" --workdir "$proj" --allow-cwd -- \
+		"$FIXTURE_BASH/bin/bash" -c '"$1" "$2" 2>"$3"' bash \
+		"$cu/bin/cat" "$phrase_src" "$proj/vocabulary.err" >/dev/null 2>&1 || :
+	vocab=$(tail -n 1 "$proj/vocabulary.err" 2>/dev/null)
+	phrase=${vocab##*: }
+	# And the line has to be about the file that was refused. If it is not, it
+	# came from somewhere else — nono's own report, or a shell that never ran the
+	# program — and the phrase taken off the end of it means nothing.
+	if [ -z "$phrase" ] || [ "$phrase" = "$vocab" ] ||
+		! printf '%s' "$vocab" | grep -qF "$phrase_src"; then
+		fail "$(printf 'the wording this platform refuses a read with could not be measured, so a denial cannot be told from an authentication failure by it:\n%s' \
+			"$vocab")"
 		return 1
 	fi
 
@@ -3034,14 +3091,14 @@ check_r8() {
 
 		# The scenario's second Then, both ways round: neither message carries
 		# the other's vocabulary, so a reader cannot mistake one for the other.
-		if printf '%s' "$auth" | grep -q 'Permission denied'; then
+		if printf '%s' "$auth" | grep -qF "$phrase"; then
 			found=1
-			fail "$(printf 'the authentication failure reads as a confinement denial:\n%s' "$auth")"
+			fail "$(printf 'the authentication failure reads as a confinement denial (%s):\n%s' "$phrase" "$auth")"
 		fi
-		if ! printf '%s' "$denial" | grep -q 'Permission denied'; then
+		if ! printf '%s' "$denial" | grep -qF "$phrase"; then
 			found=1
-			fail "$(printf 'reading a path outside the project did not fail on permission, so there is no denial to be distinguished from:\n%s' \
-				"$denial")"
+			fail "$(printf 'reading a path outside the project did not fail on permission (%s), so there is no denial to be distinguished from:\n%s' \
+				"$phrase" "$denial")"
 		fi
 		if printf '%s' "$denial" | grep -qE '\b(401|407|[Uu]nauthorized)\b'; then
 			found=1
