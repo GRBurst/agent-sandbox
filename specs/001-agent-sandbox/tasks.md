@@ -1462,49 +1462,60 @@ ______________________________________________________________________
 
 **Scenario**: the same Journey 7.1. With [M9d](#m9d--on-macos-there-is-nowhere-to-put-the-outside-status-implemented)'s derived root in place, sessions start on darwin and the suite reaches the assertions for the first time. Eleven of them fail, and they are four unrelated things wearing one colour.
 
-The evidence is in [research.md § M9d](research.md#m9d--the-macos-arm-and-the-eleven-failures-behind-it), which is written to be read cold. What follows is only what has to change. Each class is one commit; C is a change to the product and is the one to do first.
+The evidence is in [research.md § M9d](research.md#m9d--the-macos-arm-and-the-eleven-failures-behind-it) and [§ M9e](research.md#m9e--the-four-classes-answered-without-a-mac), both written to be read cold. What follows is only what has to change. Each class is one commit; C is a change to the product and is the one to do first.
 
 | class | checks | what is actually wrong |
 | --- | --- | --- |
 | A | `check_r1` `check_r2` `check_r8` | the assertion greps `Permission denied`; Seatbelt says `Operation not permitted` |
-| B | `check_j6_2` `check_r11` `check_j8_1` `check_r9` | they need `strace`, which the darwin substrate does not carry |
+| B | `check_j6_2` `check_r11` `check_j8_1` `check_r9` | they need `strace`, which the darwin substrate does not carry — except `check_r11`, which only inherits a guard |
 | C | `check_j2_1` `check_j3_1` | the pre-flight writes a canary into `$HOME` when `$XDG_RUNTIME_DIR` is unset — the check is right and the product is wrong |
 | D | `check_opencode` `check_pi` | the bun agents cannot read the capture files they were handed, because those now sit somewhere the session is granted nothing |
 
+Every uncertainty these four classes were blocked on is now closed, and three of the four fixes came out smaller than planned.
+[research.md § M9e](research.md#m9e--the-four-classes-answered-without-a-mac) has the evidence and [debug-macos.md](debug-macos.md) has the per-check reproduction.
+
 **C — the pre-flight's canary, which is a defect and not a fixture problem**
 
-- [ ] `lib/preflight.sh` derives its canary location instead of falling back to `$HOME`, and refuses with `cannot verify confinement` rather than proceeding when no location qualifies. **Both halves are measured**: with `XDG_RUNTIME_DIR` unset the canary lands in the home directory, and with it pointing anywhere inside the project assertion 3's confined write *succeeds* and the pre-flight accuses a correctly confined session — `confinement is not enforced: a confined process wrote outside the project.` So the requirement is the same one `outside_root` meets, writable and granted nothing, and the failure mode is worse here because it is the user who reads it
-- [ ] The derivation stays inside the pre-flight's budget. It is embedded in every wrapper by `lib/confined-agent.nix` and runs before every agent start, so it may not spend a `nix build` or a second `nono` invocation the way the harness's helper does
-- [ ] Whether the answer on macOS is unavoidably under `/Users` is stated, and if it is, `$HOME/.agent-sandbox` — or whatever the answer turns out to be — is enumerated in the leak registry or in `P1`'s accepted-leak list with its justification, and the handbook says starting an agent writes there. This is the same question [M10a](#m10a--close-out-status-pending) already carries for the harness, and the two answers should be the same answer
-- [ ] `check_pf`'s arms cover the two new cases: no qualifying location, and a qualifying one that a session is granted. The second is the false-alarm case and it has no coverage today
-- [ ] Violation planted and recorded: the canary put somewhere granted, seen to produce the false alarm, reverted
+The plan was to find the canary a better location. It does not need one: a denial can be observed by **reading** a path instead of writing to it, and `$HOME` is refused to a confined session even when the project sits inside it.
 
-**A — one denial, two spellings**
+- [ ] `lib/preflight.sh` probes `$HOME` rather than writing a canary outside the project. One confined invocation carries reads-denied, writes-denied and nothing-landed, reporting through its exit status — measured returning 0 against an ungranted path and 10 against a granted one, in 118 ms, so the pre-flight's two invocations stay two and it needs neither a `nix build` nor a `nono why`
+- [ ] The guard rejects `$HOME` unset, equal to `$PWD` or beneath it, and refuses with `cannot verify confinement` naming which condition failed. With that guard the pre-flight writes **nothing** outside the project in any passing case, so no leak-registry entry and no `P1` accepted-leak entry is owed — the question [M10a](#m10a--close-out-status-pending) carries for the harness is not the same question, and this one is gone rather than answered
+- [ ] The consequence the guard has for a user is stated in `docs/HANDBOOK.md`: a project that *is* the home directory cannot start an agent, because the probe has nothing outside the project left to be refused. That is the honest answer — confining a session whose project is the whole home grants it everything — and per **P9** it is a refusal that says so, not a session that starts unverified
+- [ ] Assertion 3's existing `sh -c ": > …"` is replaced by the subshell form `( : > … ) 2>/dev/null`. `:` is a special builtin, so a redirection failure aborts the shell outright: the assertion passes today by reading the shell's abort as the child's denial, and `2>/dev/null` on the outer command never suppressed the message either
+- [ ] `check_pf` gains the arm for a granted probe target, which is the false-alarm case that has no coverage today, and the arm for a `$HOME` the guard must reject
+- [ ] Violation planted and recorded: the probe pointed at a granted path, seen to return 10 and fail the check, reverted
 
-- [ ] The three checks accept either wording, and the acceptance is derived rather than a second literal — the platform decides which errno its enforcement returns, so a check that lists both is stating a fact about `EACCES` and `EPERM` and should say so in a comment
+**A — one denial, two spellings, and two assertions that should not exist**
+
+- [ ] `check_r1` and `check_r2` **drop** the wording assertion, with a comment saying what carries the claim instead. Each already has three controls — the same path read or written unconfined before the session, an in-project operation inside the session, and a `granted` arm requiring the same probe to succeed — and those refute the "it may simply not have been there" alternative that the grep was standing in for
+- [ ] `check_r8` keeps a wording, because its scenario *is* that a denial and an authentication failure do not read alike, and derives it: one confined probe of a path proven readable unconfined, the child redirecting its own stderr into the project so nono's banner stays out of the sample, the phrase taken after the last `: `. Measured yielding `Permission denied` from two different probe shapes on Linux, and the same extraction gives `Operation not permitted` on darwin
+- [ ] The derivation asserts its own control — the probe path exists and is readable unconfined — so an `ENOENT` phrase cannot be derived and make the assertion vacuous
 - [ ] The refusal message a reader sees still names what was refused, not which errno was matched
 - [ ] Violation planted: a probe that fails for a reason other than permission, which must still fail the check on both platforms
 
-**B — an instrument per platform, chosen per assertion**
+**B — four sites, four different answers, and one that needs no instrument**
 
-The four sites do not want the same thing, and reading them as one is what makes this look impossible:
-
-| site | what it observes | substitute measured on Linux |
+| site | what it observes | answer |
 | --- | --- | --- |
-| `commit_session` (`check_j6_2`, `check_r11`) | that the denied set is empty, plus a control that the trace is non-empty | nono's supervisor trailer carries the assertion; the control needs replacing, and `git log` already shows the commit happened |
-| `check_j8_1` first arm | that a declared surface *was read* | none — no positive observation exists on darwin without disabling SIP |
-| `check_j8_1` grant arm, `check_r9` | `--read`/`--allow`/`--write` in the wrapper's `execve` argv | the capability banner on the session's own stderr, which lists mode and path for every grant |
+| `check_r11` | nothing — it reads only the `DEMAND_*` lines its probe prints | it inherits `commit_session`'s tracer guard; move the guard to the consumer |
+| `check_j6_2` | that the denied set is empty, plus a control that the trace is non-empty | the supervisor trailer, and the control becomes *nono reported at all* |
+| `check_j8_1` grant arm, `check_r9` | `--read`/`--allow`/`--write` in the wrapper's `execve` argv | the capability banner, on both platforms, no split |
+| `check_j8_1` first arm | that a declared surface *was read* | nothing observes this on darwin; skip with the reason |
 
-- [ ] The denial-set assertions use `strace` on Linux and the supervisor trailer on darwin, behind one helper, with the platform split in one place. Both feeds are the same code in one binary — Landlock starves it and Seatbelt feeds it, confirmed from the strings in the Linux binary — so this is one property observed two ways, not two properties
-- [ ] Every assertion that reads grants out of argv reads the banner instead, on both platforms, so the split shrinks to the denial checks alone. The banner prints hundreds of `/nix/store/` lines and a check must drop them
+- [ ] `commit_session`'s tracer requirement moves out of the shared helper and into `check_j6_2`. That alone recovers `check_r11` on darwin, with no new instrument and no platform split, and it is the smallest of the eleven fixes
+- [ ] `check_j6_2`'s denial-set assertion uses `strace` on Linux and the trailer on darwin behind one helper, with the platform split in one place. Both feeds are the same code in one binary — Landlock starves it and Seatbelt feeds it — so this is one property observed two ways
+- [ ] The helper subtracts a **baseline** taken from a no-op confined session rather than excluding a named path. Every darwin trailer carries `/Users/runner/.CFUserTextEncoding (read)` even when the boundary behaved perfectly, so *the denied set is empty* can never hold there; *the session added no denial of its own* holds on both platforms, spells no platform path, and reduces to an identity on Linux where the baseline is empty
+- [ ] The helper checks the trailer against **its own header count** and fails when the two disagree, so completeness is asserted rather than assumed
+- [ ] The non-emptiness control becomes *nono reported at all* — either an `N paths blocked` header or `No path denials were observed during this session.`, both of which prove the supervisor was watching. `git log` is not the substitute: it proves the commit, not the observation
+- [ ] Every assertion that reads grants out of argv reads the banner instead, on both platforms. The vocabulary is `{r, w, r+w}` and not `{r, w}`, the `/nix/store/` lines are dropped, and the parse is `^[[:space:]]+(r\+w|r|w)[[:space:]]+(.*) \((dir|file)\)$`
 - [ ] `check_r9`'s control that the wrapper reached the mechanism at all survives the change — the banner exists only if a session started, which is the same proof by another route
-- [ ] `check_j8_1`'s positive read arm either finds an observation that works on darwin or **skips on darwin with the reason**, and the gap is named in `docs/HANDBOOK.md` rather than left to be discovered. `check_substrate_denials` is the precedent for the skip and for where the `uname` gate goes
-- [ ] Violations planted per instrument: a session that touches something outside its grants must fail through the trailer as it does through `strace`, and a wrapper missing a declared grant must fail through the banner
+- [ ] `check_j8_1`'s positive read arm **skips on darwin with the reason**, and the gap is named in `docs/HANDBOOK.md`. No instrument there observes a permitted read: `dtruss` needs SIP off, `fs_usage` needs root, the trailer records only denials, and the audit trail records only grants — mode-blind ones at that, so it serves no assertion here. `check_substrate_denials` is the precedent for the skip and for where the `uname` gate goes
+- [ ] Violations planted per instrument: a session that touches something outside its grants must fail through the trailer as it does through `strace`, a trailer whose count disagrees with its lines must fail, and a wrapper missing a declared grant must fail through the banner
 
 **D — the captures the bun agents cannot read**
 
-- [ ] `check_opencode` and `check_pi` capture somewhere the session can read, without making their own anti-vacuity control vacuous. `mapfile -t landed < <(find "$project" -mindepth 1 …)` is the control at stake, and capturing into the project satisfies it by construction — so a dedicated subdirectory excluded from that listing, or a pipe through an unconfined reader so the child holds no path at all. **Measured**: the identical command with its capture inside the granted project exits 0 and answers correctly, so this is where the file lives and nothing else
-- [ ] The comparison of the fabricated home and of the project excludes whatever the harness itself wrote there, and the exclusion is narrow enough that a real write by the agent to the same directory is still caught
+- [ ] `check_opencode` and `check_pi` capture into a dedicated subdirectory of the project, excluded from the one listing that would otherwise go vacuous. The `landed` control is satisfied by the agents' own writes, since their XDG roots are relocated into the project — so the risk was vacuity, not breakage. The pipe alternative is rejected: Landlock does not re-check an open descriptor, so nothing about it can be measured from Linux
+- [ ] The exclusion is `find "$project" -mindepth 1 -not -path "$capture" -not -path "$capture/*"`, which holds on BSD `find` as well, and it is narrow enough that a real write by the agent to the same directory is still caught
 - [ ] Why the two bun agents need this and `claude-code` does not is recorded in a comment: Seatbelt checks by path and bun resolves the path of its own standard descriptors at startup, while Landlock does not re-check a descriptor that is already open
 - [ ] Violation planted: the capture put back where a session is granted nothing, seen to reproduce the startup failure
 
@@ -1515,8 +1526,9 @@ The four sites do not want the same thing, and reading them as one is what makes
 - [ ] `scripts/validate.sh` passes on both platforms, and the cross-platform reach comparison in the second job runs for the first time
 - [ ] `docs/HANDBOOK.md` states the per-platform instrument split, so a reader who runs the suite on a Mac knows which assertions their run does not make
 - [ ] FR-11's per-platform enforcement tiers, which [M10a](#m10a--close-out-status-pending) already owes, gain the sentence this task measured: the two enforcements differ in what they *report*, not only in what they permit
+- [ ] `findutils` either joins `sessionTools` in `flake.nix` or the harness's GNU-only `find -printf` is recorded as known drift. It resolves on darwin today only because `nix develop`'s stdenv supplies it, while `outside_root` in the same suite avoids GNU-only `mktemp -p` for BSD's sake — both cannot be right
 
-**What a fresh session should not redo.** Four things were measured and hold: the pre-flight canary reproduces the macOS symptom on Linux with `XDG_RUNTIME_DIR` unset; nono reports no denials on Linux and enumerates them on darwin from the same binary; the audit trail records no denied paths at all, so it is not a third instrument; and the capability banner carries command-line grants. Four things cannot be closed without a macOS runner and should be answered in one push rather than four: whether the trailer enumerates writes and is complete, whether any positive read observation is possible on darwin, whether the banner prints identically there, and which capture relocation keeps the `landed` control honest.
+**What a fresh session should not redo.** Nothing here is open on evidence; every measurement it needs has been made. The four questions `M9d` left for a macOS runner are answered in [research.md § M9e](research.md#m9e--the-four-classes-answered-without-a-mac) — the trailer enumerates writes and states its own count, no positive read observation exists on darwin, the banner prints identically, and the capture belongs in a project subdirectory. Three things it should not re-derive: a confined read of `$HOME` is refused even when the project is inside it, so the pre-flight needs no writable outside; `check_r1` and `check_r2` already carry the controls their wording grep was standing in for; and every darwin trailer carries one line of ambient noise, so the denial assertion must be *added no denial of its own* rather than *empty*.
 
 ______________________________________________________________________
 

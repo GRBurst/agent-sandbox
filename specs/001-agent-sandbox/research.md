@@ -2713,6 +2713,9 @@ They are listed here so the next run is designed to answer all four at once rath
 | U3 | does the capability banner print identically on darwin | it is the substitute for two checks' argv reading |
 | U4 | which capture relocation keeps the `landed` control honest | the pipe variant has no measurement at all |
 
+All four are now answered, three of them without the runner that was thought necessary: U1 and U3 from the failing run's own logs, U2 from nono's audit trail on Linux, and U4 from reading what the control actually ranges over.
+[M9e](#m9e--the-four-classes-answered-without-a-mac) records each answer and what it changed.
+
 ### Method notes worth keeping
 
 - `run_check` prints a check's output **only when it fails or skips**, so diagnostics are invisible on the platform where the check passes.
@@ -2722,3 +2725,196 @@ They are listed here so the next run is designed to answer all four at once rath
 - The CI logs carry a `2026-…Z ` prefix on every line; strip it with `sed 's/^2026[^ ]* //'` before reading.
   A macOS log is roughly twice the length of the Linux one for the same suite, because nono prints its whole capability table to each session's stderr and every failure message quotes it.
 - `nix build .#nono.src` fails in this environment (`cannot open SQLite database … fetcher-cache-v4.sqlite`), so nono's behaviour was established from its binary and its own subcommands rather than from its source.
+
+______________________________________________________________________
+
+## M9e — The four classes, answered without a Mac
+
+[M9d](#m9d--the-macos-arm-and-the-eleven-failures-behind-it) closed with four questions it said only a macOS runner could answer.
+None of them needed one.
+Three were already lying in the failing run's own logs, unread because the previous session was looking for a cause rather than for evidence, and the fourth dissolved on reading what the control it threatened actually ranges over.
+A fifth thing, which nothing had asked, was found in the same logs and would have broken the class B fix on the next push.
+
+This section records what each answer is, how it was obtained, and what it changed.
+The measures themselves are in [tasks.md](tasks.md) § M9e, and a per-check reproduction table is in [debug-macos.md](debug-macos.md).
+
+### The logs were the instrument, and they were already downloaded
+
+The failing run is `a8316ed`, whose logs the previous session fetched to read the `DBG` lines it had planted and then stopped reading.
+Everything below comes from those same two files — the darwin job's 1939 lines and the Linux job's 977 — which are not kept in the repository; [debug-macos.md](debug-macos.md) says how to fetch them again.
+
+The lesson generalises past this feature.
+The tracing that `M9d` added answered its own question and was then treated as spent, but the *untraced* output around it — nono's banner and its supervisor trailer, printed on every session and quoted in full by every failure message — is what carried three of the four answers.
+A macOS log is twice the length of a Linux one for exactly this reason, and that bulk was read as noise.
+
+### U3 — the banner prints identically on darwin
+
+Seven `Capabilities:` blocks in the macOS log, the same `r   /nix/store/… (dir)` shape and the same rule beneath the heading as on Linux.
+So the substitution of the banner for `execve` argv reading is safe on both platforms, and `check_j8_1`'s grant arm and `check_r9` need no platform split at all.
+
+The banner's vocabulary is three modes and not two, which a `--read`/`--allow`/`--write` session on Linux shows directly:
+
+```text
+   r+w  /home/…/m9e/out/rw (dir)
+   r    /home/…/m9e/out/ro (dir)
+   w    /home/…/m9e/out/wo (dir)
+```
+
+A parse of `^[[:space:]]+(r\+w|r|w)[[:space:]]+(.*) \((dir|file)\)$` with `/nix/store/` dropped is therefore what those two checks need.
+An earlier note in `M9d` recorded the vocabulary as `{r, w}`; it is `{r, w, r+w}`, and a check that matched `r` against a read-write grant would have matched nothing.
+
+### U1 — the trailer enumerates writes, and its completeness is self-checkable
+
+Five trailers in the macOS log, headed `2 paths blocked` three times, `8 paths blocked` and `4 paths blocked`.
+Writes are enumerated beside reads — `…/home/outside/created.txt (write)` is `check_r2`'s — with seventeen `(read)` and one `(write)` across the run.
+
+There is no truncation marker anywhere, but the stronger finding is that **the trailer states its own count**.
+In every one of the five, the header's number equals the number of lines that follow it.
+So a check does not have to trust that the enumeration is complete: it compares the count it parsed against the count the header claims and fails when they disagree.
+Completeness stops being a property of nono that this repository assumes and becomes an assertion the harness makes, which is the difference between a claim and a check, and it needed no macOS runner to establish.
+
+### The finding nothing asked for — every darwin trailer carries ambient noise
+
+`/Users/runner/.CFUserTextEncoding (read)` appears in all five trailers, including the ones where the boundary behaved exactly as intended.
+It is macOS reading a per-user text-encoding hint at process startup, it has nothing to do with the session, and it is denied because the home directory is denied.
+
+`commit_session`'s assertion is that the denied set is **empty**.
+On darwin that can never hold, so the class B fix as planned would have failed on its first push and looked like the trailer being unusable rather than like one line of platform noise.
+
+The remedy is not a literal.
+A no-op confined session run once per suite produces the platform's ambient denial set, and subtracting that baseline from the session under test leaves what the session itself was refused.
+It is self-calibrating, costs one 118 ms invocation, spells no platform-specific path anywhere, and on Linux the baseline is empty and the subtraction is an identity.
+This is the property-based form AGENTS.md §4 asks for: *the session added no denial of its own*, rather than *the denied set matches this list*.
+
+Two more trailer features are worth knowing before writing the parser.
+A path in a deny group prints as `[permanently restricted]` with a footer naming the profile key that would override it, `filesystem.bypass_protection` — which is the first sight of that key and bears on [M10a](tasks.md#m10a--close-out-status-pending)'s question about fabricating a home under `/private`.
+And each trailer prints a `Fix flags:` line spelling the exact `--read`/`--read-file`/`--write` that would grant each blocked path, so a failure message can quote the remedy rather than describe it.
+
+### U2 — no, and the audit trail is where that was settled
+
+There is no positive read observation on darwin.
+`dtruss` needs SIP off and `fs_usage` needs root, the trailer records only denials, and the audit trail — the last candidate — records only *grants*.
+
+That last one was measured rather than assumed.
+A confined session read `$W/surface/declared.txt` and then `nono audit show <id> --json` was queried: `tracked_paths` holds the project directory and every one of the ~130 `/nix/store` closure roots, and does not hold the file that was read.
+It is the granted set under another name, and it is also **mode-blind** — a `--read`, an `--allow` and a `--write` path appear in it identically — so it cannot serve the argv assertions either.
+`audit-events.ndjson` holds exactly two events, `session_started` and `session_ended`, wrapped in hash-chain envelopes.
+
+So `check_j8_1`'s positive arm skips on darwin, with the reason named in `docs/HANDBOOK.md`, and the gap is a known one.
+Both instruments observe the boundary; neither observes traffic that the boundary permitted.
+
+### U4 — the control was never at risk
+
+`check_opencode`'s anti-vacuity control is `mapfile -t landed < <(find "$project" -mindepth 1 …)`, and the reading that made a capture relocation look dangerous was that the harness's own capture files would satisfy it.
+They would, but they are not what satisfies it today: the agents' XDG roots are relocated *into* the project, so the session's own writes populate it.
+The risk of capturing into the project is that the control becomes vacuous, not that it breaks — a different and much smaller problem, closed by one dedicated subdirectory excluded from that single listing.
+
+The pipe alternative is rejected, and the reason is worth recording because it looked like the cleaner design.
+It cannot be measured from Linux at all: Landlock does not re-check an already-open descriptor, so a Linux run that succeeds says nothing about whether bun resolves the path of a pipe at startup on darwin.
+Choosing it would have meant shipping the unverifiable option when the verifiable one was already supported by the logs — the run's own trailers name `paths.err`, `paths.out` and their ancestors as the refused reads, so putting them inside the granted project removes exactly those denials and nothing else.
+
+### Class C — the pre-flight can stop writing outside the project altogether
+
+`M9d` framed the canary as a location problem: find somewhere writable that nothing grants, and if macOS only offers `/Users`, accept a leak.
+That framing was wrong, and the way out is that **a denial can be observed by reading**.
+
+A confined read of `$HOME` is refused even when the project sits inside `$HOME`.
+Measured here with `HOME=/home/pallon` and the workdir at `/home/pallon/projects/hivemind/agent-sandbox`:
+
+```text
+ls: cannot open directory '/home/pallon': Permission denied
+```
+
+Granting a descendant does not grant the ancestor.
+Darwin needs no separate measurement, because the failing run's trailers already list `/Users`, `/Users/runner`, `/Users/runner/work` and `/Users/runner/work/_temp` as refused reads.
+`$HOME` is therefore a probe target with properties no fabricated location has: it always exists, its owner can always read it unconfined, no profile grants it, and it does not have to be found.
+
+One confined invocation carries the whole assertion, reporting through its exit status:
+
+```sh
+if ls -A "$H" >/dev/null 2>&1; then exit 10; fi       # read leaked
+if ( : > "$H/.probe" ) 2>/dev/null; then exit 11; fi  # write leaked
+if [ -e "$H/.probe" ]; then exit 12; fi               # denied but landed
+exit 0
+```
+
+Against an ungranted path it returns 0; pointed at a granted one it returns 10, which is the false-alarm arm `check_pf` was told to grow, available as a planted violation without writing a fixture.
+`127` stays distinguishable as a missing probe command rather than a denial.
+Two confined runs cost 236 ms, and the pre-flight already spends two, so nothing about its budget changes and neither a `nix build` nor a `nono why` is needed.
+
+What this removes is larger than the failure it fixes.
+In every passing case the pre-flight writes nothing outside the project, so the leak-registry question that `M9e` and `M10a` were both carrying does not have to be answered — there is no leak to enumerate.
+The false-alarm case stops being a case to test and becomes structurally impossible, given a cheap guard rejecting `$HOME` empty, equal to `$PWD`, or beneath it.
+And because nothing reads an error message, class C stays independent of class A.
+
+### A latent defect the experiment exposed
+
+Assertion 3 of the current pre-flight passes for the wrong reason.
+
+```sh
+sh -c ": > \"$canary\""
+```
+
+`:` is a POSIX *special builtin*, so a redirection failure on it makes a non-interactive shell exit outright rather than continue with a non-zero status.
+The check reads the shell's own abort as the child's denial, and gets the right answer by accident.
+Nor does `2>/dev/null` suppress the message, since redirections are applied left to right and `> file` fails before the stderr redirection is installed.
+The subshell form `( : > "$path" ) 2>/dev/null` behaves as intended, and this is the form the combined probe uses.
+
+Confined exit-status fidelity was verified separately, since the whole probe design rests on it: `exit 0` arrives as 0 and `exit 7` as 7 through `nono run`.
+
+### Class A — two of the three assertions should be deleted, not made portable
+
+The plan was to have all three checks accept either wording.
+Reading them says that two of the three should not be asserting on wording at all.
+
+`check_r1` and `check_r2` each already carry three controls: an unconfined read or write of that exact path before the session, an in-project operation inside the same session proving the session and the probe ran, and a `granted` arm that adds the path to the profile and requires the same probe to *succeed*.
+The wording grep exists to exclude one alternative explanation — "the key may simply not have been there" — and controls two and three refute that explanation by reading and writing that very path in the same run.
+The assertion is redundant, and deleting it is both smaller and stronger than teaching it a second spelling.
+
+`check_r8` is the one case where a wording is the criterion rather than a proxy: its scenario is that a confinement denial and an authentication failure must not read alike, so it asserts that the denial carries the vocabulary and the auth failure does not.
+AGENTS.md §4 permits a literal exactly here, where the literal *is* what a user reads — but it has to be the running platform's phrase.
+
+Deriving it works, and the shape that works keeps nono's own output out of the sample by having the child redirect its own stderr into the granted project:
+
+```sh
+nono run … -- sh -c 'ls -A "$1" 2>"$2"' sh "$ungranted" "$capture"
+phrase=${line##*: }   # line = last line of "$capture"
+```
+
+Two different probe shapes give the same clean phrase — `ls: cannot open directory '…': Permission denied` and `sh: line 1: …: Permission denied` both yield `Permission denied` — and the same extraction on darwin yields `Operation not permitted`, which the failing run shows as `cat: …/secret.txt: Operation not permitted`.
+The derivation carries its own control: the path must be proven to exist and be readable unconfined first, or an `ENOENT` phrase would be derived and the assertion would pass on nothing.
+One 118 ms invocation, memoised for the suite.
+
+### Class B — four sites, four different answers, and one needs no instrument
+
+The class was diagnosed as "they need `strace`".
+One of the four does not touch a trace at all.
+
+`check_r11` reads only the `DEMAND_*` lines its probe prints.
+It fails on darwin because it calls `commit_session`, whose first act is to refuse when the substrate has no tracer — one guard in a shared helper, failing a caller that never uses what the guard protects.
+Moving the requirement out of the helper and into `check_j6_2`, the one consumer that reads the trace, recovers `check_r11` on darwin with no new instrument and no platform split.
+
+That leaves three real ones, and the answers differ:
+
+| site | what it observes | answer |
+| --- | --- | --- |
+| `check_j6_2` | the denied set is empty, plus a control that the trace is non-empty | trailer on darwin, with baseline subtraction; the control becomes *nono reported at all* |
+| `check_j8_1` grant arm, `check_r9` | `--read`/`--allow`/`--write` in the wrapper's `execve` argv | the capability banner, on both platforms, no split |
+| `check_j8_1` first arm | that a declared surface *was read* | nothing observes this on darwin; skip with the reason recorded |
+
+The non-emptiness control was the part `M9d` said had no substitute, and it does have one.
+Nono always reports: its stderr carries either an `N paths blocked` header or `No path denials were observed during this session.`, and either sentence proves the supervisor was watching.
+That is the same claim `[ -s plain.trace ]` makes on Linux — the instrument was present and produced output — rather than a weaker stand-in like `git log` showing the commit happened, which proves the commit and not the observation.
+
+### Method notes worth keeping
+
+- **A confined agent session cannot use its own `$HOME` as a control.**
+  This session is itself confined, so `ls -A "$HOME"` fails for the outer shell too and every positive control needed a stand-in — a path the outer session can read and `nono why` reports as `path_not_granted` for the profile under test.
+  A control that is measured from inside the thing being measured is not a control, and the confusion costs more than the substitution.
+- **`nono why` answers about the profile, not about the host.**
+  It is the right way to establish that a stand-in has the same standing as the real target, and it costs no session.
+- The trailer, the banner and the audit trail are three separate views and only two of them are instruments.
+  Denials come from the trailer, grants from the banner, and the audit trail restates the grants in a mode-blind form that no assertion here can use.
+- `sessionTools` in `flake.nix` carries no `findutils`, yet the harness uses GNU-only `find -printf` and it works on the darwin runner because `nix develop`'s stdenv puts GNU findutils on `PATH` implicitly.
+  Meanwhile `outside_root` avoids GNU-only `mktemp -p` for BSD's sake.
+  Both cannot be right: under AGENTS.md §3 a tool that resolves incidentally is not available, so either `findutils` is declared or the dependency is recorded as known drift.
