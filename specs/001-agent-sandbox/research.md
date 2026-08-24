@@ -2919,7 +2919,7 @@ That is the same claim `[ -s plain.trace ]` makes on Linux — the instrument wa
   Meanwhile `outside_root` avoids GNU-only `mktemp -p` for BSD's sake.
   Both cannot be right: under AGENTS.md §3 a tool that resolves incidentally is not available, so either `findutils` is declared or the dependency is recorded as known drift.
 
-______
+______________________________________________________________________
 
 ## M9e — What implementing the four classes measured
 
@@ -3029,3 +3029,69 @@ A check that hits it reports `the agent table has 0 entries and 0 commands`, its
 It is what left `check_r9`'s `nohost` plant unrun across three attempts.
 
 The shell also fails heredocs with `can't create temp file for here document`, so a commit message goes to a file read back with `git commit -F`.
+
+## M9e — What run 7 measured, and the one regression it introduced
+
+Run 7 is the first CI run of the five class fixes.
+macOS went from eleven failures to three, Linux from none to one.
+Classes A, B and C are answered; what is left is class D on macOS and one new defect on Linux.
+
+### The span a check traces is part of its claim
+
+`check_j6_2` regressed on Linux because `61ffb2c` widened the traced span, not because anything about confinement changed.
+
+`commit_session` runs two arms in one session: a plain commit that must succeed unsigned, and a demand arm that sets `commit.gpgsign true` and must be refused.
+The tracer used to wrap the plain commit alone.
+`61ffb2c` moved it to wrap the whole session, so that the strace span would match the span nono's darwin trailer observes — a sound motive, since the trailer covers everything and cannot be narrowed.
+The cost was that the demand arm came inside the span, and the demand arm exists in order to reach for signing material and fail.
+
+Journey 6.2 scopes its claim to the plain commit — "nothing outside the session's reach was read in order to produce **it**".
+A denial the demand arm earned is `check_r11`'s subject, not `check_j6_2`'s, and `check_r11` already asserts it from the arm's exit status without needing a trace at all.
+
+The general lesson is that making two platforms' instruments agree by widening the Linux one to match darwin's makes the *weaker* instrument set the claim.
+The alternative, which the fix should take, is to keep each instrument at the span its own check needs and let the platforms differ in what they can prove.
+
+### A denial can depend on the host's `PATH`, which makes a check unreproducible by construction
+
+The denied path was `/usr/share/locale/locale.alias`, and the same check passes on a NixOS developer host.
+The difference is not the file.
+
+`session_env` sets `TMPDIR`, `XDG_STATE_HOME` and `NONO_NO_UPDATE_CHECK` and **not** `PATH`, so a session inherits the devshell `PATH`, which ends in host entries.
+`git commit` in the demand arm execs `gpg` by name through it.
+
+| host | `PATH` resolves `gpg` to | profile's verdict | outcome |
+| --- | --- | --- | --- |
+| ubuntu-latest | `/usr/bin/gpg` | `granted_path` | gpg starts, its `setlocale` opens `/usr/share/locale/locale.alias` (`path_not_granted`) → `EACCES` → reported |
+| NixOS | `/run/current-system/sw/bin/gpg` | `path_not_granted` | `execve` fails, no gpg process, no locale read, check passes |
+
+Two controls make this attribution rather than inference.
+An `execve` census over the traced session found exactly one program run from outside `/nix/store`, in exactly one phase — `DEMAND_COMMIT HOST failed /run/current-system/sw/bin/gpg` — while bash, git, `git-core/git` and grep were all store paths.
+And `strings -a` on the nix glibc shows no `/usr/share/locale` compiled into it at all; its locale search path is entirely store-relative, so no nix-linked binary in the session could have produced that open.
+Every process does open `locale.alias` at startup, but the nix-linked ones find it inside their own store path, where it is granted.
+
+That the profile grants `/usr/bin/gpg` is deliberate — `check_r11` needs a signing program to exist for its refusal to mean anything — so the grant is not the defect.
+The defect is that a check's verdict varies with which machine ran it, and nothing in the suite asserts that it should not.
+
+### The macOS remainder is one root cause wearing three names
+
+`check_j6_2`, `check_opencode` and `check_pi` all fail on macOS for the class D reason already recorded: the capture files sit outside the granted set and the child resolves its inherited descriptors' paths at startup, which Seatbelt checks by path and refuses.
+`check_j6_2`'s trailer names `probe.err` and `probe.out`; the other two name `paths.*` and `auth.*`.
+
+The noise floor `commit_session` subtracts on the darwin branch cannot absorb them, and it is worth being explicit about why, because the floor looks like it should.
+The floor session redirects to `/dev/null` and `noise.err`, the measured session to `probe.out` and `probe.err`.
+The subtraction is `grep -vxF`, whole-line exact.
+A floor can only cancel a path it also produced, so a floor whose captures have different names is structurally incapable of cancelling the captures it was meant to.
+
+The floor is also asymmetric: `ARMS_NOISE` is assigned unconditionally, but the file exists only on the darwin branch.
+On Linux the subtraction is a no-op over a missing file.
+That is currently harmless, since only the darwin branch reads it, but it is a variable that promises an observation that was never made.
+
+### Method notes
+
+`-e trace=openat` answers *what* was reached for and cannot answer *who* reached.
+Adding `execve` to the same trace turns it into a process census and makes the nix/host distinction visible, which is the distinction that mattered here.
+
+Phase markers cost one line and make a trace bucketable: `mark() { : <"/AGENTSANDBOX_MARK_$1" 2>/dev/null || true; }` opens a path that cannot exist, so the failed `openat` lands in the stream as a labelled boundary and a span is extracted with `awk`.
+This is how the plain-commit span was measured separately from the session's — `[0 paths, from 170 traced lines]` — which is the evidence that narrowing the span is sufficient.
+
+A check that passes locally and fails in CI should have its *precondition* tested before its logic. Here `nono -s why --path /usr/bin/gpg --op read` against the profile answered the whole question in one call, and it answers on a host where `/usr/bin/gpg` does not exist, because the profile is a description rather than a scan of the filesystem.
