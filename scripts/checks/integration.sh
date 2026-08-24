@@ -57,6 +57,19 @@ substrate_member() {
 	return 1
 }
 
+# TEMPORARY (M9d iteration 2). Which tracer the substrate carries, if any.
+# Four checks call `fail` when there is no strace, and strace is added to the
+# session tools under `lib.optionals isLinux`, so on macOS they fail for want of
+# an instrument rather than for want of the property they assert. This says
+# whether any other tracer is there to reach for.
+dbg_tracers() {
+	local substrate=$1 tracer found
+	for tracer in strace ltrace dtruss ktrace dtrace sc_usage fs_usage; do
+		found=$(substrate_member "$substrate" "$tracer") || found=absent
+		dbg "substrate tracer $tracer: $found"
+	done
+}
+
 # Everything a check needs before it can run a probe inside a session: the
 # agent's resolved description, its execution substrate, and a bash out of that
 # substrate. Sets FIXTURE_PROFILE, FIXTURE_SUBSTRATE and FIXTURE_BASH.
@@ -458,6 +471,20 @@ check_r1() {
 			--profile "$description" --workdir "$REPO_ROOT" --allow-cwd -- \
 			"$FIXTURE_BASH/bin/bash" "$probe" "$key" "$inside" 2>&1) && rc=0 || rc=$?
 
+		# TEMPORARY (M9d iteration 2). Which errno wording the platform's
+		# enforcement produces, and whether nono's own audit ledger recorded
+		# the refusal — the ledger is the only candidate instrument that exists
+		# on both platforms, and four checks currently need strace, which the
+		# substrate carries on Linux only.
+		dbg "r1 $arm: uname=$(uname -s) rc=$rc"
+		dbg "r1 $arm: errno wording: $(printf '%s' "$out" |
+			grep -oE 'Permission denied|Operation not permitted' | sort -u | tr '\n' '/')"
+		dbg "r1 $arm: supervisor denial lines: $(printf '%s' "$out" |
+			grep -c 'Sandbox denial')"
+		dbg "r1 $arm: ledger records: $(wc -l <"$outside/state/nono/audit/ledger.ndjson")"
+		dbg "r1 $arm: last ledger record: $(tail -1 "$outside/state/nono/audit/ledger.ndjson" |
+			cut -c1-800)"
+
 		# The in-project read is asserted in both arms: it is what says the
 		# session started and the probe ran, and the granted arm needs that
 		# said as much as the shipped one.
@@ -492,6 +519,11 @@ check_r1() {
 			found=1
 			fail "$(printf 'the read did not fail on permission, so the key may simply not have been there:\n%s' "$out")"
 		fi
+		# TEMPORARY (M9d iteration 2): the same question asked of the other
+		# errno, so the report distinguishes "the denial reads differently" from
+		# "there was no denial".
+		dbg "r1 $arm: EPERM wording present: $(printf '%s' "$out" |
+			grep -c 'Operation not permitted')"
 	done
 
 	[ "$found" -eq 0 ]
@@ -618,6 +650,9 @@ check_r2() {
 			found=1
 			fail "$(printf 'the write did not fail on permission, so the target may simply not have been there:\n%s' "$out")"
 		fi
+		# TEMPORARY (M9d iteration 2).
+		dbg "r2 $arm: uname=$(uname -s) errno wording: $(printf '%s' "$out" |
+			grep -oE 'Permission denied|Operation not permitted|Read-only file system' | sort -u | tr '\n' '/')"
 		# The half of the scenario the session cannot be asked about.
 		if [ -e "$target" ]; then
 			found=1
@@ -1878,6 +1913,20 @@ check_j2_1() {
 
 	if [ "${#changed[@]}" -ne 0 ]; then
 		found=1
+		# TEMPORARY (M9d iteration 2). The comparison carries path, size and
+		# modification time, and reports the path alone, so a directory whose
+		# own line moved because a registry-covered child was created under it
+		# is indistinguishable from a write the registry does not cover. The
+		# differing lines verbatim say which of the three fields moved.
+		while IFS= read -r line; do
+			dbg "j2_1 home diff: $line"
+		done < <(diff "$outside/before" "$outside/after")
+		while IFS= read -r line; do
+			dbg "j2_1 registry entry: $line"
+		done <<<"$registry"
+		while IFS= read -r line; do
+			dbg "j2_1 home now: $line"
+		done < <(find "$home" -maxdepth 1 -printf '%y\t%p\t%s\t%T@\n' | sort)
 		fail "$(printf 'the session changed the home directory outside the leak registry:\n%s' \
 			"$(printf '%s\n' "${changed[@]}")")"
 	fi
@@ -2077,6 +2126,13 @@ check_j3_1() {
 	done < <(comm -13 "$outside/home.before" "$outside/home.after")
 	if [ "${#changed[@]}" -ne 0 ]; then
 		found=1
+		# TEMPORARY (M9d iteration 2), for check_j2_1's reason.
+		while IFS= read -r line; do
+			dbg "j3_1 home diff: $line"
+		done < <(diff "$outside/home.before" "$outside/home.after")
+		while IFS= read -r line; do
+			dbg "j3_1 home now: $line"
+		done < <(find "$home" -maxdepth 1 -printf '%y\t%p\t%s\t%T@\n' | sort)
 		fail "$(printf 'two concurrent sessions shared state in the home directory, outside the leak registry:\n%s' \
 			"$(printf '%s\n' "${changed[@]}")")"
 	fi
@@ -2829,6 +2885,12 @@ check_r8() {
 			fail "$(printf 'reading a path outside the project did not fail on permission, so there is no denial to be distinguished from:\n%s' \
 				"$denial")"
 		fi
+		# TEMPORARY (M9d iteration 2). Both messages verbatim: this check's
+		# subject is that a reader can tell them apart, so which words each one
+		# actually carries on this platform is the whole question.
+		dbg "r8 $arm: uname=$(uname -s)"
+		dbg "r8 $arm: auth message: $(printf '%s' "$auth" | tr '\n' '|')"
+		dbg "r8 $arm: denial message: $(printf '%s' "$denial" | tr '\n' '|')"
 		if printf '%s' "$denial" | grep -qE '\b(401|407|[Uu]nauthorized)\b'; then
 			found=1
 			fail "$(printf 'the confinement denial reads as an authentication failure:\n%s' "$denial")"
@@ -3328,6 +3390,7 @@ commit_session() {
 	}
 	git="$gitdir/bin/git"
 	strace=$(substrate_member "$FIXTURE_SUBSTRATE" strace) || {
+		dbg_tracers "$FIXTURE_SUBSTRATE"
 		fail "the substrate for $agent provides no strace, so what the commit reached for cannot be observed"
 		return 1
 	}
@@ -3586,6 +3649,8 @@ check_opencode() {
 	local agent=opencode binary=opencode
 	local entry outside home proj cfg state project rc real surface
 	local root value homeroot='' found=0
+	# TEMPORARY (M9d iteration 2): the capture-location rerun's status.
+	local rc2=0
 	local -a rooted=() strayed=() landed=() changed=()
 
 	session_fixture "$agent" || return 1
@@ -3639,6 +3704,24 @@ check_opencode() {
 		env -C "$proj" "$entry/$binary" debug paths \
 		>"$outside/paths.out" 2>"$outside/paths.err" && rc=0 || rc=$?
 	if [ "$rc" -ne 0 ]; then
+		# TEMPORARY (M9d iteration 2). Two things the 20-line tail cannot say.
+		# First the head, because the runtime prints its own first error line
+		# above any stack and the tail cut it off. Then the same command with
+		# its capture inside the granted project: the macOS run's denial
+		# trailer named these very capture files as refused *reads*, and the
+		# scratch root is ungranted by construction, so this separates "the
+		# agent cannot run confined" from "the agent cannot use a capture the
+		# session may not read".
+		dbg "opencode stderr head:"
+		dbg "$(head -40 "$outside/paths.err")"
+		dbg "opencode stdout head:"
+		dbg "$(head -20 "$outside/paths.out")"
+		env "${SESSION_ENV[@]}" "HOME=$home" "XDG_CONFIG_HOME=$cfg" "ANTHROPIC_API_KEY=$real" \
+			env -C "$proj" "$entry/$binary" debug paths \
+			>"$proj/dbg.out" 2>"$proj/dbg.err" && rc2=0 || rc2=$?
+		dbg "opencode with the capture inside the project: exit $rc2"
+		dbg "$(head -40 "$proj/dbg.err")"
+		dbg "$(head -20 "$proj/dbg.out")"
 		fail "$(printf 'the agent did not answer where it writes (exit %s):\n%s' \
 			"$rc" "$(tail -20 "$outside/paths.err")")"
 		return 1
@@ -3781,6 +3864,8 @@ check_pi() {
 	local agent=pi binary=pi
 	local entry outside home proj cfg state project rc real root cred
 	local found=0
+	# TEMPORARY (M9d iteration 2): the capture-location rerun's status.
+	local rc2=0
 	local -a landed=() changed=() strayed=()
 
 	session_fixture "$agent" || return 1
@@ -3816,6 +3901,17 @@ check_pi() {
 		env -C "$proj" "$entry/$binary" auth check --provider anthropic --json --credentials \
 		>"$outside/auth.out" 2>"$outside/auth.err" && rc=0 || rc=$?
 	if [ "$rc" -ne 0 ]; then
+		# TEMPORARY (M9d iteration 2), for check_opencode's reason: the head as
+		# well as the tail, then the same command with its capture inside the
+		# granted project.
+		dbg "pi stderr head:"
+		dbg "$(head -40 "$outside/auth.err")"
+		env "${SESSION_ENV[@]}" "HOME=$home" "XDG_CONFIG_HOME=$cfg" "ANTHROPIC_API_KEY=$real" \
+			env -C "$proj" "$entry/$binary" auth check --provider anthropic --json --credentials \
+			>"$proj/dbg.out" 2>"$proj/dbg.err" && rc2=0 || rc2=$?
+		dbg "pi with the capture inside the project: exit $rc2"
+		dbg "$(head -40 "$proj/dbg.err")"
+		dbg "$(head -20 "$proj/dbg.out")"
 		fail "$(printf 'the agent reports its anthropic credential is unusable (exit %s):\n%s\n%s' \
 			"$rc" "$(cat "$outside/auth.out")" "$(tail -20 "$outside/auth.err")")"
 		return 1
@@ -4031,6 +4127,7 @@ check_j8_1() {
 		entry=$(pinned_bin "$binary") || return 1
 		session_fixture "$agent" || return 1
 		strace_bin=$(substrate_member "$FIXTURE_SUBSTRATE" strace) || {
+			dbg_tracers "$FIXTURE_SUBSTRATE"
 			fail "the substrate for $agent provides no strace, so what the $agent session opened cannot be observed"
 			return 1
 		}
@@ -4318,6 +4415,7 @@ check_r9() {
 		entry=$(pinned_bin "$binary") || return 1
 		session_fixture "$agent" || return 1
 		strace_bin=$(substrate_member "$FIXTURE_SUBSTRATE" strace) || {
+			dbg_tracers "$FIXTURE_SUBSTRATE"
 			fail "the substrate for $agent provides no strace, so the grant it was given cannot be observed"
 			return 1
 		}
