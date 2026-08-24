@@ -468,30 +468,49 @@ check_substrate_denials() {
 # Both halves of the scenario are asserted, and the probe prints the key
 # material it managed to read on purpose: an assertion that no key material
 # appears in the output is worth nothing against a probe that never shows it.
-# A non-zero exit is not enough on its own either, so the refusal must say
-# `Permission denied` — a key that had simply never been there would exit
-# non-zero and show no material just as convincingly.
+# Each read reports its own status, so the refusal is read off the read that
+# was refused rather than off the exit status of the whole probe.
+#
+# The session also reads a plain file beside the key, and that is not padding.
+# nono protects `$HOME/.ssh` of its own accord, whatever the description says,
+# so a key refused inside a session says nothing on its own about the project
+# boundary: it would be refused by a session with no boundary at all. The plain
+# file is denied by reach and by nothing else, so it is the one that carries
+# the scenario. The key stays because R1 is written about a key.
 #
 # Two controls, because the observable is a failure (D9):
 #
 #   1. In the same session, a file inside the project is read successfully. A
 #      session that died at startup, or a probe that could read nothing at all,
 #      cannot pass.
-#   2. The same key is read once from outside the boundary before the session
-#      runs, so the denial is attributable to confinement rather than to a
-#      plant that never landed.
+#   2. Both targets are read once from outside the boundary before the session
+#      runs, so the denials are attributable to confinement rather than to a
+#      plant that never landed. This is also what stands in for asserting the
+#      wording of the refusal: a file that had simply never been there would
+#      fail the read just as convincingly, and control 2 is what rules that
+#      out. The wording itself cannot be asserted, because the platform
+#      decides which errno its enforcement returns.
 #
 # The third arm is a standing positive control on the probe itself: with the
-# key's directory added to `filesystem.read`, the same probe must read the key
-# out. It names the exact directory and never an ancestor, because a grant
-# above a denied path is refused at startup rather than widened. This arm is
-# also the finding that makes the check necessary at all — `deny_credentials`
-# is `required` and denies this very path, and the grant still wins, so nothing
-# stands behind the registry's own strictness.
+# plain file's directory added to `filesystem.read`, the same probe must read
+# it out. It names the exact directory and never an ancestor, because a grant
+# above a denied path is refused at startup rather than widened.
+#
+# That arm grants the plain directory and not the key's, and the difference is
+# a platform divergence worth recording. On Linux a grant naming `$HOME/.ssh`
+# wins: `deny_credentials` is `required` and denies that path, and the key
+# reads out anyway, so nothing stands behind the registry's own strictness. On
+# macOS the same grant does not win — the session's own report marks the key
+# `[permanently restricted]` and points at `filesystem.bypass_protection` — so
+# the two enforcements differ in what a description can ask for. Neither
+# platform's answer can be asserted as the other's, and the shipped reach is
+# the same on both because neither grants the directory at all. The key is
+# asserted refused in this arm too, which is what says the grant stayed as
+# narrow as it was written.
 check_r1() {
 	local agent=claude-code
-	local outside home key inside probe scratch
-	local key_canary inside_canary arm description rc out found=0
+	local outside home key inside probe scratch plain plain_dir
+	local key_canary plain_canary inside_canary arm description rc out found=0
 	local FIXTURE_PROFILE FIXTURE_SUBSTRATE FIXTURE_BASH
 	local -a SESSION_ENV
 
@@ -506,18 +525,26 @@ check_r1() {
 
 	home="$outside/home"
 	key="$home/.ssh/id_ed25519"
-	mkdir -p "$home/.ssh"
+	plain_dir="$home/plain"
+	plain="$plain_dir/notes.txt"
+	mkdir -p "$home/.ssh" "$plain_dir"
 	# Per run, so a stale match in a log cannot satisfy the assertion.
 	key_canary="PLANTED-KEY-MATERIAL-$RANDOM$RANDOM"
+	plain_canary="PLANTED-PLAIN-CONTENT-$RANDOM$RANDOM"
 	inside_canary="PROJECT-FILE-CONTENT-$RANDOM$RANDOM"
 	printf '%s\n' "$key_canary" >"$key"
 	chmod 600 "$key"
+	printf '%s\n' "$plain_canary" >"$plain"
 	inside="$scratch/inside.txt"
 	printf '%s\n' "$inside_canary" >"$inside"
 
-	# Control 2. Unconfined, the key reads.
+	# Control 2. Unconfined, both targets read.
 	if [ "$(cat "$key")" != "$key_canary" ]; then
 		fail "the planted key is not readable outside the boundary, so a denial inside it would prove nothing"
+		return 1
+	fi
+	if [ "$(cat "$plain")" != "$plain_canary" ]; then
+		fail "the planted file is not readable outside the boundary, so a denial inside it would prove nothing"
 		return 1
 	fi
 
@@ -532,14 +559,18 @@ check_r1() {
 	cat >"$probe" <<-'PROBE'
 		key_rc=0
 		key=$(<"$1") || key_rc=$?
+		plain_rc=0
+		plain=$(<"$2") || plain_rc=$?
 		printf 'KEY :: %s\n' "$key"
-		printf 'INSIDE :: %s\n' "$(<"$2")"
-		exit "$key_rc"
+		printf 'PLAIN :: %s\n' "$plain"
+		printf 'KEY_RC :: %s\n' "$key_rc"
+		printf 'PLAIN_RC :: %s\n' "$plain_rc"
+		printf 'INSIDE :: %s\n' "$(<"$3")"
 	PROBE
 
 	session_env "$outside/state"
 
-	jq --arg d "$home/.ssh" '.filesystem.read += [$d]' "$FIXTURE_PROFILE" >"$scratch/granted.json"
+	jq --arg d "$plain_dir" '.filesystem.read += [$d]' "$FIXTURE_PROFILE" >"$scratch/granted.json"
 
 	for arm in shipped granted; do
 		description=$FIXTURE_PROFILE
@@ -548,7 +579,7 @@ check_r1() {
 		out=$(env "${SESSION_ENV[@]}" "HOME=$home" \
 			"$(pinned_bin nono)/nono" run \
 			--profile "$description" --workdir "$REPO_ROOT" --allow-cwd -- \
-			"$FIXTURE_BASH/bin/bash" "$probe" "$key" "$inside" 2>&1) && rc=0 || rc=$?
+			"$FIXTURE_BASH/bin/bash" "$probe" "$key" "$plain" "$inside" 2>&1) && rc=0 || rc=$?
 
 		# The in-project read is asserted in both arms: it is what says the
 		# session started and the probe ran, and the granted arm needs that
@@ -561,28 +592,39 @@ check_r1() {
 		fi
 
 		if [ "$arm" = granted ]; then
-			# Control 3. The probe must be able to read the key when the
-			# boundary allows it, or the shipped arm's refusal is the probe's
-			# and not the sandbox's.
-			if [ "$rc" -ne 0 ] || ! printf '%s' "$out" | grep -qF "KEY :: $key_canary"; then
+			# Control 3. The probe must be able to read a file under the fake
+			# home when the boundary allows that directory, or the shipped
+			# arm's refusals are the probe's and not the sandbox's.
+			if ! printf '%s' "$out" | grep -qF "PLAIN :: $plain_canary"; then
 				found=1
-				fail "$(printf 'the probe cannot read the key even when the boundary grants it (exit %s):\n%s' \
+				fail "$(printf 'the probe cannot read a file outside the project even when the boundary grants it (exit %s):\n%s' \
 					"$rc" "$out")"
+			fi
+			# The grant named one directory, so the credential beside it stays
+			# out of reach. Without this, a grant that quietly widened to the
+			# whole fake home would pass.
+			if printf '%s' "$out" | grep -qF "$key_canary"; then
+				found=1
+				fail "$(printf 'granting one directory outside the project also handed over the key beside it:\n%s' "$out")"
 			fi
 			continue
 		fi
 
-		if [ "$rc" -eq 0 ]; then
+		if printf '%s' "$out" | grep -qF 'KEY_RC :: 0'; then
 			found=1
-			fail "$(printf 'reading a key outside the project exited 0:\n%s' "$out")"
+			fail "$(printf 'reading a key outside the project succeeded:\n%s' "$out")"
+		fi
+		if printf '%s' "$out" | grep -qF 'PLAIN_RC :: 0'; then
+			found=1
+			fail "$(printf 'reading a plain file outside the project succeeded:\n%s' "$out")"
 		fi
 		if printf '%s' "$out" | grep -qF "$key_canary"; then
 			found=1
 			fail "$(printf 'key material appears in the output of the confined session:\n%s' "$out")"
 		fi
-		if ! printf '%s' "$out" | grep -q 'Permission denied'; then
+		if printf '%s' "$out" | grep -qF "$plain_canary"; then
 			found=1
-			fail "$(printf 'the read did not fail on permission, so the key may simply not have been there:\n%s' "$out")"
+			fail "$(printf 'file content from outside the project appears in the output of the confined session:\n%s' "$out")"
 		fi
 	done
 
