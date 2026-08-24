@@ -3969,6 +3969,17 @@ check_opencode() {
 	session_env "$state"
 	project=$(cd "$proj" && pwd -P)
 
+	# Where this check captures what the session prints, inside the project
+	# because that is the one place the session is granted. A program resolves
+	# the paths of the descriptors it inherits when it starts, and Seatbelt
+	# answers by path, so a capture file the session is granted nothing on is
+	# reported as a refused read before the agent has run — which is how this
+	# agent and `pi` died on macOS while `claude-code`, whose runtime does not
+	# ask, went on capturing to the same place unharmed. Landlock never
+	# re-checks a descriptor that is already open, so Linux cannot see it.
+	capture="$project/.capture"
+	mkdir -p "$capture"
+
 	# The home already carries this agent's roots, for the reason `check_j2_1`
 	# records: with nothing there, a session that lost its relocation writes
 	# nowhere and the diff below stays empty for the wrong reason.
@@ -4001,10 +4012,10 @@ check_opencode() {
 
 	env "${SESSION_ENV[@]}" "HOME=$home" "XDG_CONFIG_HOME=$cfg" "ANTHROPIC_API_KEY=$real" \
 		env -C "$proj" "$entry/$binary" debug paths \
-		>"$outside/paths.out" 2>"$outside/paths.err" && rc=0 || rc=$?
+		>"$capture/paths.out" 2>"$capture/paths.err" && rc=0 || rc=$?
 	if [ "$rc" -ne 0 ]; then
 		fail "$(printf 'the agent did not answer where it writes (exit %s):\n%s' \
-			"$rc" "$(tail -20 "$outside/paths.err")")"
+			"$rc" "$(tail -20 "$capture/paths.err")")"
 		return 1
 	fi
 
@@ -4019,12 +4030,12 @@ check_opencode() {
 		"$project"/*) rooted+=("$root") ;;
 		*) strayed+=("$root=$value") ;;
 		esac
-	done < <(grep -E '^[a-z]+[[:space:]]+/' "$outside/paths.out")
+	done < <(grep -E '^[a-z]+[[:space:]]+/' "$capture/paths.out")
 
 	if [ "${#rooted[@]}" -eq 0 ]; then
 		found=1
 		fail "$(printf 'the agent reported no root under the project, so nothing was asserted:\n%s' \
-			"$(head -12 "$outside/paths.out")")"
+			"$(head -12 "$capture/paths.out")")"
 	fi
 	if [ "${#strayed[@]}" -gt 0 ]; then
 		found=1
@@ -4048,29 +4059,29 @@ check_opencode() {
 
 	env "${SESSION_ENV[@]}" "HOME=$home" "XDG_CONFIG_HOME=$cfg" "ANTHROPIC_API_KEY=$real" \
 		env -C "$proj" "$entry/$binary" providers list \
-		>"$outside/providers.out" 2>"$outside/providers.err" && rc=0 || rc=$?
+		>"$capture/providers.out" 2>"$capture/providers.err" && rc=0 || rc=$?
 	if [ "$rc" -ne 0 ]; then
 		found=1
 		fail "$(printf 'the agent could not report its providers (exit %s):\n%s' \
-			"$rc" "$(tail -20 "$outside/providers.err")")"
+			"$rc" "$(tail -20 "$capture/providers.err")")"
 	else
 		# The variable the mediated route injects, named by the agent itself.
-		if ! grep -qE 'Anthropic.*ANTHROPIC_API_KEY' "$outside/providers.out"; then
+		if ! grep -qE 'Anthropic.*ANTHROPIC_API_KEY' "$capture/providers.out"; then
 			found=1
 			fail "$(printf 'the agent found no provider credential in its environment, so the mediated route did not reach it:\n%s' \
-				"$(cat "$outside/providers.out")")"
+				"$(cat "$capture/providers.out")")"
 		fi
 		# And nothing stored, which is the half D14 is about: the credential
 		# came from the route rather than from a store this environment would
 		# have had to grant. A non-zero count here would mean the session read
 		# an authentication file, and the only one on this machine belongs to
 		# the other agent.
-		if ! grep -q '0 credentials' "$outside/providers.out"; then
+		if ! grep -q '0 credentials' "$capture/providers.out"; then
 			found=1
 			fail "$(printf 'the agent reported stored credentials, so it read an authentication store rather than taking the mediated route:\n%s' \
-				"$(cat "$outside/providers.out")")"
+				"$(cat "$capture/providers.out")")"
 		fi
-		if grep -qF "$real" "$outside/providers.out" "$outside/providers.err"; then
+		if grep -qF "$real" "$capture/providers.out" "$capture/providers.err"; then
 			found=1
 			fail 'the credential the supervisor holds was printed by the session, so it crossed the boundary unsubstituted'
 		fi
@@ -4078,8 +4089,12 @@ check_opencode() {
 
 	# The control: without state in the project, an unchanged home proves
 	# nothing. It accumulates rather than returning, because a lost relocation
-	# breaks the control and the subject at once.
-	mapfile -t landed < <(find "$project" -mindepth 1 2>/dev/null | sort)
+	# breaks the control and the subject at once. The capture directory is this
+	# check's own doing and would make the control true whatever the session
+	# did, so it is not counted; `-not -path` takes a pattern rather than a
+	# regular expression, which is the form BSD find has too.
+	mapfile -t landed < <(find "$project" -mindepth 1 \
+		-not -path "$capture" -not -path "$capture/*" 2>/dev/null | sort)
 	if [ "${#landed[@]}" -eq 0 ]; then
 		found=1
 		fail "the session wrote nothing inside the project, so an unchanged home directory would prove nothing"
@@ -4143,7 +4158,7 @@ check_opencode() {
 #     HTTPS, so it can, and the handbook records that.
 check_pi() {
 	local agent=pi binary=pi
-	local entry outside home proj cfg state project rc real root cred
+	local entry outside home proj cfg state project capture rc real root cred
 	local found=0
 	local -a landed=() changed=() strayed=()
 
@@ -4160,6 +4175,12 @@ check_pi() {
 	mkdir -p "$home" "$proj" "$cfg"
 	session_env "$state"
 	project=$(cd "$proj" && pwd -P)
+
+	# Inside the project, for the reason `check_opencode` records: this agent's
+	# runtime asks what the descriptors it inherited are called, and a capture
+	# it is granted nothing on is refused before it starts.
+	capture="$project/.capture"
+	mkdir -p "$capture"
 
 	# The home carries the root this agent falls back to when the relocation is
 	# lost — `$HOME/.pi/agent`, which M8d read out of the binary as the sole
@@ -4178,32 +4199,32 @@ check_pi() {
 	# what makes it write its stores.
 	env "${SESSION_ENV[@]}" "HOME=$home" "XDG_CONFIG_HOME=$cfg" "ANTHROPIC_API_KEY=$real" \
 		env -C "$proj" "$entry/$binary" auth check --provider anthropic --json --credentials \
-		>"$outside/auth.out" 2>"$outside/auth.err" && rc=0 || rc=$?
+		>"$capture/auth.out" 2>"$capture/auth.err" && rc=0 || rc=$?
 	if [ "$rc" -ne 0 ]; then
 		fail "$(printf 'the agent reports its anthropic credential is unusable (exit %s):\n%s\n%s' \
-			"$rc" "$(cat "$outside/auth.out")" "$(tail -20 "$outside/auth.err")")"
+			"$rc" "$(cat "$capture/auth.out")" "$(tail -20 "$capture/auth.err")")"
 		return 1
 	fi
 
-	if [ "$(jq -r '.status // ""' "$outside/auth.out")" != ready ]; then
+	if [ "$(jq -r '.status // ""' "$capture/auth.out")" != ready ]; then
 		found=1
 		fail "$(printf 'the agent does not consider the mediated route usable:\n%s' \
-			"$(cat "$outside/auth.out")")"
+			"$(cat "$capture/auth.out")")"
 	fi
-	if [ "$(jq -r '.authType // ""' "$outside/auth.out")" != api_key ]; then
+	if [ "$(jq -r '.authType // ""' "$capture/auth.out")" != api_key ]; then
 		found=1
 		fail "$(printf 'the agent resolved the credential by some route other than the injected key:\n%s' \
-			"$(cat "$outside/auth.out")")"
+			"$(cat "$capture/auth.out")")"
 	fi
 
 	# The value the agent is holding. FR-6: 64 hex characters minted for this
 	# session, and not the key the supervisor read out of its own environment.
-	cred=$(jq -r '.credentials // ""' "$outside/auth.out")
+	cred=$(jq -r '.credentials // ""' "$capture/auth.out")
 	if ! printf '%s' "$cred" | grep -qE '^[0-9a-f]{64}$'; then
 		found=1
 		fail "the credential the agent holds is not a per-session substitute: ${cred:+${#cred} characters, }not 64 hex"
 	fi
-	if [ "$cred" = "$real" ] || grep -qF "$real" "$outside/auth.out" "$outside/auth.err"; then
+	if [ "$cred" = "$real" ] || grep -qF "$real" "$capture/auth.out" "$capture/auth.err"; then
 		found=1
 		fail 'the credential the supervisor holds reached the session unsubstituted'
 	fi
@@ -4218,17 +4239,17 @@ check_pi() {
 	printf '{"packages":["npm:left-pad"]}\n' >"$root/settings.json"
 	env "${SESSION_ENV[@]}" "HOME=$home" "XDG_CONFIG_HOME=$cfg" "ANTHROPIC_API_KEY=$real" \
 		env -C "$proj" "$entry/$binary" list \
-		>"$outside/list.out" 2>"$outside/list.err" && rc=0 || rc=$?
+		>"$capture/list.out" 2>"$capture/list.err" && rc=0 || rc=$?
 	if [ "$rc" -ne 0 ]; then
 		found=1
 		fail "$(printf 'the agent could not report its packages (exit %s):\n%s' \
-			"$rc" "$(tail -20 "$outside/list.err")")"
-	elif ! grep -qF 'npm:left-pad' "$outside/list.out"; then
+			"$rc" "$(tail -20 "$capture/list.err")")"
+	elif ! grep -qF 'npm:left-pad' "$capture/list.out"; then
 		# The control. If the agent did not read the declaration, an absent
 		# package tree says only that nothing asked to be fetched.
 		found=1
 		fail "$(printf 'the agent did not read the planted package declaration, so finding nothing installed proves nothing:\n%s' \
-			"$(cat "$outside/list.out")")"
+			"$(cat "$capture/list.out")")"
 	fi
 	# The subject: the declaration went unfulfilled. A package this environment
 	# did not provision stays unprovisioned, whatever the session was asked for.
@@ -4248,8 +4269,10 @@ check_pi() {
 	fi
 
 	# The control, for check_opencode's reason: without state in the project, an
-	# unchanged home proves nothing.
-	mapfile -t landed < <(find "$project" -mindepth 1 2>/dev/null | sort)
+	# unchanged home proves nothing, and this check's own capture directory is
+	# not state the session wrote.
+	mapfile -t landed < <(find "$project" -mindepth 1 \
+		-not -path "$capture" -not -path "$capture/*" 2>/dev/null | sort)
 	if [ "${#landed[@]}" -eq 0 ]; then
 		found=1
 		fail "the session wrote nothing inside the project, so an unchanged home directory would prove nothing"
