@@ -4311,11 +4311,21 @@ surface_reads() {
 # nothing else does, neither an ancestor of what was declared nor a sibling
 # beside it.
 #
-# The observable is strace around the shipped entry point rather than each
-# agent's own listing command, because M8f measured that only one of the three
-# has one. It also reads what the wrapper did rather than what it was asked to
-# do: the execve line carries the argv it built, so the grant is observed here
-# instead of being recomputed and compared against itself.
+# The grant is read off the capability set the session prints for itself, and
+# what it read is read off a syscall trace of the shipped entry point rather
+# than each agent's own listing command, because M8f measured that only one of
+# the three has one. Both observe what the wrapper did rather than what it was
+# asked to do.
+#
+# The two halves are not observable on the same platforms. Every session prints
+# its capability set, so the grant is asserted everywhere. A successful read is
+# a different matter: Landlock reports nothing to nono, so Linux traces the
+# syscall, and on macOS there is no observation to be had at all — dtruss needs
+# SIP disabled, fs_usage needs root, and nono reports refusals and grants but
+# never a read that went through. So the arrival of the surface, and the
+# absence of the neighbour beside it, are skipped there with the reason said
+# out loud rather than asserted from something weaker. docs/HANDBOOK.md carries
+# that gap; research.md § M9e carries what was measured to establish it.
 #
 # Two traps, both recorded in research.md § M8f. `-s 4096`, because strace
 # truncates strings at 32 characters by default and every path here is longer
@@ -4323,9 +4333,9 @@ surface_reads() {
 # read permission and so succeeds whether the grant is there or not.
 check_j8_1() {
 	local outside home host proj agent binary entry strace_bin nono_bin
-	local canary want stray trace rc project i opened wrote
+	local canary want stray trace rc project i opened wrote skipped=''
 	local found=0
-	local -a table=() binaries=() reads=() granted=() declared=() invocation=() expect=() control=() digests=() grant=()
+	local -a table=() binaries=() declared=() invocation=() expect=() control=() digests=() grant=() traced=()
 	local FIXTURE_PROFILE FIXTURE_SUBSTRATE FIXTURE_BASH
 	local -a SESSION_ENV
 	local system
@@ -4394,10 +4404,7 @@ check_j8_1() {
 		binary=${binaries[i]}
 		entry=$(pinned_bin "$binary") || return 1
 		session_fixture "$agent" || return 1
-		strace_bin=$(substrate_member "$FIXTURE_SUBSTRATE" strace) || {
-			fail "the substrate for $agent provides no strace, so what the $agent session opened cannot be observed"
-			return 1
-		}
+		strace_bin=$(substrate_member "$FIXTURE_SUBSTRATE" strace) || strace_bin=
 		if ! mapfile -t expect < <(surface_reads "$agent" "$project" \
 			"${declared[0]}/one" "${declared[1]}/two"); then
 			fail "the agent table does not say where $agent reads a declared surface, so its arrival cannot be observed"
@@ -4422,12 +4429,20 @@ check_j8_1() {
 			;;
 		esac
 
+		# The tracer wraps the session where there is one. Where there is
+		# none the session still runs, because the grant it was given is
+		# observable from its own stderr and only the two arms that need a
+		# syscall are lost.
 		trace="$outside/trace.$agent"
+		traced=()
+		if [ -n "$strace_bin" ]; then
+			traced=("$strace_bin/bin/strace" -ff -s 4096
+				-e "trace=openat,execve" -o "$trace.")
+		fi
 		env "${SESSION_ENV[@]}" "HOME=$home" "XDG_CONFIG_HOME=$outside/cfg" \
 			"ANTHROPIC_API_KEY=sk-ant-canary-$RANDOM$RANDOM" \
 			"AGENT_SANDBOX_SKILLS=${declared[0]}:${declared[1]}" \
-			env -C "$proj" "$strace_bin/bin/strace" -ff -s 4096 \
-			-e trace=openat,execve -o "$trace." \
+			env -C "$proj" "${traced[@]}" \
 			"$entry/$binary" "${invocation[@]}" \
 			>"$outside/out.$agent" 2>"$outside/err.$agent" && rc=0 || rc=$?
 
@@ -4439,7 +4454,19 @@ check_j8_1() {
 		# any particular openat was a matter of scheduling.
 		cat "$trace".* >"$trace" 2>/dev/null || :
 
-		if [ ! -s "$trace" ]; then
+		# What the session was granted, read off the capability set nono
+		# prints before the program runs. This is the control the trace's
+		# existence used to be for the arms below it: a capability set is
+		# printed only by a session that started, so an empty one means
+		# nothing was observed rather than that nothing was granted.
+		granted_reach "$outside/err.$agent" >"$outside/reach.$agent"
+		if [ ! -s "$outside/reach.$agent" ]; then
+			found=1
+			fail "$(printf 'the %s session printed no capability set (exit %s), so what it was granted cannot be observed:\n%s' \
+				"$agent" "$rc" "$(tail -n 5 "$outside/err.$agent")")"
+			continue
+		fi
+		if [ -n "$strace_bin" ] && [ ! -s "$trace" ]; then
 			found=1
 			fail "$(printf 'the %s session produced no trace (exit %s), so it observes nothing:\n%s' \
 				"$agent" "$rc" "$(tail -n 5 "$outside/err.$agent")")"
@@ -4448,44 +4475,63 @@ check_j8_1() {
 
 		# The surface arrives. Each declared directory separately, so one of
 		# them arriving cannot stand in for the other.
-		for want in "${expect[@]}"; do
-			opened=$(grep -F -- "\"$want\", O_RDONLY|O_NOCTTY" "$trace" |
-				grep -cE '\) = [0-9]+$') || opened=0
-			if [ "$opened" -eq 0 ]; then
+		#
+		# This is the one arm no instrument on macOS can carry: a successful
+		# read leaves no trace there. dtruss needs SIP disabled, fs_usage
+		# needs root, nono's trailer reports refusals only and its audit
+		# trail reports grants only, so there is nothing to read a
+		# successful open out of. Rather than assert something weaker under
+		# the same name, the arm is skipped and the check says so.
+		if [ -n "$strace_bin" ]; then
+			for want in "${expect[@]}"; do
+				opened=$(grep -F -- "\"$want\", O_RDONLY|O_NOCTTY" "$trace" |
+					grep -cE '\) = [0-9]+$') || opened=0
+				if [ "$opened" -eq 0 ]; then
+					found=1
+					fail "$(printf 'the %s session never read the declared surface at %s (exit %s), so it did not arrive' \
+						"$agent" "$want" "$rc")"
+				fi
+			done
+		else
+			skipped="the substrate for $agent provides no strace, and a successful read leaves no observation on this platform, so the arrival of the declared surface and the absence of its neighbours are not asserted here"
+		fi
+
+		# The grant the wrapper made: each declared directory readable in its
+		# own right, no ancestor of either, and none of them writable.
+		#
+		# Asserted per path rather than as a whole set, because the
+		# capability set is everything the session was granted — the
+		# execution substrate and the project among it — while what this
+		# check is about is the surface.
+		for want in "${declared[@]}"; do
+			if ! reach_grants "$outside/reach.$agent" "$want" 'r'; then
 				found=1
-				fail "$(printf 'the %s session never read the declared surface at %s (exit %s), so it did not arrive' \
-					"$agent" "$want" "$rc")"
+				fail "$(printf 'the %s session was not granted the declared surface at %s, so it cannot arrive:\n%s' \
+					"$agent" "$want" "$(cat "$outside/reach.$agent")")"
+			fi
+			if reach_grants "$outside/reach.$agent" "$want" 'w'; then
+				found=1
+				fail "the $agent session was granted write to the declared surface at $want, so the surface is handed over rather than lent"
 			fi
 		done
-
-		# The grant, read off the argv the wrapper built: exactly the declared
-		# directories, each in its own right and no ancestor of either.
-		#
-		# Two readings of the same argv. `reads` is the read-only grant, which
-		# is what the declaration is allowed to produce. `granted` keeps the
-		# mode alongside the path for every filesystem flag the wrapper passed,
-		# so the write arm below exercises the grant that was really made
-		# rather than the one this check would have preferred to see.
-		mapfile -t reads < <(grep -oE '"--read", "[^"]*"' "$trace" |
-			sed -E 's/"--read", "([^"]*)"/\1/' | sort -u)
-		mapfile -t granted < <(grep -oE '"--(read|allow|write)", "[^"]*"' "$trace" |
-			sed -E 's/"(--[a-z]+)", "([^"]*)"/\1 \2/' | sort -u)
-		want=$(printf '%s\n' "${declared[@]}" | sort -u)
-		if [ "$(printf '%s\n' "${reads[@]}")" != "$want" ]; then
-			found=1
-			fail "$(printf 'the %s session was granted\n%s\nbut the consumer declared\n%s' \
-				"$agent" "$(printf '%s\n' "${reads[@]}")" "$want")"
-		fi
+		for want in "$host" "$host/undeclared" "$host/undeclared/three"; do
+			if reach_grants "$outside/reach.$agent" "$want" '.'; then
+				found=1
+				fail "the $agent session was granted $want, which the consumer did not declare, so what arrives is wider than what was declared"
+			fi
+		done
 
 		# Nothing beside the declaration arrives. Not vacuous: a wrapper that
 		# pointed the agent at the declared directories' common parent would
 		# satisfy every assertion above and pull this one in as well.
-		for want in "${control[@]}"; do
-			if grep -qF -- "\"$want\", O_RDONLY|O_NOCTTY" "$trace"; then
-				found=1
-				fail "the $agent session read an undeclared skill beside the surface at $want, so what arrives is wider than what was declared"
-			fi
-		done
+		if [ -n "$strace_bin" ]; then
+			for want in "${control[@]}"; do
+				if grep -qF -- "\"$want\", O_RDONLY|O_NOCTTY" "$trace"; then
+					found=1
+					fail "the $agent session read an undeclared skill beside the surface at $want, so what arrives is wider than what was declared"
+				fi
+			done
+		fi
 
 		# Pointed at, not copied (P8). By digest rather than by searching for
 		# the canary text, because an agent that loaded the skill records its
@@ -4504,13 +4550,17 @@ check_j8_1() {
 		# Lent, not handed over — and observed by trying rather than by
 		# hoping. The comparison after the loop cannot tell a read-only
 		# grant from a read-write one unless something in a session actually
-		# attempts the write, so one session does. The grant used here is
-		# the argv just read off the wrapper's own execve, not a grant
-		# recomputed from the declaration, so a wrapper that widened the
-		# mode is caught here and not only by the arm above.
+		# attempts the write, so one session does. The mode replayed here is
+		# the one the wrapper's own session reported being granted, not a
+		# mode recomputed from the declaration, so a wrapper that widened it
+		# is caught here and not only by the arm above.
 		grant=()
-		for want in "${granted[@]}"; do
-			grant+=("${want%% *}" "${want#* }")
+		for want in "${declared[@]}"; do
+			case $(awk -v p="$want" '$2 == p { print $1 }' "$outside/reach.$agent") in
+			'r+w') grant+=(--allow "$want") ;;
+			w) grant+=(--write "$want") ;;
+			r) grant+=(--read "$want") ;;
+			esac
 		done
 		wrote=$(env "${SESSION_ENV[@]}" "HOME=$home" \
 			env -C "$proj" "$nono_bin/nono" run \
@@ -4533,7 +4583,15 @@ check_j8_1() {
 			"$(diff "$outside/before" "$outside/after")")"
 	fi
 
-	[ "$found" -eq 0 ]
+	[ "$found" -eq 0 ] || return 1
+
+	# Everything observable here held. Reported as a skip rather than a pass
+	# where an arm could not be observed at all, so the strongest half of the
+	# property does not quietly read as asserted.
+	if [ -n "$skipped" ]; then
+		printf '%s\n' "$skipped"
+		return "$SKIP_STATUS"
+	fi
 }
 
 # Which of the given paths a session can actually read, under a given grant.
@@ -4583,8 +4641,14 @@ session_readable() {
 # directions — nothing missing, and nothing extra.
 #
 # The reach is observed by reading, not by reasoning about the grant: each arm
-# runs a session under the argv the wrapper itself built and asks it which of
-# the planted paths it can actually open.
+# replays the capability set its session printed for itself and asks a process
+# under that set which of the planted paths it can actually open.
+#
+# The grant is read off that capability set rather than off the wrapper's execve
+# line, because a syscall trace is Landlock-only and this property holds on
+# every platform. It is also the wider observation of the two: argv carries the
+# flags the wrapper built, while the capability set carries everything the
+# session ended up with, the profile's own grants included.
 #
 # The self-referential case M1e found gets its own arm. A host confinement
 # description sitting in the same home directory must take no part in deciding
@@ -4592,11 +4656,11 @@ session_readable() {
 # that description deleted. Equal grants is the only outcome that means the
 # boundary was decided inside the repository.
 check_r9() {
-	local outside home proj agent binary entry strace_bin nono_bin
-	local trace project i rc want canary got missing extra arm surface
+	local outside home proj agent binary entry nono_bin
+	local project i rc want canary got missing extra arm surface mode
 	local found=0
 	local -a table=() binaries=() invocation=() declared=() probe=() secrets=()
-	local -a granted=() grant=()
+	local -a grant=()
 	local FIXTURE_PROFILE FIXTURE_SUBSTRATE FIXTURE_BASH
 	local -a SESSION_ENV
 	local system
@@ -4681,10 +4745,6 @@ check_r9() {
 		binary=${binaries[i]}
 		entry=$(pinned_bin "$binary") || return 1
 		session_fixture "$agent" || return 1
-		strace_bin=$(substrate_member "$FIXTURE_SUBSTRATE" strace) || {
-			fail "the substrate for $agent provides no strace, so the grant it was given cannot be observed"
-			return 1
-		}
 		case $binary in
 		opencode) invocation=(debug skill) ;;
 		claude | pi) invocation=(-p hi) ;;
@@ -4697,7 +4757,6 @@ check_r9() {
 		# Both arms, then the same arm again with the host confinement
 		# description deleted. Each writes its grant and its readable set.
 		for arm in declared bare nohost; do
-			trace="$outside/trace.$agent.$arm"
 			case $arm in
 			declared | nohost)
 				surface="AGENT_SANDBOX_SKILLS=${declared[0]}:${declared[1]}"
@@ -4709,13 +4768,14 @@ check_r9() {
 			if [ "$arm" = nohost ]; then
 				# Only the grant is read from this arm, so the cheapest
 				# invocation that still reaches `exec nono run` will do.
+				# Its stderr is kept all the same, because that is where
+				# the session prints the grant.
 				rm -rf "$home/.config/nono"
 				env "${SESSION_ENV[@]}" "HOME=$home" \
 					"XDG_CONFIG_HOME=$outside/cfg" "$surface" \
-					env -C "$proj" "$strace_bin/bin/strace" -ff -s 4096 \
-					-e trace=execve -o "$trace." \
+					env -C "$proj" \
 					"$entry/$binary" --version \
-					>/dev/null 2>&1 || :
+					>/dev/null 2>"$outside/err.$agent.$arm" || :
 				mkdir -p "$home/.config/nono/profiles"
 				printf '{"meta":{"name":"%s-host"}}\n' "$canary" >"${secrets[3]}"
 			else
@@ -4723,34 +4783,56 @@ check_r9() {
 					"XDG_CONFIG_HOME=$outside/cfg" \
 					"ANTHROPIC_API_KEY=sk-ant-canary-$RANDOM$RANDOM" \
 					"$surface" \
-					env -C "$proj" "$strace_bin/bin/strace" -ff -s 4096 \
-					-e trace=execve -o "$trace." \
+					env -C "$proj" \
 					"$entry/$binary" "${invocation[@]}" \
 					>"$outside/out.$agent.$arm" 2>"$outside/err.$agent.$arm" &&
 					rc=0 || rc=$?
 			fi
-			cat "$trace".* >"$trace" 2>/dev/null || :
 
-			mapfile -t granted < <(grep -oE '"--(read|allow|write)", "[^"]*"' "$trace" |
-				sed -E 's/"(--[a-z]+)", "([^"]*)"/\1 \2/' | sort -u)
-			printf '%s\n' "${granted[@]+"${granted[@]}"}" >"$outside/grant.$agent.$arm"
+			# Two classes of line are dropped, because neither says
+			# anything about the reach the description asked for and
+			# both move between two runs of the same description.
+			#
+			# nono summarises part of its floor as `+ N system/group
+			# paths`, and that count was measured reading 34 against
+			# 33 for two sessions whose expanded sets were identical
+			# apart from their own pids, so a comparison including it
+			# reports a difference that is not one.
+			#
+			# The pid is the other: a session is granted its own
+			# /proc/<pid>, which differs on every run by
+			# construction.
+			granted_reach "$outside/err.$agent.$arm" |
+				awk '$1 != "+" && $2 !~ "^/proc/[0-9]+"' \
+					>"$outside/grant.$agent.$arm"
 
 			[ "$arm" = nohost ] && continue
 
 			# The control, per arm: the session has to have started and got
-			# somewhere. The pre-flight's own refusals are 77 and 78.
+			# somewhere. The pre-flight's own refusals are 77 and 78, and a
+			# capability set is printed by a session that started, so an
+			# empty one says nothing was observed rather than that nothing
+			# was granted.
 			if [ "$rc" = 77 ] || [ "$rc" = 78 ] ||
-				! grep -qE 'execve\("[^"]*/nono"' "$trace"; then
+				[ ! -s "$outside/grant.$agent.$arm" ]; then
 				found=1
 				fail "$(printf 'the %s session did not start in the %s arm (exit %s), so its reach means nothing:\n%s' \
 					"$agent" "$arm" "$rc" "$(tail -n 5 "$outside/err.$agent.$arm")")"
 				continue
 			fi
 
+			# Replay the set the session reported, by mode. The modes that
+			# carry no path flag are skipped: `x` and `net` are not grants
+			# of a path to read, and `+` is nono summarising paths it did
+			# not list, so there is no path to pass on.
 			grant=()
-			for got in "${granted[@]+"${granted[@]}"}"; do
-				grant+=("${got%% *}" "${got#* }")
-			done
+			while read -r mode got _; do
+				case $mode in
+				'r+w') grant+=(--allow "$got") ;;
+				w) grant+=(--write "$got") ;;
+				r) grant+=(--read "$got") ;;
+				esac
+			done <"$outside/grant.$agent.$arm"
 			session_readable "$nono_bin/nono" "$FIXTURE_PROFILE" \
 				"$FIXTURE_BASH/bin/bash" "$project" "$home" \
 				"${grant[@]+"${grant[@]}"}" -- "${probe[@]}" \
