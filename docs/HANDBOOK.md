@@ -40,11 +40,10 @@ Earlier revisions of this document named a different owner and a different repos
 `--accept-flake-config` is part of the command rather than an optimisation, because a stranger is not a trusted user and the declared substituter is otherwise ignored.
 See [Where the agents come from](#where-the-agents-come-from) for what that costs and for the two alternatives.
 
-That path is **checked but not yet green**.
-`check_j1_1` enters from that reference into a clean `$HOME`, and it fails today because the reference does not carry this environment yet: `origin/main` is still the Kafka playground this repository grew out of.
-Nothing about the check changes when it is pushed.
-The flake declares `x86_64-linux` and `aarch64-darwin`, which are the two systems for which the agents exist upstream, but only the first has been entered.
-See [Known drift](#known-drift).
+That path is **checked and green**.
+`check_j1_1` enters from that reference into a clean `$HOME`, and it passes now that the reference carries this environment.
+The flake declares `x86_64-linux` and `aarch64-darwin`, which are the two systems for which the agents exist upstream, and both have been entered: the suite runs unattended on each, `x86_64-linux` asserting every check and `aarch64-darwin` skipping two it has no instrument for.
+See [Where the two platforms differ](#where-the-two-platforms-differ).
 
 There is no devenv path.
 `devenv.nix` and `devenv.yaml` generated a devcontainer whose bind mounts were the leak the first spec exists to remove, and both are deleted.
@@ -310,15 +309,38 @@ shellcheck scripts/validate.sh scripts/checks/*.sh   # lint the shell
 `lib/preflight.sh` execs its probe by bare name, so on a host that carries its own `true` outside the granted substrate the probe is denied and `check_r6` fails for a reason that has nothing to do with the check.
 The unit and component layers have no such dependency.
 
-It **exits non-zero today, by design**: `check_sc3` asserts a scenario-to-check bijection and is the feature's progress bar, so it fails until the last scenario in the spec has a check.
-A task is judged by whether its own check passes and whether the set `check_sc3` names shrinks by exactly the scenarios that task covers.
-Today's baseline is `1 of 31 checks failed`, that one being `check_sc3`, and the set it names is 3 scenarios long: `j7_1 rep1 rep2`.
+It **exits zero**: `35 checks passed` on `x86_64-linux`, and `33 passed, 2 skipped` on `aarch64-darwin`.
+`check_sc3` asserts a scenario-to-check bijection and was the feature's progress bar while it failed; it passes now, so every scenario in the spec has a check.
+An exit status of zero is the whole report, and a skip is not a pass — the two the darwin arm reports are named under [Where the two platforms differ](#where-the-two-platforms-differ).
 
 **No check can see an interactive prompt.**
 `validate.sh` runs every check with `stdin` on `/dev/null`, which it must — an agent started in print mode reads stdin and will otherwise drain the loop feeding it the list of checks to run.
 The cost is that a green suite says nothing about what happens on a terminal.
 This was not hypothetical: the agent entry points shipped for a while unable to start at all, hanging on a consent question the mechanism asked on `stdin` while the wrapper sent its text to `/dev/null`, and every check passed throughout.
 Where interactive behaviour is the criterion, assert on the arguments a command is invoked with instead — `check_r6`'s fourth arm logs the entry point's own `nono run` argv and requires the consent flag on every one — and enter the shell and type an agent's name by hand as well.
+
+## Where the two platforms differ
+
+Both supported platforms are verified by the same command. They are not equally strong, and they do not report the same things.
+
+| | `x86_64-linux` | `aarch64-darwin` |
+| --- | --- | --- |
+| enforcement | Landlock | Seatbelt |
+| tier | enforced, and observable from outside the sandbox | enforced, and **experimental** — the guarantee, not whether the platform is verified |
+| how a refusal reads | `Permission denied` | `Operation not permitted` |
+| syscall tracer | `strace`, in the devShell | none. `dtruss` needs SIP disabled, `fs_usage` needs root |
+| supervisor trailer | absent — `No path denials were observed during this session.` | present — `N paths blocked` and a line per path |
+| a protected path | a grant on `$HOME/.ssh` wins | marked `[permanently restricted]`, overridable only via `filesystem.bypass_protection` |
+| suite result | `35 checks passed` | `33 passed, 2 skipped` |
+
+**The two enforcements differ in what they report, not only in what they permit.** That is the practical difference: the trailer and the tracer are the same code in one binary, and Landlock starves the reporting path while Seatbelt feeds it. So a denial is *observable* on darwin without a tracer, and a permitted read is observable only on Linux. Every check that needs one of the two carries the split in one place.
+
+Two checks therefore report `SKIP` on darwin rather than passing, which is deliberate — asserting something weaker under the same name would be worse:
+
+- **`check_substrate_denials`** needs a syscall trace of a confined session. What darwin keeps is the component-layer equality in `check_sc1`, which reads the description rather than the kernel.
+- **`check_j8_1`** needs to observe a *permitted* read, for which darwin has no instrument. What is lost there is the arrival of the declared authoring surface for `claude-code` and `pi`, and the arm asserting that the surface's undeclared neighbours are unreadable, for all three agents. What survives on darwin is the whole grant arm, read off the capability banner: each declared directory readable in its own right, none writable, and neither the parent nor the undeclared neighbour granted anything. Arrival for `opencode` is covered there by `check_opencode`, which asks the agent to enumerate what it loaded — the instrument the scenario itself names — and passes on both platforms.
+
+**The cross-platform comparison is narrower than it looks.** The `platforms` job diffs each runner's confinement description with every `/nix/store/` path stripped out, and since the substrate is the whole of `filesystem.read` and the leak registry is empty, what it compares is one platform-independent expression of `$WORKDIR` placeholders and the state redirection. It proves nobody has made the description platform-dependent. It does **not** observe the effective reach on either platform, and the resolved floor — where nono's own `system_read_macos` and `system_read_linux_core` groups differ — is subtracted on both sides of every per-platform equality. Comparing effective reach across platforms is verified by hand, by reading the capability banner of the same agent on each.
 
 ## Known drift
 
@@ -327,18 +349,19 @@ It is the natural input to the first spec.
 
 **Portability.**
 
-- `aarch64-darwin` is declared and evaluates, but has never been entered, and macOS confinement is enforced by a different mechanism from Landlock. Nothing here has measured how strong it is.
-- Consuming from a ref is now exercised — `check_j1_1` is the e2e layer — but it does not yet pass, because the published reference is still the Kafka playground this repository grew out of and carries none of this. The check fails saying so, and the fix is a push rather than an edit. Until then the environment is only *known* to work from a checkout.
+- Both declared systems are now entered and verified unattended, and how they differ is described under [Where the two platforms differ](#where-the-two-platforms-differ). What remains drift is that macOS enforcement is still labelled experimental, and that comparing the *effective* reach of the two platforms is done by hand rather than by the suite.
+- Consuming from a ref passes — `check_j1_1` is the e2e layer, and it enters from the published reference into a clean `$HOME`. What it does not cover is a machine with no warm store, since the runner and this checkout both have one.
 
 **Isolation.**
 
+- **A project that *is* your home directory cannot start an agent.** The pre-flight proves confinement is enforced by reading a path outside the project and requiring the refusal; where the project is the whole home there is no such path left, so it refuses with `cannot verify confinement` rather than starting. That is the honest answer — confining a session whose project is the entire home would grant it everything — and per **P9** it is a refusal that says so rather than a session that runs unverified.
 - Confinement is now observed rather than asserted, on both sides. `check_r6` proves the pre-flight refuses a host that cannot enforce it and `check_j1_1` compares a real session's granted reach against the project, the execution substrate and the leak registry; the refusal side is now checked too — `check_r1` reads a planted SSH key from inside a session and watches it fail, `check_r2` writes outside the project and watches the file not appear, `check_r3` puts an API-key canary in the host environment and proves it does not cross, `check_r4` has a session rewrite the source of its own confinement and proves nothing widens until a human re-enters, `check_r5` commits a confinement description to the checkout and proves the entry point does not read it, `check_r10` plants a host git configuration that runs a program and proves it neither crosses nor runs, `check_r8` presents a substitute that is no longer valid and proves the answer names an authentication failure rather than a denial, `check_r11` puts a demand for a signature in a checkout's own configuration and proves the commit is refused with no object created and no key read, and `check_j8_2` plants a whole host-global agent installation and compares the session's granted reach to the project, the substrate and the registry as a set. Each of them reads, writes or runs something it *is* allowed in the same session, so a session that failed to start cannot pass — and `check_controls` reads the suite's own text to keep it that way, because a refusal check whose control has been deleted goes on passing while proving nothing.
 - A session is granted the closure of what it runs, and each agent has a substrate of its own: 128 store paths for `claude-code` and 128 for `opencode`, rather than the 67,000 the store holds. The leak registry is now **empty**. `check_j4_1` asserts the substitute's form, that the real value is nowhere in the session's environment or at rest in the project, and that two sessions get different substitutes; `check_j5_1` asserts that one credential in your environment serves every project and every agent, each minted a substitute of its own; and `check_r8` presents a substitute that is no longer valid and proves the answer is an authentication failure rather than a denial. What still has no check is a real provider refusing a substitute copied out of a session, which needs a real account and is verified by hand.
 - **Two projects at once are checked concurrently, not one after the other.** `check_j3_1` runs two sessions in sibling checkouts at the same time and asserts that each reaches exactly one of them, that the two differ, and that neither can write into the other — confirmed from outside the sandbox, since a denial reported from inside is the sandbox's own account of itself. The two halves are separate on purpose: a *read-only* grant on a sibling checkout is a leak that no write attempt would ever observe.
 - **A grant on an exact path beats a `deny` the mechanism carries for it.** The five `required` deny groups, `deny_credentials` among them, are not a backstop behind the leak registry — a registry entry naming `$HOME/.ssh` would read the key, with the deny sitting beside the grant in the resolved manifest. A grant on an *ancestor* of denied paths is refused and the session does not start, but do not expect the message to say so: granting `$HOME` is refused first for overlapping nono's own protected state root, at a path that need not even exist, and the deny rules are never mentioned. So the registry's strictness is the whole of the guarantee.
 - **A confinement description written inside the project is one the mechanism will find, and what refuses it is a single command-line argument.** The blanket `XDG_CONFIG_HOME` puts nono's user profile directory inside the checkout, so a profile committed to a repository is listed by `nono profile list` and grants what it asks for the moment anything resolves it by name. The entry point passes `--profile <store path>` as an argument, and an argument beats `NONO_PROFILE`, which is why an untrusted checkout cannot grant itself paths. Nothing refuses the file itself.
 - **The calling environment can widen a session, and that is deliberate.** `NONO_ALLOW` adds to a description the entry point pinned, and `--extends` adds a whole profile. That is the intended route for a consumer to lend a session something of their own. It is worth knowing that the mechanism cannot tell a variable exported above your checkouts from one exported by a checkout's own `.envrc`, so the trust boundary there is your `direnv allow`, not an enforcement.
-- The denial-set comparison behind the narrowing uses `strace`, which is Linux-only, so on macOS `check_substrate_denials` reports `SKIP` rather than passing. What macOS keeps is the component-layer equality, which reads the description rather than the kernel.
+- Two checks report `SKIP` on macOS rather than passing, because the platform has no instrument for what they assert. Both are described under [Where the two platforms differ](#where-the-two-platforms-differ).
 - A confined session inherits `PATH` **whole**, host user profile included, and nono offers no way to narrow it: `set_vars.PATH` is rejected as reserved and `deny_vars` has no effect on it. Now that the store is no longer granted wholesale, this is literal: a tool the session can still *name* from the host profile is a tool it can no longer *run*.
 
 **State that still resolves into `$HOME`.**
@@ -350,6 +373,7 @@ It is the natural input to the first spec.
 **Tools the environment does not provide.**
 
 - `git` is now in the devShell, and so is `strace` on Linux. `node` is not: it resolves from the host user profile, which by [AGENTS.md](../AGENTS.md#3-environment-and-tooling) §3 means it is *not available*, and a confined session cannot run it because it is outside the substrate.
+- **`findutils` is not declared, and two checks depend on a GNU-only flag.** `check_opencode` and `check_pi` build their home manifests with `find -printf`, which BSD `find` does not have. It resolves on both runners today only because `nix develop`'s own stdenv supplies it. Where it does not, both manifests come out empty and the comparison passes having compared nothing — a silent pass, which is the failure mode **P9** forbids. `outside_root` in the same suite already avoids GNU-only `mktemp -p` for BSD's sake, so the suite is inconsistent with itself here.
 
 **Orphans and small things.**
 

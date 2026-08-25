@@ -57,40 +57,6 @@ substrate_member() {
 	return 1
 }
 
-# TEMPORARY (M9d iteration 3). What appears in a fabricated home while sessions
-# run against it. The macOS run reported the home directory's own line differing
-# in modification time alone, with its size and every child identical, so
-# something was created and removed inside the window rather than left behind.
-# A poller beside the session names it; a directory listing afterwards cannot.
-#
-# The poller is started before the first session and stopped before the
-# comparison, and its findings are printed by `dbg_watch_stop`, which the driver
-# shows only when the check fails.
-dbg_watch_start() {
-	local dir=$1 seen=$2
-	: >"$seen"
-	# Both streams are closed in the child, and the reason is measured: the
-	# caller reads this function through a command substitution, and a
-	# background process holding that pipe open keeps the substitution waiting
-	# for an EOF that never comes. The first draft hung the whole check.
-	(
-		while :; do
-			ls -A "$dir" >>"$seen" 2>/dev/null
-			# Fractional sleep where the platform has one, a tight loop where
-			# it does not: an unsupported argument must not print per pass.
-			sleep 0.02 2>/dev/null || :
-		done
-	) >/dev/null 2>&1 &
-	printf '%s\n' "$!"
-}
-
-dbg_watch_stop() {
-	local label=$1 pid=$2 seen=$3 dir=$4
-	{ kill "$pid" && wait "$pid"; } 2>/dev/null || true
-	dbg "$label: entries ever seen: $(sort -u "$seen" | tr '\n' ' ')"
-	dbg "$label: entries now: $(find "$dir" -mindepth 1 -maxdepth 1 -printf '%f ')"
-}
-
 # Everything a check needs before it can run a probe inside a session: the
 # agent's resolved description, its execution substrate, and a bash out of that
 # substrate. Sets FIXTURE_PROFILE, FIXTURE_SUBSTRATE and FIXTURE_BASH.
@@ -1935,8 +1901,6 @@ check_j2_1() {
 	local agent=claude-code binary=claude
 	local entry outside home proj cfg state probe project registry rc
 	local root want got write entry_path covered found=0
-	# TEMPORARY (M9d iteration 3).
-	local watcher before_t after_t
 	local -a landed=() roots=() changed=() spawned=()
 
 	session_fixture "$agent" || return 1
@@ -1971,14 +1935,6 @@ check_j2_1() {
 	# Every path, not only files, so a directory the session creates and leaves
 	# empty counts too.
 	find "$home" -printf '%p\t%s\t%T@\n' | sort >"$outside/before"
-
-	# TEMPORARY (M9d iteration 3). Started before the first session, stopped
-	# before the comparison below. The trap is replaced rather than added to,
-	# so a check that returns early on one of the arms above still takes the
-	# poller with it.
-	watcher=$(dbg_watch_start "$home" "$outside/seen")
-	# shellcheck disable=SC2064
-	trap "{ kill $watcher; } 2>/dev/null; rm -rf '$outside'" RETURN
 
 	env "${SESSION_ENV[@]}" "HOME=$home" "XDG_CONFIG_HOME=$cfg" \
 		env -C "$proj" "$entry/$binary" plugin list \
@@ -2054,9 +2010,6 @@ check_j2_1() {
 	# entry added later relaxes this comparison by exactly what it declares and
 	# by nothing else. $HOME is expanded because an entry names the variable
 	# while the diff carries the resolved path.
-	# TEMPORARY (M9d iteration 3).
-	dbg_watch_stop "j2_1 home" "$watcher" "$outside/seen" "$home"
-
 	find "$home" -printf '%p\t%s\t%T@\n' | sort >"$outside/after"
 	registry=$(nix eval --json "$REPO_ROOT#leakRegistry" \
 		--apply "es: builtins.filter (e: builtins.elem \"$agent\" e.agents) es" |
@@ -2077,42 +2030,6 @@ check_j2_1() {
 
 	if [ "${#changed[@]}" -ne 0 ]; then
 		found=1
-		# TEMPORARY (M9d iteration 2). The comparison carries path, size and
-		# modification time, and reports the path alone, so a directory whose
-		# own line moved because a registry-covered child was created under it
-		# is indistinguishable from a write the registry does not cover. The
-		# differing lines verbatim say which of the three fields moved.
-		while IFS= read -r line; do
-			dbg "j2_1 home diff: $line"
-		done < <(diff "$outside/before" "$outside/after")
-		while IFS= read -r line; do
-			dbg "j2_1 registry entry: $line"
-		done <<<"$registry"
-		while IFS= read -r line; do
-			dbg "j2_1 home now: $line"
-		done < <(find "$home" -maxdepth 1 -printf '%y\t%p\t%s\t%T@\n' | sort)
-
-		# TEMPORARY (M9d iteration 3). The hypothesis, put to the run rather
-		# than reasoned about: lib/preflight.sh writes its positive-control
-		# canary to `${XDG_RUNTIME_DIR:-$HOME}`, and every agent entry point
-		# runs that pre-flight. Where XDG_RUNTIME_DIR is unset — the macOS
-		# runner, not the Linux one — the canary is created and removed inside
-		# this fabricated home, which moves the directory's own modification
-		# time and returns its size to where it started. So the same session is
-		# run once more with that variable pointing somewhere else: a home
-		# whose time stops moving confirms the canary, and one that moves
-		# anyway refutes it.
-		dbg "j2_1 XDG_RUNTIME_DIR as the check saw it: ${XDG_RUNTIME_DIR:-<unset>}"
-		mkdir -p "$outside/run"
-		before_t=$(find "$home" -maxdepth 0 -printf '%s\t%T@\n')
-		env "${SESSION_ENV[@]}" "HOME=$home" "XDG_CONFIG_HOME=$cfg" \
-			"XDG_RUNTIME_DIR=$outside/run" \
-			env -C "$proj" "$entry/$binary" plugin list \
-			>"$outside/rerun.out" 2>"$outside/rerun.err" || true
-		after_t=$(find "$home" -maxdepth 0 -printf '%s\t%T@\n')
-		dbg "j2_1 with XDG_RUNTIME_DIR set: $before_t -> $after_t"
-		dbg "j2_1 with XDG_RUNTIME_DIR set: it now holds: $(find "$outside/run" -mindepth 1 -printf '%f ')"
-
 		fail "$(printf 'the session changed the home directory outside the leak registry:\n%s' \
 			"$(printf '%s\n' "${changed[@]}")")"
 	fi
@@ -2226,8 +2143,6 @@ check_j3_1() {
 	local agent=claude-code binary=claude
 	local entry outside work home cfg state probe registry rc_a rc_b
 	local name other root canary_a canary_b entry_path covered record seen found=0
-	# TEMPORARY (M9d iteration 3).
-	local watcher before_t after_t
 	local -a landed=() changed=() records=() reached=()
 	local -A projects=()
 
@@ -2258,11 +2173,6 @@ check_j3_1() {
 		find "${projects[$name]}" -printf '%p\t%s\t%T@\n' | sort >"$outside/before.$name"
 	done
 	find "$home" -printf '%p\t%s\t%T@\n' | sort >"$outside/home.before"
-
-	# TEMPORARY (M9d iteration 3), for check_j2_1's reason.
-	watcher=$(dbg_watch_start "$home" "$outside/seen")
-	# shellcheck disable=SC2064
-	trap "{ kill $watcher; } 2>/dev/null; rm -rf '$outside'" RETURN
 
 	# Genuinely concurrent, per the RED. Each status is collected separately so
 	# a pair where only one session survived cannot read as a pair that did not
@@ -2299,9 +2209,6 @@ check_j3_1() {
 	# them, so state that was not project-scoped would have collided there.
 	# The registry is subtracted rather than assumed empty, exactly as
 	# check_j2_1 does, so an entry added later relaxes this by what it declares.
-	# TEMPORARY (M9d iteration 3).
-	dbg_watch_stop "j3_1 home" "$watcher" "$outside/seen" "$home"
-
 	find "$home" -printf '%p\t%s\t%T@\n' | sort >"$outside/home.after"
 	registry=$(nix eval --json "$REPO_ROOT#leakRegistry" \
 		--apply "es: builtins.filter (e: builtins.elem \"$agent\" e.agents) es" |
@@ -2322,27 +2229,6 @@ check_j3_1() {
 	done < <(comm -13 "$outside/home.before" "$outside/home.after")
 	if [ "${#changed[@]}" -ne 0 ]; then
 		found=1
-		# TEMPORARY (M9d iteration 2), for check_j2_1's reason.
-		while IFS= read -r line; do
-			dbg "j3_1 home diff: $line"
-		done < <(diff "$outside/home.before" "$outside/home.after")
-		while IFS= read -r line; do
-			dbg "j3_1 home now: $line"
-		done < <(find "$home" -maxdepth 1 -printf '%y\t%p\t%s\t%T@\n' | sort)
-
-		# TEMPORARY (M9d iteration 3), for check_j2_1's reason: the pre-flight
-		# canary put to the run. One session, not the pair, because the
-		# question is where the canary lands and not whether two collide.
-		dbg "j3_1 XDG_RUNTIME_DIR as the check saw it: ${XDG_RUNTIME_DIR:-<unset>}"
-		mkdir -p "$outside/run"
-		before_t=$(find "$home" -maxdepth 0 -printf '%s\t%T@\n')
-		env "${SESSION_ENV[@]}" "HOME=$home" "XDG_CONFIG_HOME=$cfg" \
-			"XDG_RUNTIME_DIR=$outside/run" \
-			env -C "${projects[alpha]}" "$entry/$binary" plugin list \
-			>"$outside/rerun.out" 2>"$outside/rerun.err" || true
-		after_t=$(find "$home" -maxdepth 0 -printf '%s\t%T@\n')
-		dbg "j3_1 with XDG_RUNTIME_DIR set: $before_t -> $after_t"
-
 		fail "$(printf 'two concurrent sessions shared state in the home directory, outside the leak registry:\n%s' \
 			"$(printf '%s\n' "${changed[@]}")")"
 	fi

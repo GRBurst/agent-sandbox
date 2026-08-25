@@ -2724,7 +2724,7 @@ All four are now answered, three of them without the runner that was thought nec
   `watcher=$(dbg_watch_start …)` waits for an EOF the backgrounded subshell never sends unless its own output is redirected, and the symptom is a 15-minute run that produces nothing.
 - The CI logs carry a `2026-…Z ` prefix on every line; strip it with `sed 's/^2026[^ ]* //'` before reading.
   A macOS log is roughly twice the length of the Linux one for the same suite, because nono prints its whole capability table to each session's stderr and every failure message quotes it.
-- `nix build .#nono.src` fails in this environment (`cannot open SQLite database … fetcher-cache-v4.sqlite`), so nono's behaviour was established from its binary and its own subcommands rather than from its source.
+- `nix build .#nono.src` was recorded as failing in this environment (`cannot open SQLite database … fetcher-cache-v4.sqlite`), and nono's behaviour was established from its binary and its own subcommands rather than from its source. The failure was the wrong shell rather than the build — see *Method notes* — so the source route is untested rather than closed.
 
 ______________________________________________________________________
 
@@ -3024,9 +3024,11 @@ Three nono facilities were checked as better instruments and none serves:
 
 ### Method notes
 
-The evaluator's `cannot open SQLite database … fetcher-cache-v4.sqlite` failure is **intermittent**, recurring within a minute of a successful `nix eval`.
-A check that hits it reports `the agent table has 0 entries and 0 commands`, its own anti-vacuity control firing on an unusable evaluator rather than the property failing, so the answer is to retry rather than to diagnose.
-It is what left `check_r9`'s `nohost` plant unrun across three attempts.
+The evaluator's `cannot open SQLite database … fetcher-cache-v4.sqlite` failure is **not intermittent**, and an earlier round of this document said it was.
+It is what any `nix` command does when the shell has not entered the environment: `XDG_CACHE_HOME` still points into the `$HOME` the ambient sandbox denies, so the fetcher cache cannot be opened. Reproduced three times out of three from an unentered shell, and gone on the first attempt under `direnv exec .`.
+What made it look intermittent is that the two shells are easy to confuse, and a check that hits it reports `the agent table has 0 entries and 0 commands` — its own anti-vacuity control firing on an unusable evaluator rather than the property failing.
+This is what had left `check_r9`'s `nohost` plant unrun across three attempts; under `direnv exec .` the plant ran first try and bit, which is recorded in [tasks.md § M9e](tasks.md#m9e--the-eleven-failures-the-macos-arm-found-status-implemented).
+The rule is to check which shell you are in rather than to retry.
 
 The shell also fails heredocs with `can't create temp file for here document`, so a commit message goes to a file read back with `git commit -F`.
 

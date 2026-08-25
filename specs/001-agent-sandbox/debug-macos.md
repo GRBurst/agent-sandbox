@@ -1,7 +1,7 @@
 # Debugging the macOS arm
 
-Neither job of `.github/workflows/verify.yml` has been green at the same time.
-This document is what a session picking the work up needs in front of it: the failing checks with the output each one actually produced, the harness for reproducing a confined session by hand, and the list of things already ruled out so they are not measured twice.
+Both jobs of `.github/workflows/verify.yml` went green together in run 8, which closes this arm.
+What the document is for now is the record of how that happened: the failing checks with the output each one actually produced, the harness for reproducing a confined session by hand, and the list of things already ruled out so they are not measured twice.
 
 It is a debugging record, so it holds symptoms and commands.
 The findings drawn from them are in [research.md](research.md) § M9d and § M9e, the measures are in [tasks.md](tasks.md) § M9e, and neither is repeated here.
@@ -20,6 +20,7 @@ The workflow is new in `M9`, so no run predates the feature and there is no gree
 | 5 | `a8316ed` | 34 passed | the same 11, with tracing |
 | 6 | `413e849` | 34 passed | the same 11 again |
 | 7 | `fb0333b` | **1 of 35 failed** | **3 of 33 failed** |
+| 8 | `a1f5ea4` | **35 passed** | **33 passed, 2 skipped** |
 
 Run 1's cause is worth keeping because it is not this repository's bug: `cachix/install-nix-action@v27` installed nix 2.22.1, whose darwin installer assigns `_nixbld1` the UID 301 that macOS 15 reserves. Nix 2.24.7 moved the range to 351. The action is now pinned.
 
@@ -30,14 +31,30 @@ Classes A, B and C are settled: `check_r1`, `check_r2`, `check_r8`, `check_j2_1`
 What remained was two root causes, neither of them a confinement defect.
 Both were defects in what the checks *measure*, and each is described in its own section below.
 
-**Both have since been fixed, and run 8 is the run that answers them.**
+**Both were fixed, and run 8 is the run that answered them.**
 `d5d333d` moved every capture a confined child inherits into the project (class D); `dc5e938` gave each commit arm a session of its own so the denial assertion covers the commit Journey 6.2 names (class E).
-On a NixOS host the unit, component and integration layers pass — 6, 3 and 22 checks — with `check_j6_2`, `check_r11`, `check_opencode` and `check_pi` among them.
 Two plants are owed to the runner rather than to a host, and both are stated where they belong in [tasks.md](tasks.md) § M9e: class D's, because Landlock cannot express it, and class E's literal Ubuntu case, because a NixOS `gpg` is `path_not_granted` and the `execve` fails before the locale read.
 
-When run 8's logs land, the first question is whether these two rows are gone.
-If they are, what is left is class B's two boxes and *Closing the arm*.
-If they are not, the sections below are still the description of what was wrong.
+Run 8 carried both rows away, and the `platforms` job ran for the first time and passed.
+The two macOS skips are the platform's, not the fixes': `check_substrate_denials` because a syscall trace of a confined session is Linux-only, and `check_j8_1` because the substrate carries no tracer and a successful read leaves no observation on darwin.
+Both now belong in the usage document rather than here, per FR-14.
+
+What run 8 does not settle is recorded under *What run 8 left standing* below.
+The sections that follow it remain the description of what was wrong, kept because the same symptom will read the same way if it returns.
+
+## What run 8 left standing
+
+Run 8 being green says the suite agrees with itself on both platforms. It does not say the suite measures everything the spec asks for. Auditing the green run against the spec found four things, none of them introduced by the class fixes and none of them visible as a failure.
+
+**The cross-platform comparison is weaker than SC-8 reads.** The `platforms` job diffs a per-platform `reach.json` built by stripping every `/nix/store/` string out of each agent's confinement description. Measured here: `filesystem.read` is *entirely* store paths, `filesystem.allow` and `groups.include` are empty, and `nix eval .#leakRegistry` is `[]`. So the artefact that survives the strip is one platform-independent nix expression holding `$WORKDIR` placeholders, `workdir.access` and the state redirection. It can differ only if someone adds a platform conditional under `lib/`. SC-8 asks that "the effective reach observed is the same on both", and an identical description is not an observation of reach.
+
+The per-platform `check_sc1` equalities do read the resolved grant, but each subtracts a floor derived by resolving a `{meta}`-only description — and the floor is exactly where the platform difference lives, since nono's `system_read_macos` grants `/private` and `system_read_linux_core` grants `/usr/bin` and two dozen more wherever they exist on the host. The one thing that differs between platforms is therefore subtracted on both sides of every equality. The host-dependence of that grant is already carried to `M10a`; its consequence for FR-20 and SC-8 is what is new.
+
+**The same job can pass having compared nothing.** Its two guards catch a missing report and an empty one, but `for a in $(nix eval …)` cannot trip `set -e`, and `jq -s add` over no input writes `null` — five bytes, which `[ ! -s "$r" ]` accepts. A broken evaluator on both runners is a pass. The step's comment also claims the surviving artefact carries "whatever the leak registry justifies", which is precisely what the store-path strip removes; it reads as true today only because the registry is empty.
+
+**Journey 8.1 is measured by a different instrument than the spec names.** The scenario's *Independently verifiable by* is "asking the agent to enumerate what it loaded", which needs no tracer and works on both platforms. `check_j8_1` instead observes the read with `strace`, which is why it skips on darwin. `check_opencode` and `check_pi` do enumerate, and both passed on darwin, so arrival for `opencode` is in fact covered there by another check. What darwin genuinely loses is arrival for `claude-code` and `pi`, and the absence-of-neighbours arm for all three — less than the skip message claims.
+
+**`check_r9`'s `nohost` arm depends on a fallback it does not document.** The arm plants the host description at `$home/.config/nono/profiles/host.json` while the session runs with `XDG_CONFIG_HOME=$outside/cfg`, and nothing creates that directory. The arm works because nono then falls back to the host's `$HOME/.config` behind a warning, which is where the description is. Should anything ever create `$outside/cfg`, the arm goes vacuous silently.
 
 ## Reproducing a confined session by hand
 
@@ -92,7 +109,7 @@ gh run view <id> --log > .tmp/verify.log       # both jobs, gitignored and denie
 - Strip the timestamps first: `sed 's/^2026[^ ]* //'`.
 - `run_check` prints a check's output **only when it fails or skips**, so a diagnostic added for a failure on one platform is invisible on the platform where the check passes.
 - A macOS log is roughly twice the Linux length for the same suite, because nono prints its whole capability table to each session's stderr and every failure message quotes it. That bulk is the evidence, not noise: the capability banner and the supervisor trailer are the two instruments darwin has.
-- `nix build .#nono.src` fails here (`cannot open SQLite database … fetcher-cache-v4.sqlite`), so nono's behaviour has to be established from its binary and its own subcommands.
+- Any `nix` command run from a shell that has not entered the environment dies with `cannot open SQLite database … fetcher-cache-v4.sqlite`, because `XDG_CACHE_HOME` still points into the denied `$HOME`. Prefix with `direnv exec .` and it evaluates. This was first read as an intermittent evaluator fault; it is not intermittent and it is not a broken checkout, it is the wrong shell. Whether `nix build .#nono.src` itself succeeds inside the environment has not been retested, so nono's behaviour is still established from its binary and its own subcommands.
 
 ## What run 7 left
 
@@ -206,7 +223,7 @@ The banner, with `--read`, `--allow` and `--write` given three different paths:
 - **The audit trail as a grant instrument.** `tracked_paths` lists `--read`, `--allow` and `--write` paths identically, so it cannot serve the argv assertions.
 - **A positive read observation on darwin at all.** `dtruss` needs SIP disabled and `fs_usage` needs root, neither available to a CI runner or acceptable to ask of a user.
 - **Piping the captures through an unconfined reader.** Landlock does not re-check an already-open descriptor, so a Linux run proves nothing about whether bun resolves a pipe's path at startup on darwin. Unverifiable from here, and the project-subdirectory alternative is already supported by the run's own trailers.
-- **`nix build .#nono.src`.** It fails in this environment; read the binary instead.
+- **`nix build .#nono.src`.** Read the binary instead. The SQLite failure that first ruled this out was the wrong shell rather than the build, so the ruling stands on cost rather than on impossibility.
 - **`NONO_CAP_FILE` as a capability-set instrument.** `--cap-file` is an *input* nono reads, a fully-resolved specification mutually exclusive with `--profile`, not an output it writes.
 - **`nono profile show --format manifest` for what a session was granted.** It resolves a description, not a session.
 - **Reproducing the Linux `check_j6_2` failure on a NixOS host.** It cannot happen there. The denial requires the profile to grant the `gpg` that `PATH` finds, and on NixOS that is `/run/current-system/sw/bin/gpg`, which is `path_not_granted`, so the `execve` fails before any locale read. Attribute it from the `execve` census instead, which works on either host.
@@ -218,8 +235,7 @@ The banner, with `--read`, `--allow` and `--write` given three different paths:
 - **Two plants are owed to a runner, not to a host.** Class D's — the capture put back outside the granted set — cannot bite on Linux at all, because Landlock does not re-check an already-open descriptor; that invisibility is why the class survived six runs. Class E's literal case needs a `gpg` the profile grants. Both are stood in for by weaker plants that do run here, recorded in [tasks.md](tasks.md) § M9e.
 - **`find -printf` is GNU-only, and its absence is silent.** `check_opencode` and `check_pi` build their home manifests with it. Where it is unsupported both manifests are empty and the comparison passes having compared nothing.
 - **`check_opencode`'s `landed` control is partly self-satisfied**, because the check seeds the skill-surface file into the project before the session runs. 22 of the 23 entries measured were the session's own, so it is not vacuous — but it does not assert what it says.
-- `check_r9`'s `nohost` plant is unrun, so the one assertion that compares two sessions' capability sets is unproven. Three attempts were defeated by an intermittent `cannot open SQLite database … fetcher-cache-v4.sqlite`, which leaves a check reporting its own anti-vacuity control rather than the planted failure.
+- ~~`check_r9`'s `nohost` plant is unrun.~~ Run and proven. Granting `$home/skills/gamma` to the `nohost` arm alone fails the check for all three agents, each naming the added line: `deleting the host confinement description changed what the claude-code session was granted, so configuration outside the boundary decided the boundary: 132a133 > r+w …/home/skills/gamma (dir)`. What had defeated three earlier attempts was running `nix` outside the entered environment, not an intermittent evaluator.
 - `outside_root` is only as good as its three-candidate list, and its last candidate writes under the real home. `M10a` carries this.
 - The `+`-summarised group paths are never passed on to `check_r9`'s replayed session, so the FR-21 arm asserts unreadability of a session that was never granted them. Reading the grant off argv had the same hole, so this is inherited rather than introduced.
-- The cross-platform reach comparison job has never run, because it is gated on both platform jobs passing. Whatever it finds will be found for the first time after the remaining two causes are fixed.
-- The stale `dbg` calls from `M9d` are still in the tree — `integration.sh:90,91`, `:2086`–`:2114` in `check_j2_1`, `:2327`–`:2344` in `check_j3_1`, and the `dbg` definition at `validate.sh:39` — and their own comment says to delete them with their call sites. They print nothing while their checks pass, so they cost nothing but noise on the next failure.
+- The cross-platform reach comparison job ran for the first time in run 8 and passed, but what it compares cannot express a platform difference and can pass having compared nothing. Both are described under *What run 8 left standing*.

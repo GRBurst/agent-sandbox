@@ -32,15 +32,6 @@ fail() {
 	return 1
 }
 
-# TEMPORARY (M9d, iteration 2 of the macOS debugging protocol). What a check
-# saw on its way to a verdict. `run_check` captures a check's output and prints
-# it only when the check does not pass, so every one of these is silent on a
-# platform where its check is green and the macOS failures alone carry them.
-# Delete this together with the `dbg` lines that call it.
-dbg() {
-	printf 'DBG %s\n' "$*"
-}
-
 # The bin directory of a pinned flake output, for checks that must run the
 # version this repository ships rather than the one PATH happens to offer.
 # AGENTS.md §3: a tool that resolves only because it is in the developer's user

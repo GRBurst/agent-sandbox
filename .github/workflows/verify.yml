@@ -52,67 +52,6 @@ jobs:
             extra-substituters = https://cache.numtide.com
             extra-trusted-public-keys = niks3.numtide.com-1:DTx8wZduET09hRmMtKdQDxNNthLQETkc/yaX7M4qK0g=
 
-      # TEMPORARY, and the only step in this file that asserts nothing. The
-      # macOS job constructs no confined session at all: every integration
-      # check roots its fabricated $HOME at `${XDG_RUNTIME_DIR:-/tmp}`,
-      # XDG_RUNTIME_DIR is unset on a macOS runner, and `system_read_macos`
-      # grants /private — so the state root nono derives from that $HOME sits
-      # under a granted path and nono refuses before the child starts, 34 times
-      # over. Which root is granted by nothing is a property of the runner
-      # image, not of this repository, so it is measured here rather than
-      # guessed at, on both platforms so that the green one says what it is
-      # relying on. `set +e`, because a probe reports and does not decide
-      # whether the suite runs. Delete this step once the answer is in the
-      # checks.
-      - name: Where a state root can live on this runner
-        shell: nix develop --accept-flake-config --command bash -e {0}
-        run: |
-          set +e
-          printf '%-16s %s\n' \
-            uname "$(uname -s)" \
-            XDG_RUNTIME_DIR "${XDG_RUNTIME_DIR-<unset>}" \
-            TMPDIR "${TMPDIR-<unset>}" \
-            RUNNER_TEMP "${RUNNER_TEMP-<unset>}" \
-            HOME "$HOME" \
-            PWD "$PWD"
-
-          profile=$(nix build --no-link --print-out-paths '.#confinement-claude-code')
-          substrate=$(nix build --no-link --print-out-paths '.#substrate-claude-code')
-          child=''
-          while read -r member; do
-            [ -x "$member/bin/bash" ] && child="$member/bin/bash" && break
-          done <"$substrate/store-paths"
-          mkdir -p "$PWD/.tmp/session"
-
-          # `mktemp -d TEMPLATE` rather than `-p DIR`: BSD mktemp has no -p.
-          for root in "${XDG_RUNTIME_DIR-}" "${TMPDIR-}" /tmp "${RUNNER_TEMP-}" "$HOME"; do
-            [ -n "$root" ] && [ -d "$root" ] || continue
-            probe=$(mktemp -d "$root/agent-sandbox-probe.XXXXXX") || continue
-            printf '\n== %s\n' "$probe"
-
-            # DENIED with `path_not_granted` is the wanted answer here: a state
-            # root has to be somewhere no capability reaches.
-            nono -s why --profile "$profile" --path "$probe" --op readwrite 2>&1 |
-              grep -E '^[[:space:]]*(ALLOWED|DENIED|Reason|Details|Closest match)' |
-              sed 's/^[[:space:]]*/    /'
-
-            # The four conditions integration.sh establishes before a session,
-            # the audit ledger included: without it the supervisor's post-run
-            # migration replaces the child's exit status with its own.
-            mkdir -p "$probe/home" "$probe/state/nono/audit"
-            touch "$probe/state/nono/audit/ledger.ndjson"
-            out=$(env TMPDIR="$PWD/.tmp/session" XDG_STATE_HOME="$probe/state" \
-              NONO_NO_UPDATE_CHECK=1 HOME="$probe/home" \
-              nono -s run --profile "$profile" --workdir "$PWD" --allow-cwd -- \
-              "$child" -c 'exit 0' 2>&1)
-            printf '    a session rooted here exits %s\n' "$?"
-            printf '%s\n' "$out" | grep -E 'nono:|Refusing|overlaps' | head -6 |
-              sed 's/^/    /'
-
-            chmod -R u+w "$probe" 2>/dev/null
-            rm -rf "$probe"
-          done
-
       # SC-4: this is the whole report. No `continue-on-error`, no `|| true`,
       # nothing conditional and nothing that reads a human — the job's exit
       # status is the suite's, and a commit is accepted or rejected on it.
