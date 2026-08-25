@@ -1,6 +1,6 @@
 # Debugging the macOS arm
 
-Both jobs of `.github/workflows/verify.yml` went green together in run 8, which closes this arm.
+Both jobs of `.github/workflows/verify.yml` went green together in run 8, and stayed green in run 9 once the temporary instrumentation came out, which closes this arm.
 What the document is for now is the record of how that happened: the failing checks with the output each one actually produced, the harness for reproducing a confined session by hand, and the list of things already ruled out so they are not measured twice.
 
 It is a debugging record, so it holds symptoms and commands.
@@ -21,6 +21,7 @@ The workflow is new in `M9`, so no run predates the feature and there is no gree
 | 6 | `413e849` | 34 passed | the same 11 again |
 | 7 | `fb0333b` | **1 of 35 failed** | **3 of 33 failed** |
 | 8 | `a1f5ea4` | **35 passed** | **33 passed, 2 skipped** |
+| 9 | `d797e91` | **35 passed** | **33 passed, 2 skipped** |
 
 Run 1's cause is worth keeping because it is not this repository's bug: `cachix/install-nix-action@v27` installed nix 2.22.1, whose darwin installer assigns `_nixbld1` the UID 301 that macOS 15 reserves. Nix 2.24.7 moved the range to 351. The action is now pinned.
 
@@ -39,12 +40,17 @@ Run 8 carried both rows away, and the `platforms` job ran for the first time and
 The two macOS skips are the platform's, not the fixes': `check_substrate_denials` because a syscall trace of a confined session is Linux-only, and `check_j8_1` because the substrate carries no tracer and a successful read leaves no observation on darwin.
 Both now belong in the usage document rather than here, per FR-14.
 
-What run 8 does not settle is recorded under *What run 8 left standing* below.
+Run 9 is the same tree with the temporary instrumentation deleted — the probe step that asked where a state root can live, and the `dbg` and `dbg_watch_*` calls the class C hunt had left behind.
+It matters because those deletions touched two checks that had been failing on macOS as recently as run 6: the watcher in `check_j2_1` and `check_j3_1` had *replaced* each check's own cleanup trap, so removing it had to restore the original rather than drop it.
+Run 9 answers that both checks still pass on both platforms, so the arm closes on a tree carrying no scaffolding.
+It is also the first run whose logs are the suite's own output and nothing else.
+
+What runs 8 and 9 do not settle is recorded under *What the green runs left standing* below.
 The sections that follow it remain the description of what was wrong, kept because the same symptom will read the same way if it returns.
 
-## What run 8 left standing
+## What the green runs left standing
 
-Run 8 being green says the suite agrees with itself on both platforms. It does not say the suite measures everything the spec asks for. Auditing the green run against the spec found four things, none of them introduced by the class fixes and none of them visible as a failure.
+A green run says the suite agrees with itself on both platforms. It does not say the suite measures everything the spec asks for. Auditing the green runs against the spec found five things, none of them introduced by the class fixes and none of them visible as a failure.
 
 **The cross-platform comparison is weaker than SC-8 reads.** The `platforms` job diffs a per-platform `reach.json` built by stripping every `/nix/store/` string out of each agent's confinement description. Measured here: `filesystem.read` is *entirely* store paths, `filesystem.allow` and `groups.include` are empty, and `nix eval .#leakRegistry` is `[]`. So the artefact that survives the strip is one platform-independent nix expression holding `$WORKDIR` placeholders, `workdir.access` and the state redirection. It can differ only if someone adds a platform conditional under `lib/`. SC-8 asks that "the effective reach observed is the same on both", and an identical description is not an observation of reach.
 
@@ -55,6 +61,10 @@ The per-platform `check_sc1` equalities do read the resolved grant, but each sub
 **Journey 8.1 is measured by a different instrument than the spec names.** The scenario's *Independently verifiable by* is "asking the agent to enumerate what it loaded", which needs no tracer and works on both platforms. `check_j8_1` instead observes the read with `strace`, which is why it skips on darwin. `check_opencode` and `check_pi` do enumerate, and both passed on darwin, so arrival for `opencode` is in fact covered there by another check. What darwin genuinely loses is arrival for `claude-code` and `pi`, and the absence-of-neighbours arm for all three — less than the skip message claims.
 
 **`check_r9`'s `nohost` arm depends on a fallback it does not document.** The arm plants the host description at `$home/.config/nono/profiles/host.json` while the session runs with `XDG_CONFIG_HOME=$outside/cfg`, and nothing creates that directory. The arm works because nono then falls back to the host's `$HOME/.config` behind a warning, which is where the description is. Should anything ever create `$outside/cfg`, the arm goes vacuous silently.
+
+**The integration checks do not accept the flake's own configuration, and only macOS says so.** Run 9's darwin log carries 44 `ignoring untrusted flake configuration setting 'extra-substituters'` warnings, all 44 between the `SKIP  check_j8_1` line and its reason, because `run_check` prints a skipping check's captured output. They are 22 nix invocations × 2 settings. The cause is a split nobody declared: `scripts/checks/e2e.sh` passes `--accept-flake-config` at all thirteen of its nix call sites and `verify.yml` passes it at both of its own, while none of the 21 `nix eval` and `nix build` sites in `scripts/checks/integration.sh` pass it. On Linux the runner's user is trusted, so the setting applies and nothing is printed; on macOS it is not, so the declared substituter is ignored and those invocations resolve against `cache.nixos.org` or build from source instead.
+
+The consequence is speed and noise rather than correctness, since the ignored settings are a substituter and its key — what gets built is unchanged. But it means the darwin job is not exercising the substituter path the flake declares, and it is why the darwin job runs about four minutes longer than the Linux one (17m36s against 13m44s in run 9). Deleting the probe step took the warning count down from roughly 180 to 44; the remaining 44 are the integration checks' own.
 
 ## Reproducing a confined session by hand
 
@@ -109,6 +119,7 @@ gh run view <id> --log > .tmp/verify.log       # both jobs, gitignored and denie
 - Strip the timestamps first: `sed 's/^2026[^ ]* //'`.
 - `run_check` prints a check's output **only when it fails or skips**, so a diagnostic added for a failure on one platform is invisible on the platform where the check passes.
 - A macOS log is roughly twice the Linux length for the same suite, because nono prints its whole capability table to each session's stderr and every failure message quotes it. That bulk is the evidence, not noise: the capability banner and the supervisor trailer are the two instruments darwin has.
+- The rest of a darwin log's bulk is not evidence. Filter it with `grep -vE "ignoring untrusted flake|Pass '--accept-flake-config'"` before reading, or a skipping check's reason is buried under its own nix warnings — in run 9 the `check_j8_1` reason sits 44 lines below the `SKIP` that introduces it.
 - Any `nix` command run from a shell that has not entered the environment dies with `cannot open SQLite database … fetcher-cache-v4.sqlite`, because `XDG_CACHE_HOME` still points into the denied `$HOME`. Prefix with `direnv exec .` and it evaluates. This was first read as an intermittent evaluator fault; it is not intermittent and it is not a broken checkout, it is the wrong shell. Whether `nix build .#nono.src` itself succeeds inside the environment has not been retested, so nono's behaviour is still established from its binary and its own subcommands.
 
 ## What run 7 left
@@ -231,6 +242,7 @@ The banner, with `--read`, `--allow` and `--write` given three different paths:
 
 ## Risks still open
 
+- **`check_j1_1` fails on someone else's traffic.** It resolves `github:GRBurst/agent-sandbox` through the GitHub API, which allows sixty unauthenticated calls an hour per address. Four or five suite runs in an hour exhaust the quota and the check then reports `unable to download … HTTP error 403` with a rate-limit body, which reads as a broken end-to-end path and is not one — observed here after the audit's repeated runs, with `api.github.com/rate_limit` confirming `remaining: 0`. A shared address exhausts it faster. Pinning the ref to a revision would resolve without the API, at the cost of the check no longer proving that *`HEAD`* is consumable, which is the thing FR-19 cares about. `M10a` carries the choice.
 - **A host-dependent check is a check that lies.** `check_j6_2` passed on a NixOS developer host and failed on ubuntu-latest for a reason neither host states, because the outcome turned on what `PATH` resolves `gpg` to. Narrowing the span fixed that instance. The general hazard is larger than `PATH` and is now measured: nono's own `system_read_linux_core` group grants read over `/bin`, `/usr/bin`, `/lib`, `/etc/ssl` and two dozen more **for every one of them that exists on the host**, while the shipped description declares `groups.include: []`. The same description is therefore a different boundary on every machine, and `flake.nix`'s sentence about `PATH` and grants is not true of a host that carries `/usr/bin`. `M10a` carries it.
 - **Two plants are owed to a runner, not to a host.** Class D's — the capture put back outside the granted set — cannot bite on Linux at all, because Landlock does not re-check an already-open descriptor; that invisibility is why the class survived six runs. Class E's literal case needs a `gpg` the profile grants. Both are stood in for by weaker plants that do run here, recorded in [tasks.md](tasks.md) § M9e.
 - **`find -printf` is GNU-only, and its absence is silent.** `check_opencode` and `check_pi` build their home manifests with it. Where it is unsupported both manifests are empty and the comparison passes having compared nothing.
@@ -238,4 +250,5 @@ The banner, with `--read`, `--allow` and `--write` given three different paths:
 - ~~`check_r9`'s `nohost` plant is unrun.~~ Run and proven. Granting `$home/skills/gamma` to the `nohost` arm alone fails the check for all three agents, each naming the added line: `deleting the host confinement description changed what the claude-code session was granted, so configuration outside the boundary decided the boundary: 132a133 > r+w …/home/skills/gamma (dir)`. What had defeated three earlier attempts was running `nix` outside the entered environment, not an intermittent evaluator.
 - `outside_root` is only as good as its three-candidate list, and its last candidate writes under the real home. `M10a` carries this.
 - The `+`-summarised group paths are never passed on to `check_r9`'s replayed session, so the FR-21 arm asserts unreadability of a session that was never granted them. Reading the grant off argv had the same hole, so this is inherited rather than introduced.
-- The cross-platform reach comparison job ran for the first time in run 8 and passed, but what it compares cannot express a platform difference and can pass having compared nothing. Both are described under *What run 8 left standing*.
+- The cross-platform reach comparison job ran for the first time in run 8 and passed again in run 9, but what it compares cannot express a platform difference and can pass having compared nothing. Both are described under *What the green runs left standing*.
+- **The integration checks ignore the flake's declared substituter wherever the user is untrusted**, which on the macOS runner is every one of them. It costs time rather than correctness, and it is the only reason a green darwin log still carries 44 warnings. Described in the same section; `M10a` carries it.
