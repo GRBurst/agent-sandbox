@@ -144,6 +144,25 @@ Vendor it and declare the path instead.
 
 `claude` and `opencode` have no equivalent startup install, so nothing here applies to them.
 
+**Why vendoring is the route, and not a variable like the one skills get.**
+An executable extension is code the session runs, so it inherits everything the session can reach — the project readwrite, the network through the mediated proxy, and the credential substitute the session was minted.
+A skill is bytes the agent reads. It can *tell* the agent to run something, which is why even that is declared once for the machine and granted read-only, but it cannot act on its own.
+So the two are not the same size of grant, and giving executables the same one-variable convenience would quietly hand every project you own a code-execution channel you configured months ago.
+That is the reason the declaration covers skills and stops there, and the reason this environment provisions its own extensions into the project instead of granting the host location an agent would otherwise load them from.
+
+**If you want your own host extension anyway, the route exists and it is louder on purpose.**
+Widen the session at the invocation, from your shell or your home-manager configuration — never from a project:
+
+```sh
+export NONO_ALLOW="$HOME/my-extension"   # additive to the description the entry point pinned
+claude                                   # the session now reaches that directory too
+```
+
+Two things to know before you do.
+The grant is **read-write**, measured — the session's capability set differs from an ordinary one by exactly `r+w <dir> (dir)` — where a declared skill directory is read-only and individually granted.
+So a session can rewrite the extension that every later session will run, which is the property the skills route is deliberately built to deny.
+And the mechanism cannot tell a variable exported above your checkouts from one exported by a checkout's own `.envrc`, so what keeps a cloned project from asking for this is your `direnv allow` and not an enforcement.
+
 ### Bringing your own skills in
 
 A session reads nothing from your home directory by default, which includes the skills you wrote for yourself.
