@@ -2787,7 +2787,7 @@ It is self-calibrating, costs one 118 ms invocation, spells no platform-specific
 This is the property-based form AGENTS.md §4 asks for: *the session added no denial of its own*, rather than *the denied set matches this list*.
 
 Two more trailer features are worth knowing before writing the parser.
-A path in a deny group prints as `[permanently restricted]` with a footer naming the profile key that would override it, `filesystem.bypass_protection` — which is the first sight of that key and bears on [M10a](tasks.md#m10a--close-out-status-pending)'s question about fabricating a home under `/private`.
+A path in a deny group prints as `[permanently restricted]` with a footer naming the profile key that would override it, `filesystem.bypass_protection` — which is the first sight of that key and bears on [M10a](tasks.md#m10a--close-out-status-implementing)'s question about fabricating a home under `/private`.
 And each trailer prints a `Fix flags:` line spelling the exact `--read`/`--read-file`/`--write` that would grant each blocked path, so a failure message can quote the remedy rather than describe it.
 
 ### U2 — no, and the audit trail is where that was settled
