@@ -415,6 +415,5 @@ It is the natural input to the first spec.
 
 **Orphans and small things.**
 
-- There is no `README.md` at the repository root, which [AGENTS.md](../AGENTS.md#6-docs-and-diagrams) requires of any directory a user can consume on its own.
-- There is no `justfile`, so the commands above are typed rather than named.
+- There is no `justfile`, so the commands above are typed rather than named. `just` itself is in the devShell, so what is missing is the file and not the tool.
 - `statix` and `deadnix` are absent entirely.
