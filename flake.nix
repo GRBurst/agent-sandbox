@@ -224,10 +224,31 @@
           default = s.pkgs.mkShell {
             packages =
               # The same list the substrate is derived from (M4c), so every tool
-              # a session finds on PATH is one the session was granted. Two
-              # things below are on PATH and deliberately not granted: the
-              # mechanism and the entry points. A session that could read either
-              # could try to re-enter the mechanism, and R4 says it must not.
+              # this environment puts on a session's PATH is one the session was
+              # granted. Two things below are on PATH and deliberately not
+              # granted: the mechanism and the entry points. A session that
+              # could read either could try to re-enter the mechanism, and R4
+              # says it must not.
+              #
+              # This says what *this environment* grants, and not the whole of
+              # what a session may read — the sentence used to claim the second
+              # and it was not true. nono applies its own default group
+              # `system_read_linux_core` (and `system_read_macos`) whatever the
+              # description says, and that group grants read over /bin, /sbin,
+              # /usr/bin, /lib, /lib64, /etc/ssl and two dozen further host
+              # paths, for every one of them that exists on the host. Measured:
+              # the shipped description declares `groups.include: []` and names
+              # no /usr anywhere, yet `nono why --path /usr/bin --op read`
+              # answers `granted_path`. So on a host carrying /usr/bin/gpg a
+              # session can read a host binary nobody here declared.
+              #
+              # Opting out is possible and was measured rather than assumed:
+              # `groups.exclude` removes the reach and the profile still
+              # validates strict, but a session under it loses git and cannot
+              # complete an HTTPS handshake, because nono manages PATH itself
+              # and /etc/ssl goes with the group. So it is a piece of work
+              # rather than a one-line correction, and M10a chose to state the
+              # reach instead. docs/HANDBOOK.md carries it as known drift.
               s.sessionTools
               # The mechanism, so `nono profile show` in a review reads the same
               # version the entry points enforce with.
