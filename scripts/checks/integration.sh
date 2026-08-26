@@ -1934,7 +1934,7 @@ check_j2_1() {
 	# rewrites in place counts as a change rather than passing as unchanged.
 	# Every path, not only files, so a directory the session creates and leaves
 	# empty counts too.
-	find "$home" -printf '%p\t%s\t%T@\n' | sort >"$outside/before"
+	dir_manifest "$home" >"$outside/before"
 
 	env "${SESSION_ENV[@]}" "HOME=$home" "XDG_CONFIG_HOME=$cfg" \
 		env -C "$proj" "$entry/$binary" plugin list \
@@ -2010,7 +2010,7 @@ check_j2_1() {
 	# entry added later relaxes this comparison by exactly what it declares and
 	# by nothing else. $HOME is expanded because an entry names the variable
 	# while the diff carries the resolved path.
-	find "$home" -printf '%p\t%s\t%T@\n' | sort >"$outside/after"
+	dir_manifest "$home" >"$outside/after"
 	registry=$(nix eval --json "$REPO_ROOT#leakRegistry" \
 		--apply "es: builtins.filter (e: builtins.elem \"$agent\" e.agents) es" |
 		jq -r '.[].path' | sed "s|\$HOME|$home|g")
@@ -2170,9 +2170,9 @@ check_j3_1() {
 			fail "cannot make ${projects[$name]} a checkout, so the scenario's Given does not hold"
 			return 1
 		}
-		find "${projects[$name]}" -printf '%p\t%s\t%T@\n' | sort >"$outside/before.$name"
+		dir_manifest "${projects[$name]}" >"$outside/before.$name"
 	done
-	find "$home" -printf '%p\t%s\t%T@\n' | sort >"$outside/home.before"
+	dir_manifest "$home" >"$outside/home.before"
 
 	# Genuinely concurrent, per the RED. Each status is collected separately so
 	# a pair where only one session survived cannot read as a pair that did not
@@ -2209,7 +2209,7 @@ check_j3_1() {
 	# them, so state that was not project-scoped would have collided there.
 	# The registry is subtracted rather than assumed empty, exactly as
 	# check_j2_1 does, so an entry added later relaxes this by what it declares.
-	find "$home" -printf '%p\t%s\t%T@\n' | sort >"$outside/home.after"
+	dir_manifest "$home" >"$outside/home.after"
 	registry=$(nix eval --json "$REPO_ROOT#leakRegistry" \
 		--apply "es: builtins.filter (e: builtins.elem \"$agent\" e.agents) es" |
 		jq -r '.[].path' | sed "s|\$HOME|$home|g")
@@ -3947,7 +3947,7 @@ check_opencode() {
 	# shellcheck disable=SC2016
 	printf '{\n  "$schema": "https://opencode.ai/config.json",}\n' >"$surface"
 
-	find "$home" -printf '%p\t%s\t%T@\n' | sort >"$outside/before"
+	dir_manifest "$home" >"$outside/before"
 	# The project is snapshotted too, and for the same reason the home is: the
 	# control below asks whether the *session* wrote inside the project, and a
 	# listing taken only afterwards cannot tell the session's writes from this
@@ -3959,8 +3959,8 @@ check_opencode() {
 	# The capture subtree is excluded on both sides rather than cancelled,
 	# because its *contents* are written during the run by the session's own
 	# redirections and would otherwise satisfy the control by themselves.
-	find "$project" -not -path "$capture" -not -path "$capture/*" \
-		-printf '%p\t%s\t%T@\n' | sort >"$outside/proj.before"
+	dir_manifest "$project" -not -path "$capture" -not -path "$capture/*" \
+		>"$outside/proj.before"
 
 	# A credential in the calling environment, so the mediated route has
 	# something to substitute. The value is a canary: it must not survive into
@@ -4053,15 +4053,15 @@ check_opencode() {
 	# cancel. The capture subtree is excluded on both sides for the reason given
 	# where the first snapshot is taken. `-not -path` takes a pattern rather
 	# than a regular expression, which is the form BSD find has too.
-	find "$project" -not -path "$capture" -not -path "$capture/*" \
-		-printf '%p\t%s\t%T@\n' | sort >"$outside/proj.after"
+	dir_manifest "$project" -not -path "$capture" -not -path "$capture/*" \
+		>"$outside/proj.after"
 	mapfile -t landed < <(comm -13 "$outside/proj.before" "$outside/proj.after" | cut -f1)
 	if [ "${#landed[@]}" -eq 0 ]; then
 		found=1
 		fail "the session wrote nothing inside the project, so an unchanged home directory would prove nothing"
 	fi
 
-	find "$home" -printf '%p\t%s\t%T@\n' | sort >"$outside/after"
+	dir_manifest "$home" >"$outside/after"
 	mapfile -t changed < <(comm -13 "$outside/before" "$outside/after" | cut -f1)
 	if [ "${#changed[@]}" -gt 0 ]; then
 		found=1
@@ -4150,7 +4150,7 @@ check_pi() {
 	mkdir -p "$home/.pi/agent"
 	printf '{}\n' >"$home/.pi/agent/auth.json"
 
-	find "$home" -printf '%p\t%s\t%T@\n' | sort >"$outside/before"
+	dir_manifest "$home" >"$outside/before"
 
 	real="sk-ant-real-canary-$RANDOM$RANDOM"
 	root="$project/.agents/pi"
@@ -4239,7 +4239,7 @@ check_pi() {
 		fail "the session wrote nothing inside the project, so an unchanged home directory would prove nothing"
 	fi
 
-	find "$home" -printf '%p\t%s\t%T@\n' | sort >"$outside/after"
+	dir_manifest "$home" >"$outside/after"
 	mapfile -t changed < <(comm -13 "$outside/before" "$outside/after" | cut -f1)
 	if [ "${#changed[@]}" -gt 0 ]; then
 		found=1
@@ -4249,12 +4249,44 @@ check_pi() {
 
 	[ "$found" -eq 0 ]
 }
+# `-printf` is GNU-only, and every manifest below is built with it.
+#
+# This exists because of how it fails rather than whether it works. BSD `find`
+# does not merely lack the flag: it exits non-zero with a usage error, and both
+# manifests then come out empty, so `comm` finds no difference and the check
+# passes having compared nothing. That is the silent pass **P9** forbids, and it
+# is worse than the missing tool it would be reporting. `findutils` is not in
+# `sessionTools`, so this is reachable rather than theoretical.
+#
+# Probed against the checkout, which exists whenever a check is running, with
+# `-maxdepth 0` so nothing is walked and an empty format so nothing is printed.
+# Fatal rather than a check failure, because a manifest this suite cannot build
+# is an environment that cannot answer the question, not an answer of "no".
+require_gnu_find() {
+	find "$REPO_ROOT" -maxdepth 0 -printf '' 2>/dev/null ||
+		die "the manifests this suite compares need GNU find. BSD find has no -printf and exits with a usage error, which would leave every home and project comparison comparing two empty files and passing. Add findutils to the environment rather than removing the comparison."
+}
+
+# A manifest of a directory: every path with its size and modification time,
+# sorted, one per line. Extra `find` predicates may follow the directory, which
+# is how a caller excludes a subtree it created itself.
+#
+# One function rather than the nine identical pipelines it replaces, so that the
+# guard above has one place to live instead of nine.
+dir_manifest() {
+	local dir=$1
+	shift
+	require_gnu_find
+	find "$dir" "$@" -printf '%p\t%s\t%T@\n' | sort
+}
+
 # A manifest of a directory tree, precise enough that "unchanged" means it.
 #
 # Names, types and modes, and the content of every file. Timestamps are left
 # out on purpose: a check that reads them cannot tell a rewrite that preserved
 # the bytes from a touch, and it is the bytes the consumer cares about.
 tree_manifest() {
+	require_gnu_find
 	find "$1" -mindepth 1 \( -type f -o -type d -o -type l \) -printf '%y\t%m\t%p\n' | sort
 	find "$1" -type f -exec sha256sum {} + | sort -k2
 }
