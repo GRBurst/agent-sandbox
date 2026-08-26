@@ -374,13 +374,16 @@ Expect those directories to appear in your project the first time you start an a
 Without the redirection a tool honouring one of these roots resolves it under `$HOME` and is denied, which is visible and survivable — except for `TMPDIR`, which falls back to `/tmp`, and `/tmp` is writable inside a session.
 That one is the reason the list is five variables rather than one: a write outside your project that nothing reports, at a path every project shares.
 
-**There are two accepted leaks.**
+**There are three accepted leaks**, and only the first two are on a path you take by using this environment.
 
 - `.envrc` calls `source_up_if_exists`, which reads a parent `.envrc` above the checkout.
   It is kept because that is a personal, machine-level concern, and direnv carries on when the read is denied.
 - `$XDG_STATE_HOME/nono` stays on the host, because the mechanism anchors its own supervisory state there and refuses to start when any granted path overlaps it.
   It is not a leak-registry entry for that reason: an entry claiming to grant it would be false.
   A confined session's audit record — what it was actually granted — is written under it, which is how `check_j1_1` observes a real session rather than trusting a resolved policy.
+- `$HOME/.agent-sandbox` is created by **a verification run, and by nothing else**, on a host that offers neither `$XDG_RUNTIME_DIR` nor `$RUNNER_TEMP` — which is every developer macOS.
+  Several checks have to plant something outside the project and watch a confined session fail to reach it, so they need a location a session is granted *nothing* on. The suite asks the host where that can be rather than naming a path, and this is the last of three candidates it tries.
+  Each check removes its own scratch directory underneath; the parent is left behind, empty. Running an agent never touches it, so if you have never run `scripts/validate.sh`, it is not there.
 
 **Egress is mediated, not restricted.**
 Everything above is about the filesystem, and it would be easy to read the strictness of that boundary as applying to the network too.
