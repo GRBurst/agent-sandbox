@@ -205,6 +205,36 @@ And granting `ANTHROPIC_API_KEY` through explicitly does not change this: the ro
 If the variable is unset outside, the session still starts and says so, in a `Credential not found for route 'anthropic'` warning naming the variable it looked for.
 Its suggestion to store the key in a keychain is macOS advice and does not apply here.
 
+### Migrating a setup you already have
+
+If you already configure these agents for your whole machine, you adopt this environment for **one project** without changing the rest.
+Nothing here reads, rewrites or fingerprints your host configuration, and your other projects go on working exactly as they did.
+What follows is the line between what comes with you and what does not, stated rather than left to be discovered — which is the point, because a consumer whose skill loaded but whose stored session did not would reasonably conclude the boundary is arbitrary.
+
+**What comes with you.**
+
+- **Your skills**, at every location each agent reads them from, by declaring `AGENT_SANDBOX_SKILLS` once for the machine — see [Bringing your own skills in](#bringing-your-own-skills-in). Read-only, individually granted, and gone the moment you unset it.
+- **Your provider credential**, in the sense that it still works: one value in your environment serves every project and every agent, and there is no per-agent login to redo.
+
+**What does not, and is not meant to.**
+
+| | Why |
+| --- | --- |
+| Every other authoring surface — `agents/`, `commands/`, `output-styles/`, `rules/`, `workflows/`, `themes/`, `prompts/`, and `opencode`'s agents, commands and modes | Named individually in [Bringing your own skills in](#bringing-your-own-skills-in). These are decisions to make deliberately, not to inherit from a variable set months ago |
+| Anything executable — a plugin, a hook, a `.ts` extension | Such code runs with everything the session can reach, where a skill only tells the agent what to do. See [Extending an agent](#extending-an-agent) for the route if you want one anyway |
+| Your conversation history and stored sessions | They are under your home directory, and a session reaches nothing there. Each project accumulates its own under `.agents/` |
+| Your credential store on disk | The session is handed a per-session substitute instead, and never the real value |
+| Your host confinement descriptions | These decide nothing about a session's reach. If configuration outside the boundary could define the boundary, there would be no boundary |
+
+**What you give up, and what you get back.** This is the one place the trade is real rather than nominal.
+
+The arrangement this replaces shared one credential between agents *by file*: one agent shelled out to another or read its credential file directly, which meant granting the authenticating agent's credential directory **read-write** inside the boundary.
+That is what is gone. A session can no longer reach any agent's credential store, its own included.
+
+What replaces it is capture on the supervisor's side: the token flow is intercepted outside the session, and what every process inside gets is an environment variable holding a substitute plus a mediated base URL.
+So you keep the thing the old arrangement was *for* — authenticate once, and every agent in every project works — and you stop paying for it with a writable grant on a credential directory.
+Two things you gain outright: no agent reads another's credential store, and a value copied out of a session is worth nothing to anyone, because the provider has never seen it.
+
 ## What the environment guarantees
 
 Every tool that would otherwise write into `$HOME` is pointed inside the checkout.
