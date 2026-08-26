@@ -411,40 +411,57 @@ Where interactive behaviour is the criterion, assert on the arguments a command 
 ### What the automated run does not reach
 
 A green suite is the whole report for what it covers, and this is what it does not cover.
-Every item is a claim the repository makes that no unattended run can settle, so it is either verified by a human or accepted as unreproducible and said so.
-None of them is restated as an assertion anywhere; where a check exists for a *narrower* version of the claim, the narrowing is what the entry names.
+Every item is a claim the repository makes that no unattended run can settle, so each carries the procedure a human runs — or says plainly that there is none and it is accepted as unreproducible.
+None of them restates an assertion; where a check exists for a *narrower* version of the claim, the narrowing is what the entry names, and the check's own text stays the only place the assertion lives.
 
 **Things that need a real account.**
 
 - **A provider refusing a substitute.** The suite asserts the substitute's *shape*, that the real key is nowhere in the session, and that two sessions get different substitutes. That a provider rejects one copied out of a session needs a real account and a real key. The argument for it is strong — the substitute is minted per session and stops working when the session ends — but an argument is not an observation.
+  *By hand:* inside a session, `echo "$ANTHROPIC_API_KEY"`. Leave the session, and present that value to the provider from outside it. Expect an authentication failure.
 - **A provider request that succeeds.** Any request carrying a session's own substitute leaves the machine, so it cannot be part of an unattended check. `check_r8` shows only that the port does not answer `401` to everything.
+  *By hand:* with your real key exported, start an agent and ask it anything. A completion arriving is the observation; there is nothing else to run.
 - **Logging in through the browser.** Needs a browser and possibly a second factor. What the suite does cover is the half that is a value in the calling environment.
-- **Streamed responses through the interception proxy.** Exercised by hand with a long completion.
+  *By hand:* run the agent's own login flow inside a session, complete it in the browser, and confirm a later session in a second checkout needs no further login.
+- **Streamed responses through the interception proxy.** The proxy is in the path of every request, and a streamed response is the case where being in the path could show.
+  *By hand:* inside a session, ask for something long enough to stream, and watch it arrive incrementally rather than in one block or not at all.
 - **A credential evicted after long disuse.** The check invalidates a substitute artificially; the retention-driven case takes months.
+  *No procedure.* Verified once and then trusted. Revisiting it means waiting, not running something.
 
 **Things that need the other machine.**
 
-- **How strong macOS enforcement is.** The suite asserts that both platforms grant the same reach. It cannot assert that Seatbelt's guarantee equals Landlock's, and it does not try — the difference is described under [Where the two platforms differ](#where-the-two-platforms-differ) instead.
-- **The substrate denial set on macOS.** A syscall trace of a confined session is Linux-only, so `check_substrate_denials` reports `SKIP` there. Closing it needs the same differential written against a macOS tracer, on a macOS machine.
-- **The effective reach of the two platforms compared.** The automated comparison reads the description, not the kernel. Comparing what a session can actually reach is done by hand, by reading the capability banner of the same agent on each platform.
-- **A host genuinely unable to enforce confinement.** Every runner has Landlock, so the check plants the violation rather than reproducing the condition. Verified by hand on an older kernel, or accepted as unreproducible.
+- **How strong macOS enforcement is.** The suite asserts that both platforms grant the same reach. It cannot assert that Seatbelt's guarantee equals Landlock's, and it does not try.
+  *No procedure.* This is a difference between two operating systems, not a behaviour to observe. It is described under [Where the two platforms differ](#where-the-two-platforms-differ), and that description is the whole of what is claimed.
+- **The substrate denial set on macOS.** A syscall trace of a confined session is Linux-only, so `check_substrate_denials` reports `SKIP` there.
+  *No procedure today.* `dtruss` needs SIP disabled and `fs_usage` needs root, neither of which is reasonable to ask. Closing it means writing the same differential against a macOS tracer, on a macOS machine.
+- **The effective reach of the two platforms compared.** The automated comparison reads the description, not the kernel.
+  *By hand:* start the same agent on each platform and read the capability banner it prints to stderr — the `r`, `w` and `r+w` lines. Compare the two by eye. Differences in store paths are expected and are the substrate; anything else is not.
+- **A host genuinely unable to enforce confinement.** Every runner has the primitive, so the check plants the violation rather than reproducing the condition.
+  *By hand:* run an entry point on a kernel too old to provide it, and expect nothing to start, a message naming the missing primitive, and exit status `77`. Accepted as unreproducible if no such machine is available — the plant is what stands in for it.
 - **A machine with no warm store.** Consuming from the published reference is covered, but both the runner and any developer checkout have a populated store already.
+  *By hand:* on a machine that has never built this, or after `nix store gc`, run the one command under [Entering the environment](#entering-the-environment) and let it finish.
 
 **Things that are a human's decision rather than a behaviour.**
 
-- **Your own trust settings for the substituter.** The declared substituter is ignored for anyone who is not a trusted `nix` user, and whether you are one is a property of your machine. The workflow restates the two settings rather than inheriting them for exactly this reason, and the three ways to decide it for yourself are under [Entering the environment](#entering-the-environment). Nothing here can check which you chose.
-- **A registry entry that names a host path.** The leak registry is this repository's reviewed content, pinned by the reference you name. An entry granting something outside a project would fail no check, because the registry sits on both sides of every reach comparison by design. What stops it is review.
-- **Where a widening came from.** A widening supplied at the invocation is asserted to add exactly what it names. That the widening came from *you* and not from a checkout's own `.envrc` is your `direnv allow`, not an enforcement.
-- **That no description pack was fetched.** Naming a description by name would fetch one and write executable hooks inside the project. Nothing shipped here names one, and the wrapper and set-equality checks are what keep it that way — but no check asserts the absence directly.
+- **Your own trust settings for the substituter.** The declared substituter is ignored for anyone who is not a trusted `nix` user, and whether you are one is a property of your machine. The workflow restates the two settings rather than inheriting them for exactly this reason.
+  *By hand:* `nix config show trusted-users`. If your user is not there, the three ways to decide it for yourself are under [Entering the environment](#entering-the-environment) — and a run that prints `ignoring untrusted flake configuration setting` is telling you which one applies.
+- **A registry entry that names a host path.** The leak registry is this repository's reviewed content, pinned by the reference you name. An entry granting something outside a project would fail no check, because the registry sits on both sides of every reach comparison by design.
+  *By hand:* `cat lib/leak-registry.nix` and read the entries, of which there are none today. This is a review gate, and it is written down as one.
+- **Where a widening came from.** A widening supplied at the invocation is asserted to add exactly what it names. That it came from *you* and not from a checkout's own `.envrc` is your `direnv allow`, not an enforcement.
+  *By hand:* `direnv status` in the checkout, and read which files you have allowed.
+- **That no description pack was fetched.** Naming a description by name would fetch one and write executable hooks inside the project.
+  *By hand:* `ls .config/nono/packages`. It should not exist. Nothing shipped here names a description by name, so anything there arrived from something you ran.
 
 **Things that only a push settles.**
 
 - **A runner accepting the workflow.** The suite asserts that `.github/workflows/verify.yml` *describes* the run this repository requires. That GitHub parses it, that nix installs on both images, and that the macOS job completes at all are settled by pushing.
+  *By hand:* push, then `gh run list --workflow verify.yml` and read both jobs. A green pair is the observation; the suite cannot make it.
 
 **One gap in a check's reach rather than in the product's.**
 
-- **The pre-flight outside the devShell.** `lib/preflight.sh` execs its probe by bare name, so it depends on `PATH` resolving that name inside the granted substrate. On a host carrying its own copy outside the substrate the probe is denied and the pre-flight reports the wrong cause — fail-closed, but misleading. This is why the integration layer runs under `nix develop`, and you always enter through the devShell.
+- **The pre-flight outside the devShell.** `lib/preflight.sh` execs its probe by bare name, so it depends on `PATH` resolving that name inside the granted substrate. On a host carrying its own copy outside the substrate the probe is denied and the pre-flight reports the wrong cause — fail-closed, but misleading.
+  *By hand:* invoke an entry point by store path from a shell that never entered the environment, and read what it says. This is why the integration layer runs under `nix develop`, and why you enter through the devShell.
 - **Four of nono's six configuration channels.** Two are asserted against a session; `--extends` and `--bypass-protection` are flags the entry point does not pass, and their absence is asserted by reading the entry point's text rather than by running one.
+  *By hand:* `cat $(command -v claude)` and read the `nono run` line for yourself. Four flags being absent from a command line is a thing you can see; it is only the *reading* of it that is unautomated.
 
 ## Where the two platforms differ
 
