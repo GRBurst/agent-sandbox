@@ -382,6 +382,19 @@ That one is the reason the list is five variables rather than one: a write outsi
   It is not a leak-registry entry for that reason: an entry claiming to grant it would be false.
   A confined session's audit record — what it was actually granted — is written under it, which is how `check_j1_1` observes a real session rather than trusting a resolved policy.
 
+**Egress is mediated, not restricted.**
+Everything above is about the filesystem, and it would be easy to read the strictness of that boundary as applying to the network too.
+It does not.
+Raw TCP out of a session is denied, but arbitrary HTTPS through the injected proxy **succeeds** — measured, with `git ls-remote` against a public host from inside a session that was granted nothing outside its project.
+
+So a session can reach any host it likes over HTTPS.
+Asking an agent to fetch a package reaches the registry, and a compromised session can talk to whatever it wants.
+The proxy is in that path in order to inject credentials and to keep the real one outside the boundary, which is a confidentiality property; it is **not** an allow-list, and no requirement here asks it to be one.
+Restricting which hosts a session may contact is explicitly out of this feature's scope.
+
+What this means in practice is that the thing stopping an agent from exfiltrating your other projects is that it cannot **read** them, not that it cannot **send**.
+That is the guarantee, and it is worth knowing which half is doing the work.
+
 ### Checking it by hand
 
 The bootstrap mirror is now automated as `check_bootstrap_mirror` in the unit layer, so it needs no hand-run.
