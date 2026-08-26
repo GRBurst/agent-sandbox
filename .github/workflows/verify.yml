@@ -64,14 +64,33 @@ jobs:
         shell: nix develop --accept-flake-config --command bash -e {0}
         run: ./scripts/validate.sh
 
-      # FR-20: the reach this platform grants, with the execution substrate
-      # removed. What is left is the part that must be identical on both — the
-      # project's own grant, whatever the leak registry justifies, and the
-      # state redirection — while the substrate legitimately differs, since one
-      # platform's closure carries a locale archive and a tracer the other has
-      # no need of. Dropping every store path is what expresses the comparison
-      # in terms neither platform's semantics decides.
-      - name: The reach this platform grants
+      # FR-20: the confinement description this platform resolved, with the
+      # execution substrate removed, so the next job can assert that nothing
+      # under lib/ made the description platform-dependent.
+      #
+      # Read what this does and does not carry before trusting it. Dropping
+      # every `/nix/store/` string does not thin `filesystem.read`, it
+      # **empties** it — the substrate is the whole of that list. With
+      # `filesystem.allow`, `groups.include` and the leak registry all empty
+      # too, what survives is the `$WORKDIR` placeholders, `workdir.access` and
+      # the state redirection. Measured on run 10: the two artefacts came back
+      # byte-identical.
+      #
+      # So this is a comparison of *authorship*, not of reach, and it can only
+      # differ if someone adds a platform conditional that resolves to a path
+      # outside the store. That is a real thing to catch and it is the whole
+      # claim. It is **not** SC-8's second clause: the effective reach does
+      # differ between the platforms, in nono's own floor groups, which grant
+      # `/usr/bin` here and `/private/etc`, `/System/Library` and `/tmp` there.
+      # No artefact sees that — the resolved manifest lists no non-store grant
+      # at all, while `nono why` answers `granted_path` for `/usr/bin` against
+      # the same description — so no diff of descriptions or of manifests can
+      # express it, however it is filtered. Comparing effective reach is a hand
+      # step, and docs/HANDBOOK.md carries it with its procedure.
+      #
+      # The substrate is dropped rather than compared because it legitimately
+      # differs: `strace` is in the Linux closure and in no other.
+      - name: The description this platform resolved
         id: reach
         shell: nix develop --accept-flake-config --command bash -e {0}
         run: |
@@ -94,9 +113,16 @@ jobs:
           name: reach-${{ matrix.system }}
           path: reach.json
 
-  # FR-20 and SC-8: the two platforms grant the same reach. This is the one
-  # assertion no single machine can make, which is why it lives here rather
+  # FR-20: neither platform's description was authored differently. This is the
+  # one assertion no single machine can make, which is why it lives here rather
   # than in a check.
+  #
+  # It is deliberately not named for SC-8. SC-8's second clause — that the
+  # effective reach observed is the same on both — is verified by hand and said
+  # so in docs/HANDBOOK.md, because the reach the two platforms actually grant
+  # differs in nono's own floor and no artefact either runner can upload
+  # expresses it. Naming this job after a claim it cannot make is how a green
+  # run comes to mean less than it reads.
   platforms:
     needs: suite
     runs-on: ubuntu-latest
@@ -109,7 +135,7 @@ jobs:
       # Two guards before the comparison, because an equality assertion is
       # satisfied most easily by there being nothing to compare: fewer than two
       # reports, or a report that is empty, both make a diff agree forever.
-      - name: The platforms grant the same reach
+      - name: Neither platform's description was authored differently
         run: |
           mapfile -t reports < <(printf '%s\n' reach/*/reach.json | sort)
           if [ "${#reports[@]}" -lt 2 ]; then
