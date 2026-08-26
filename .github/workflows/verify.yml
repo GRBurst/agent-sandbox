@@ -94,8 +94,20 @@ jobs:
         id: reach
         shell: nix develop --accept-flake-config --command bash -e {0}
         run: |
-          for a in $(nix eval --json --accept-flake-config '.#agents' \
-            --apply builtins.attrNames | jq -r '.[]'); do
+          # The agent list is read into a variable and counted rather than
+          # iterated straight out of a command substitution. `for a in $(nix
+          # eval …)` cannot fail: an evaluator that dies leaves the loop with
+          # nothing to iterate, `jq -s add` over no input writes `null`, and
+          # the next job then compares two five-byte files and agrees. That is
+          # a green FR-20 comparison over no description at all.
+          mapfile -t agents < <(nix eval --json --accept-flake-config '.#agents' \
+            --apply builtins.attrNames | jq -r '.[]')
+          if [ "${#agents[@]}" -eq 0 ]; then
+            printf 'no agent evaluated, so there is no description to compare\n'
+            exit 1
+          fi
+
+          for a in "${agents[@]}"; do
             nix build --no-link --print-out-paths --accept-flake-config \
               ".#confinement-$a" |
               xargs jq -S --arg a "$a" '{ ($a): walk(
@@ -107,6 +119,17 @@ jobs:
                   or (startswith("/nix/store/") | not)))
                 else . end) }'
           done | jq -s add >reach.json
+
+          # And the artefact carries one entry per agent, so a build that
+          # failed for one of them cannot upload a shorter report that still
+          # diffs equal against an equally short one from the other runner.
+          if [ "$(jq -r 'if type == "object" then length else -1 end' reach.json)" \
+            -ne "${#agents[@]}" ]; then
+            printf 'the report describes %s agents, not the %s that evaluated\n' \
+              "$(jq -r 'if type == "object" then length else 0 end' reach.json)" \
+              "${#agents[@]}"
+            exit 1
+          fi
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -142,9 +165,14 @@ jobs:
             printf 'only %s platform reported its reach\n' "${#reports[@]}"
             exit 1
           fi
+          # `[ ! -s "$r" ]` was the guard here and it is not enough: `jq -s add`
+          # over no input writes `null`, five bytes, which a size test accepts.
+          # A report has to be an object with entries in it before diffing two
+          # of them means anything.
           for r in "${reports[@]}"; do
-            if [ ! -s "$r" ]; then
-              printf '%s is empty, so comparing it agrees with anything\n' "$r"
+            if ! jq -e 'type == "object" and length > 0' "$r" >/dev/null; then
+              printf '%s carries no description (%s), so comparing it agrees with anything\n' \
+                "$r" "$(head -c 64 "$r")"
               exit 1
             fi
           done
