@@ -1602,31 +1602,71 @@ Four practical things that cost earlier sessions time. Run every `nix` command t
 One box below cannot be ticked from a Linux host: class D's plant in [M9e](#m9e--the-eleven-failures-the-macos-arm-found-status-implemented) needs a macOS runner. It is recorded as owed rather than done, and a green darwin arm is not a substitute for it.
 
 - [x] `docs/HANDBOOK.md` updated: how to use what landed, the accepted leak **`$XDG_STATE_HOME/nono`** with its justification, and the coverage gap from [plan.md](plan.md#coverage-gap). Two of the three were already there and were checked rather than rewritten — *Entering the environment* through *The API key inside a session is not your API key* is how to use what landed, and *There are two accepted leaks* carries `$XDG_STATE_HOME/nono` with the reason it cannot be a registry entry. What was missing is the third, and it is now *What the automated run does not reach* under *Verifying the repository*: every gap `plan.md` lists, grouped by what would close it — a real account, the other machine, a human's decision, a push, or a widening of a check's own reach. It restates no assertion, and where a check covers a narrower version of a claim the narrowing is what the entry names
-- [ ] Known drift entries retired and deleted: the Kafka leftovers, the six leftover variables, `system = "x86_64-linux"` hardcoding, the four devcontainer bind mounts, orphaned `ai.nix`, the stray `^`, missing `scripts/validate.sh`, missing `README.md`, absent `shellcheck`/`shfmt`, absent `statix`/`deadnix`, no `justfile`, and the wrong canonical ref which FR-19 corrects
-- [ ] Anything from that list still true is *moved* rather than deleted, so a gap stays a known gap
+
+- [x] Known drift entries retired and deleted: the Kafka leftovers, the six leftover variables, `system = "x86_64-linux"` hardcoding, the four devcontainer bind mounts, orphaned `ai.nix`, the stray `^`, missing `scripts/validate.sh`, missing `README.md`, absent `shellcheck`/`shfmt`, absent `statix`/`deadnix`, no `justfile`, and the wrong canonical ref which FR-19 corrects. **Nine of the twelve were already gone, and this box is the audit that says so rather than an edit.** [plan.md](plan.md#dependencies--impact) predicted six of them: a drift entry about code that no longer exists is fiction, so each was retired by the task that falsified it. Every one of the twelve was checked against the tree rather than against that prediction, and the three that survive are the next box's:
+  | entry | how it was checked | verdict |
+  | --- | --- | --- |
+  | Kafka leftovers | `grep -ril kafka` over the tree | gone — only this feature's own spec files name it |
+  | the six leftover variables | `flake.nix`'s `shellHook` against the handbook's table, with `check_bootstrap_mirror` holding the two bootstrap copies together | gone — the table is derived from the one source |
+  | `system = "x86_64-linux"` hardcoding | `flake.nix:45` | gone — a two-element `systems` list consumed by `forSystems` |
+  | the four devcontainer bind mounts | no `.devcontainer` and no `devcontainer.json` exist | gone |
+  | orphaned `ai.nix` | `find . -name ai.nix` | gone |
+  | the stray `^` | it was in `devenv.nix`, which is deleted | gone |
+  | missing `scripts/validate.sh` | it is the verification entry point | gone |
+  | absent `shellcheck`/`shfmt` | `flake.nix:87-88` | gone — both in the devShell |
+  | the wrong canonical ref | `docs/HANDBOOK.md`, `e2e.sh`'s `canonical_ref`, and `git remote get-url origin` | gone — all three say `GRBurst/agent-sandbox` |
+  | missing `README.md` | no `README.md` at the root | **still true**, and retires with the box below that writes it |
+  | absent `statix`/`deadnix` | neither appears in `flake.nix` | **still true** |
+  | no `justfile` | no `justfile`, though `just` itself is in the devShell | **still true** |
+
+- [x] Anything from that list still true is *moved* rather than deleted, so a gap stays a known gap. **Nothing needed moving, because nothing was in the wrong place.** The drift list lives in [docs/HANDBOOK.md](../../docs/HANDBOOK.md#known-drift) and never lived in the spec — `spec.md` has no drift section — so *moved* would only have meant out of a spec into the handbook, and there was nothing there to move. The three survivors are already in that list under *Orphans and small things*, and were re-read entry by entry to confirm none of the rest of it has gone false: `node` is still absent, `find -printf` is still GNU-only and still silent where it is missing, macOS enforcement is still labelled experimental, and comparing effective reach is still done by hand. `statix`/`deadnix` and the `justfile` stay as written. `README.md` is the one that changes, and it changes by being fixed rather than by being reworded
+
 - [ ] Root `README.md` written: component table taken from the code, one `flowchart LR` for structure, one `sequenceDiagram` per phase including **a refused case of its own** (AGENTS.md §6), checked by eye in both themes
+
 - [ ] The migration path for a consumer with a host-global setup is documented (FR-21) — which half of their setup comes with them and which does not, how to declare the authoring surface once for the machine (FR-25), that the prior-art arrangement granted the authenticating agent's state read-write and that [D14](plan.md#decisions) replaces it, so a migrating consumer knows what they are giving up and what they get back
+
 - [ ] SC-9: for every agent, either the surface reaches every location that agent reads extensions from, or the location it does not reach is **named**. A consumer must not have to find out by experiment which of their own extensions came with them
+
 - [ ] FR-26: why an executable extension is a larger grant than a declarative one is stated, along with the FR-15 route for a consumer who wants their own anyway
+
 - [x] FR-11: the supported platforms are named, each with the enforcement tier its operating system provides, and a weaker guarantee says so with the difference named — the table under *Where the two platforms differ* in `docs/HANDBOOK.md`, landed by [M9e](#m9e--the-eleven-failures-the-macos-arm-found-status-implemented)
+
 - [ ] FR-14 and FR-12: every claim the automated run cannot reach is listed with its procedure, and the handbook describes what a human runs without restating the assertions anywhere
+
 - [ ] The way to run an agent unconfined — by not invoking the confined entry point — is described rather than concealed (FR-10)
+
 - [ ] Every open question in `spec.md` resolved in place with a one-line outcome, including the two assumptions the plan was still to confirm
+
 - [ ] The handbook names what the automated run cannot reach: an unattended token flow, the second platform, and a consumer's own trust settings for the substituter
+
 - [ ] **Egress is mediated, not restricted**, and the handbook says so rather than letting a reader infer otherwise from the filesystem confinement: raw TCP is denied but arbitrary HTTPS through the injected proxy succeeds, so a session that asks an agent to fetch a package reaches the registry ([M8d](#m8d--pi-and-pre-provisioned-extensions-status-implemented)). The drift entry this task retires is the absence of that sentence, not the behaviour
+
 - [ ] The stranger's copyable command carries `--accept-flake-config`, because the declared substituter is ignored for anyone who is not a trusted user — measured, not assumed ([research.md](research.md#m9--preconditions-for-the-end-to-end-layer-measured-before-it-exists))
+
 - [ ] `docs/CONSTITUTION.md` P1's accepted-leak list amended to its second entry
+
 - [ ] **The harness's own outside reconsidered**, which [M9d](#m9d--on-macos-there-is-nowhere-to-put-the-outside-status-implemented) shipped ahead of its research directive. `outside_root` derives the location from the host rather than naming one, so the mechanism is not in question; the candidate list is. Three things to settle with the directive's answer in hand: whether `$HOME/.agent-sandbox` — a write outside the project, and the last resort on any host without `$XDG_RUNTIME_DIR` or `$RUNNER_TEMP`, which is every developer macOS — is a second accepted leak in P1's list beside `$XDG_STATE_HOME/nono` or something the rule must refuse; whether a macOS location exists that is neither under `/private` nor under `/Users`, which would remove the question entirely; and whether the directory the helper creates should be removed when the suite is done rather than left behind empty. If it stays a leak, it is enumerated with its justification like the other, and the handbook says a verification run writes there
+
 - [ ] **The `/usr/bin` a session can read.** `flake.nix` says every tool a session finds on `PATH` is one it was granted, and the shipped description declares `groups.include: []`. nono nonetheless grants read over `/bin`, `/sbin`, `/usr/bin`, `/lib`, `/lib64`, `/etc/ssl` and two dozen further host paths through its own `system_read_linux_core` group, for every one of them that exists on the host — measured in [research.md § M9e](research.md#m9e--what-run-7-measured-and-the-one-regression-it-introduced). On a runner that carries `/usr/bin/gpg`, a session reaches a host binary nobody declared. Either the description opts out of the group and the substrate is the whole reach, or the reach is stated as what it is and the sentence in `flake.nix` is corrected. It cannot stay as it is, because the two statements contradict each other
+
 - [ ] **`check_opencode`'s `landed` control** is satisfied in part by a file the check itself seeds into the project before the session, so it cannot fail on that file alone. Either the control compares the project before and after, like the home manifest beside it, or the seed moves out of the listing
+
 - [ ] **`find -printf` is GNU-only**, and where it is missing the home comparison compares two empty files and passes. The `findutils` question below is about availability; this one is about the silence, which **P9** forbids regardless of how the first is answered
+
 - [ ] **The cross-platform comparison observes no reach.** FR-20 and SC-8 ask that the effective reach be the same on both platforms; the `platforms` job diffs each runner's description with every `/nix/store/` path stripped, which — the substrate being the whole of `filesystem.read`, and `filesystem.allow`, `groups.include` and the leak registry all empty — leaves one platform-independent expression that can differ only if someone adds a platform conditional under `lib/`. The floor where the two platforms actually differ is subtracted on both sides of every per-platform `check_sc1` equality. Either the job compares something a platform can change, or SC-8's second clause is verified by hand and said so in the handbook, which is where [M9e](#m9e--the-eleven-failures-the-macos-arm-found-status-implemented) left it
+
 - [ ] **The same job can pass having compared nothing.** `for a in $(nix eval …)` cannot trip `set -e`, and `jq -s add` over no input writes `null` — five bytes, which the `[ ! -s "$r" ]` guard accepts. A broken evaluator on both runners is a green FR-20 comparison. The step's comment also claims the surviving artefact carries *whatever the leak registry justifies*, which is exactly what the strip removes; it reads as true only while the registry is empty
+
 - [ ] **`check_r9`'s `nohost` arm rests on an undocumented fallback.** It plants the host description at `$home/.config/nono/profiles/host.json` while the session runs with `XDG_CONFIG_HOME=$outside/cfg`, and nothing creates that directory — so nono falls back to the host's `$HOME/.config`, which is why the arm reads the planted file at all. Either the arm states the dependency or it points `XDG_CONFIG_HOME` where it means to, because anything that creates `$outside/cfg` makes it vacuous in silence
+
 - [ ] **`check_j1_1` spends a shared quota.** Resolving `github:GRBurst/agent-sandbox` goes through the GitHub API, sixty unauthenticated calls an hour per address, so a few suite runs in one hour turn the end-to-end check red with `HTTP error 403` on a tree that is fine. Either the failure names the quota so a reader is not misled, or the ref resolves without the API — and if it is pinned to a revision, FR-19's claim that the canonical ref is consumable needs another home, because a pinned check no longer makes it
+
 - [ ] **The integration checks ignore the declared substituter.** `e2e.sh` passes `--accept-flake-config` at thirteen call sites and the workflow at two; none of the twenty-one `nix eval` and `nix build` invocations in `integration.sh` do, so on any runner whose user is not trusted — macos-latest, and every consumer's machine — those builds silently fall back to `cache.nixos.org` or to source. Measured as forty-four warnings in run 9's darwin log against zero on Linux. This is the same fact as the stranger's copyable command two boxes above, met from the other side; whichever way it is fixed, the two must agree
+
 - [ ] `research.md` consolidated to what is still true, per AGENTS.md §1 — the decisions and the criteria kept, the record of how each was checked dropped; the `codex` findings kept, since they are the follow-up feature's head start
+
 - [ ] Touched files formatted and linted per [AGENTS.md](../../AGENTS.md#4-verify-every-change)
+
 - [ ] `scripts/validate.sh` passes
 
 The accepted leak is named precisely here because it was named wrongly for most of this feature's life: the mechanism anchors its supervisory state at `$XDG_STATE_HOME/nono`, and one of the two research rounds asserted `$HOME/.nono`. It is an accepted leak rather than a fixable one because the mechanism refuses to grant any path overlapping its own state root, so relocating it into the project would make the project ungrantable ([D13](plan.md#decisions)).
