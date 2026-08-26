@@ -66,11 +66,11 @@ substrate_member() {
 # refusal it was looking for.
 session_fixture() {
 	local agent=$1
-	FIXTURE_PROFILE=$(nix build --no-link --print-out-paths "$REPO_ROOT#confinement-$agent") || {
+	FIXTURE_PROFILE=$(nix build --accept-flake-config --no-link --print-out-paths "$REPO_ROOT#confinement-$agent") || {
 		fail "the confinement for $agent does not build"
 		return 1
 	}
-	FIXTURE_SUBSTRATE=$(nix build --no-link --print-out-paths "$REPO_ROOT#substrate-$agent") || {
+	FIXTURE_SUBSTRATE=$(nix build --accept-flake-config --no-link --print-out-paths "$REPO_ROOT#substrate-$agent") || {
 		fail "the execution substrate for $agent does not build"
 		return 1
 	}
@@ -203,7 +203,7 @@ check_r6() {
 
 	state="$outside/state"
 	session_env "$state"
-	profile=$(nix build --no-link --print-out-paths "$REPO_ROOT#confinement-claude-code")
+	profile=$(nix build --accept-flake-config --no-link --print-out-paths "$REPO_ROOT#confinement-claude-code")
 	# The pre-flight resolves `nono` from PATH, which is the whole mechanism the
 	# plant arm below exploits. Every unplanted arm therefore puts the pinned
 	# nono in front of whatever the developing host carries, so the arms differ
@@ -409,11 +409,11 @@ check_substrate_denials() {
 		return "$SKIP_STATUS"
 	fi
 
-	profile=$(nix build --no-link --print-out-paths "$REPO_ROOT#confinement-$agent") || {
+	profile=$(nix build --accept-flake-config --no-link --print-out-paths "$REPO_ROOT#confinement-$agent") || {
 		fail "the confinement for $agent does not build"
 		return 1
 	}
-	substrate=$(nix build --no-link --print-out-paths "$REPO_ROOT#substrate-$agent") || {
+	substrate=$(nix build --accept-flake-config --no-link --print-out-paths "$REPO_ROOT#substrate-$agent") || {
 		fail "the execution substrate for $agent does not build"
 		return 1
 	}
@@ -1188,7 +1188,7 @@ check_r4() {
 	# Control 3, in two parts. The build log is captured because a dirty tree
 	# makes nix warn, and a warning on the suite's stderr reads as the suite
 	# having left the tree changed.
-	rebuilt=$(nix build --no-link --print-out-paths "$REPO_ROOT#confinement-$agent" 2>"$scratch/build.log") || {
+	rebuilt=$(nix build --accept-flake-config --no-link --print-out-paths "$REPO_ROOT#confinement-$agent" 2>"$scratch/build.log") || {
 		fail "$(printf 'the edited registry does not evaluate, so the widening this check plants is not a valid one:\n%s' \
 			"$(tail -n 5 "$scratch/build.log")")"
 		return 1
@@ -1216,7 +1216,7 @@ check_r4() {
 	# Left as found, and said so rather than assumed: the description this check
 	# started from is the one the restored source produces.
 	cp -pf "$backup" "$registry"
-	restored=$(nix build --no-link --print-out-paths "$REPO_ROOT#confinement-$agent" 2>>"$scratch/build.log") || {
+	restored=$(nix build --accept-flake-config --no-link --print-out-paths "$REPO_ROOT#confinement-$agent" 2>>"$scratch/build.log") || {
 		fail 'the registry does not evaluate after being restored, so this check has left the tree broken'
 		return 1
 	}
@@ -1560,7 +1560,7 @@ check_j8_2() {
 	fi
 
 	project=$(cd "$REPO_ROOT" && pwd -P)
-	registry=$(nix eval --json "$REPO_ROOT#leakRegistry" \
+	registry=$(nix eval --accept-flake-config --json "$REPO_ROOT#leakRegistry" \
 		--apply "es: builtins.filter (e: builtins.elem \"$agent\" e.agents) es")
 
 	# The set equality, unchanged from check_j1_1's and derived from the same
@@ -2011,7 +2011,7 @@ check_j2_1() {
 	# by nothing else. $HOME is expanded because an entry names the variable
 	# while the diff carries the resolved path.
 	dir_manifest "$home" >"$outside/after"
-	registry=$(nix eval --json "$REPO_ROOT#leakRegistry" \
+	registry=$(nix eval --accept-flake-config --json "$REPO_ROOT#leakRegistry" \
 		--apply "es: builtins.filter (e: builtins.elem \"$agent\" e.agents) es" |
 		jq -r '.[].path' | sed "s|\$HOME|$home|g")
 	while IFS=$'\t' read -r root _; do
@@ -2210,7 +2210,7 @@ check_j3_1() {
 	# The registry is subtracted rather than assumed empty, exactly as
 	# check_j2_1 does, so an entry added later relaxes this by what it declares.
 	dir_manifest "$home" >"$outside/home.after"
-	registry=$(nix eval --json "$REPO_ROOT#leakRegistry" \
+	registry=$(nix eval --accept-flake-config --json "$REPO_ROOT#leakRegistry" \
 		--apply "es: builtins.filter (e: builtins.elem \"$agent\" e.agents) es" |
 		jq -r '.[].path' | sed "s|\$HOME|$home|g")
 	changed=()
@@ -2614,7 +2614,7 @@ check_j5_1() {
 	# An arm that fails before appending is the case this exists for.
 	local -a arms=() substitutes=()
 
-	if ! mapfile -t table < <(nix eval --json "$REPO_ROOT#agents" \
+	if ! mapfile -t table < <(nix eval --accept-flake-config --json "$REPO_ROOT#agents" \
 		--apply builtins.attrNames | jq -r '.[]'); then
 		fail 'the agent table does not evaluate, so there is no set to assert the property over'
 		return 1
@@ -3940,7 +3940,7 @@ check_opencode() {
 	# subject, and how the agent arrives at it is not.
 	#
 	# The path comes from the agent table, so moving the surface moves this too.
-	surface=$(nix eval --raw "$REPO_ROOT#agents.$agent.skillSurface.path" \
+	surface=$(nix eval --accept-flake-config --raw "$REPO_ROOT#agents.$agent.skillSurface.path" \
 		--apply "f: f \"$project\"") || return 1
 	mkdir -p "$(dirname "$surface")"
 	# `$schema` is the agent's own key name and stays literal.
@@ -4299,12 +4299,12 @@ tree_manifest() {
 surface_reads() {
 	local agent=$1 project=$2 kind root name
 	shift 2
-	kind=$(nix eval --raw "$REPO_ROOT#agents.$agent.skillSurface.kind") || return 1
+	kind=$(nix eval --accept-flake-config --raw "$REPO_ROOT#agents.$agent.skillSurface.kind") || return 1
 	case $kind in
 	symlink-children)
 		# One link per child of a declared directory, under the agent's own
 		# configuration root, so the read lands on the link's path.
-		root=$(nix eval --raw "$REPO_ROOT#agents.$agent.skillSurface.path" \
+		root=$(nix eval --accept-flake-config --raw "$REPO_ROOT#agents.$agent.skillSurface.path" \
 			--apply "f: f \"$project\"") || return 1
 		for name; do printf '%s/%s/SKILL.md\n' "$root" "${name##*/}"; done
 		;;
@@ -4360,14 +4360,14 @@ check_j8_1() {
 		fail 'the current system does not resolve, so no entry point can be named'
 		return 1
 	}
-	if ! mapfile -t table < <(nix eval --json "$REPO_ROOT#agents" \
+	if ! mapfile -t table < <(nix eval --accept-flake-config --json "$REPO_ROOT#agents" \
 		--apply builtins.attrNames | jq -r '.[]'); then
 		fail 'the agent table does not evaluate, so there is no set to assert the property over'
 		return 1
 	fi
 	# The command each agent answers to, read off the entry points the flake
 	# builds. Keyed the same way, so one list indexes the other.
-	if ! mapfile -t binaries < <(nix eval --json "$REPO_ROOT#agentBinaries.$system" |
+	if ! mapfile -t binaries < <(nix eval --accept-flake-config --json "$REPO_ROOT#agentBinaries.$system" |
 		jq -r 'to_entries | sort_by(.key) | .[].value'); then
 		fail 'the entry point names do not evaluate, so no agent can be started'
 		return 1
@@ -4685,12 +4685,12 @@ check_r9() {
 		fail 'the current system does not resolve, so no entry point can be named'
 		return 1
 	}
-	if ! mapfile -t table < <(nix eval --json "$REPO_ROOT#agents" \
+	if ! mapfile -t table < <(nix eval --accept-flake-config --json "$REPO_ROOT#agents" \
 		--apply builtins.attrNames | jq -r '.[]'); then
 		fail 'the agent table does not evaluate, so there is no set to assert the property over'
 		return 1
 	fi
-	if ! mapfile -t binaries < <(nix eval --json "$REPO_ROOT#agentBinaries.$system" |
+	if ! mapfile -t binaries < <(nix eval --accept-flake-config --json "$REPO_ROOT#agentBinaries.$system" |
 		jq -r 'to_entries | sort_by(.key) | .[].value'); then
 		fail 'the entry point names do not evaluate, so no agent can be started'
 		return 1

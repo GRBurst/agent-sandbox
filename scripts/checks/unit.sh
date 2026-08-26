@@ -59,7 +59,7 @@ suite_scenario_check_ids() {
 devshell_facts() {
 	local system
 	system=$(nix eval --impure --raw --expr builtins.currentSystem) || return
-	nix eval --json ".#devShells.$system.default" --apply \
+	nix eval --accept-flake-config --json ".#devShells.$system.default" --apply \
 		'd: { packages = map (p: p.pname or p.name) d.nativeBuildInputs; hook = d.shellHook; }'
 }
 
@@ -179,7 +179,7 @@ check_bootstrap_mirror() {
 # succeeds and prints the entry when the type accepts it, and fails when it does
 # not, so the caller reads the verdict off the exit status.
 registry_typecheck() {
-	nix eval --json "$REPO_ROOT#leakRegistryCheckEntry" --apply "f: f $1" 2>&1
+	nix eval --accept-flake-config --json "$REPO_ROOT#leakRegistryCheckEntry" --apply "f: f $1" 2>&1
 }
 
 # SC-2 / FR-3. The registry is the only place a path outside the project may be
@@ -198,7 +198,7 @@ check_registry() {
 	fi
 
 	local entries found=0
-	if ! entries=$(nix eval --json "$REPO_ROOT#leakRegistry"); then
+	if ! entries=$(nix eval --accept-flake-config --json "$REPO_ROOT#leakRegistry"); then
 		fail "nix eval --json .#leakRegistry failed"
 		return 1
 	fi
@@ -233,7 +233,7 @@ check_registry() {
 	# resolve or this fails. The ordering is enforced, not assumed.
 	if [ "$(jq -r 'length' <<<"$entries")" -gt 0 ]; then
 		local known
-		if ! known=$(nix eval --json "$REPO_ROOT#agents" --apply builtins.attrNames); then
+		if ! known=$(nix eval --accept-flake-config --json "$REPO_ROOT#agents" --apply builtins.attrNames); then
 			fail "the registry has entries but the agent set does not evaluate"
 			return 1
 		fi

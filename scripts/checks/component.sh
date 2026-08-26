@@ -25,7 +25,7 @@ nono_hermetic() {
 # The profile is a derivation, so it is realised rather than read. Building it is
 # also the only way to learn that lib/confinement.nix evaluates at all.
 confinement_profile() {
-	nix build --no-link --print-out-paths "$REPO_ROOT#confinement-$1"
+	nix build --accept-flake-config --no-link --print-out-paths "$REPO_ROOT#confinement-$1"
 }
 
 # The resolved filesystem reach of a description, as `access<TAB>path` lines.
@@ -70,7 +70,7 @@ check_confinement_validates() {
 	# no check of its own: the claim already existed and was being made about
 	# one name.
 	mapfile -t table < <(
-		nix eval --json "$REPO_ROOT#agents" --apply builtins.attrNames | jq -r '.[]'
+		nix eval --accept-flake-config --json "$REPO_ROOT#agents" --apply builtins.attrNames | jq -r '.[]'
 	)
 	if [ "${#table[@]}" -eq 0 ]; then
 		fail "the agent table names no agent, so this check would assert nothing"
@@ -97,7 +97,7 @@ check_confinement_validates() {
 	local system hook
 	local -a shell_roots=()
 	system=$(nix eval --impure --raw --expr builtins.currentSystem)
-	hook=$(nix eval --raw "$REPO_ROOT#devShells.$system.default.shellHook") || {
+	hook=$(nix eval --accept-flake-config --raw "$REPO_ROOT#devShells.$system.default.shellHook") || {
 		fail "the devShell hook does not evaluate"
 		return 1
 	}
@@ -206,7 +206,7 @@ confinement_validates_one() {
 	# so the two cannot drift and M8b adding a variable needs no edit here.
 	local want got k v
 	# shellcheck disable=SC2016 # $WORKDIR is nono's to expand, not the shell's
-	want=$(nix eval --json "$REPO_ROOT#agents.\"$agent\".stateVars" \
+	want=$(nix eval --accept-flake-config --json "$REPO_ROOT#agents.\"$agent\".stateVars" \
 		--apply 'f: f "$WORKDIR"') || {
 		fail "the agent table does not expose stateVars for $agent"
 		return 1
@@ -313,7 +313,7 @@ check_sc1() {
 	# from. meta survives because M1e found meta.name is required.
 	jq '{meta}' "$profile" >"$tmp/floor.json"
 
-	substrate=$(nix build --no-link --print-out-paths "$REPO_ROOT#substrate-$agent") || {
+	substrate=$(nix build --accept-flake-config --no-link --print-out-paths "$REPO_ROOT#substrate-$agent") || {
 		fail "the execution substrate for $agent does not build"
 		return 1
 	}
@@ -328,7 +328,7 @@ check_sc1() {
 	manifest_grants "$profile" "$cfg" >"$tmp/agent.grants"
 	manifest_grants "$tmp/floor.json" "$cfg" >"$tmp/floor.grants"
 
-	registry=$(nix eval --json "$REPO_ROOT#leakRegistry" \
+	registry=$(nix eval --accept-flake-config --json "$REPO_ROOT#leakRegistry" \
 		--apply "es: builtins.filter (e: builtins.elem \"$agent\" e.agents) es") || {
 		fail "the leak registry does not evaluate"
 		return 1

@@ -6,6 +6,24 @@
 # driver cannot drift from the suite it runs.
 set -euo pipefail
 
+# Every `nix` invocation that names a flake reference passes
+# `--accept-flake-config`, here and in all four layer files.
+#
+# Not an optimisation. nix ignores a flake's own `nixConfig` for anyone who is
+# not a trusted user, and this flake declares a substituter — so without the
+# flag those builds fall back to `cache.nixos.org` or to source on every
+# untrusted machine, which is `macos-latest` and every consumer's laptop.
+# Measured as forty-four `ignoring untrusted flake configuration setting`
+# warnings in run 9's darwin log against zero on Linux. The cost is time and a
+# log so noisy that a skipping check's reason gets buried in it, and the flag
+# has to agree with the copyable command the handbook gives a stranger.
+#
+# Three kinds of invocation are exempt because no flake is read, so there is no
+# `nixConfig` to accept: `nix eval --impure --expr` on a builtin such as
+# `builtins.storeDir` or `builtins.currentSystem`, and `nix eval --file` on
+# `flake.nix` as a plain expression. Adding the flag there would suggest a
+# reason that does not exist.
+
 # Cheapest first, so a fast failure is a fast failure.
 LAYERS=(unit component integration e2e)
 
@@ -46,7 +64,7 @@ declare -A PINNED_BIN=()
 pinned_bin() {
 	local attr=$1 out
 	if [ -z "${PINNED_BIN[$attr]:-}" ]; then
-		out=$(nix build --no-link --print-out-paths "$REPO_ROOT#$attr") ||
+		out=$(nix build --accept-flake-config --no-link --print-out-paths "$REPO_ROOT#$attr") ||
 			die "cannot build the pinned $attr"
 		PINNED_BIN[$attr]="$out/bin"
 	fi
@@ -86,7 +104,7 @@ pinned_bin() {
 # than asked about.
 outside_root() {
 	local label=$1 candidate profile reason root='' verdicts=''
-	profile=$(nix build --no-link --print-out-paths "$REPO_ROOT#confinement-claude-code") ||
+	profile=$(nix build --accept-flake-config --no-link --print-out-paths "$REPO_ROOT#confinement-claude-code") ||
 		die "cannot build the description the scratch root is derived against"
 
 	for candidate in "${XDG_RUNTIME_DIR:-}" "${RUNNER_TEMP:-}" "${HOME:+$HOME/.agent-sandbox}"; do
