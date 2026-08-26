@@ -45,7 +45,9 @@ Everything this repository ships exists so that one project's agents, credential
   Two lists that must agree are a defect unless something fails when they drift.
 - **Accepted leaks are enumerated, justified and few.**
   A leak that is written down is a decision; a leak that is discovered is a bug.
-  Today there is one: `source_up_if_exists` reads a parent `.envrc` above the checkout, kept because that is a personal, machine-level concern and direnv carries on when the read is denied.
+  Today there are two, and they are not the same kind of thing: the first is on every path into the environment, the second only on the path that verifies it.
+  1. `source_up_if_exists` reads a parent `.envrc` above the checkout, kept because that is a personal, machine-level concern and direnv carries on when the read is denied.
+  1. **`$XDG_STATE_HOME/nono`**, where the confinement mechanism anchors its own supervisory state. It is accepted rather than fixed because the mechanism refuses to grant any path overlapping that root, so relocating it into a project would make the project ungrantable — the one leak that cannot be expressed as a grant, and therefore cannot be a leak-registry entry either. Every confined session writes there.
 - **"Local" means the filesystem, not offline.**
   Fetching inputs and downloading tools still need the network.
 - **Isolation is asserted, never assumed.**
