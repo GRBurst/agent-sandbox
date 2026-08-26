@@ -104,6 +104,27 @@ Reach the wrapper past an alias with a leading backslash, as `\opencode --versio
 The wrapper is the only entry point; the unconfined binary is reachable only by store path.
 If the host cannot enforce confinement the wrapper refuses to start the agent and exits 77, rather than running it unconfined.
 
+**Running an agent unconfined, since concealing it would be worse.**
+No flag, variable or configuration makes the wrapper proceed unconfined — that is deliberate, and it is what the `77` protects.
+What remains possible is not invoking the wrapper at all, and this is how, because a route you can find in ten minutes is better described than hidden:
+
+```sh
+grep -o '/nix/store/[^ ]*/bin/claude' "$(command -v claude)"   # what the wrapper execs
+"$(grep -o '/nix/store/[^ ]*/bin/claude' "$(command -v claude)")"   # run it yourself, unconfined
+```
+
+Nothing stops you, and nothing pretends to.
+It is a deliberate and visible act rather than a fallback, which is the whole distinction: a session that runs unconfined because you typed a store path is a decision, while one that runs unconfined because a check quietly failed would be a defect.
+
+Understand what you are switching off. All of it, at once:
+
+- The project boundary. That agent reads and writes your whole home directory, every other checkout included.
+- The credential substitution. It receives your **real** `ANTHROPIC_API_KEY`, not a per-session substitute, so a value it leaks is a value that matters.
+- Every relocation. Its state, cache, history and configuration resolve under `$HOME` again, and this project's `.agents/` is not involved.
+- The git identity. `GIT_CONFIG_GLOBAL` and `GIT_CONFIG_SYSTEM` are the wrapper's doing, so your host git configuration — `core.hooksPath` and `credential.helper` with it — is back in force.
+
+There is no partial version of this. The confinement is one boundary, established once before the agent starts, so stepping outside the wrapper steps outside all of it.
+
 **A 77 does not always mean your kernel.**
 The mechanism reads `$XDG_CONFIG_HOME/nono/config.toml`, which the blanket puts *inside* the checkout, and it refuses to start when that file will not parse.
 So a checkout carrying a broken one produces the same exit status and the same "cannot confine" reading as a host that genuinely cannot.
