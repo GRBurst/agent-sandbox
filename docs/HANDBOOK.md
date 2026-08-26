@@ -180,8 +180,48 @@ The one exception is `skills.paths` itself: this file wins over your global one 
 It is written whole rather than merged because `opencode` also writes to it — it adds its own `$schema` to every configuration file it loads, through an editor that emits a trailing comma when the file was empty, which is not JSON any more.
 Anything you put in `.agents/opencode/config.json` yourself is lost on the next start; put it in `.config/opencode/opencode.json`, which is where it belongs and which is left alone.
 
-**Skills are the whole of it.** The other authoring surfaces these agents read — `agents/`, `commands/`, `output-styles/`, `rules/`, `workflows/` and `themes/` for `claude`, `prompts/` and `themes/` for `pi`, and `opencode`'s agents, commands and modes — are **not** carried in, and neither is anything executable: a plugin, a hook or a `.ts` extension arrives nowhere near this route.
-Those are code that runs, not directives that are read, and widening for them is a decision to make deliberately rather than one to inherit from a variable set months ago.
+**Skills are the whole of it, and here is every location that is not.**
+The tables below name each place these agents read an extension from, so you never have to find out by experiment which of your own came with you.
+They are the enumeration that was measured per agent, not a summary of it.
+
+`claude` — its whole configuration root is moved to `.agents/claude`, so nothing under `~/.claude` is read at all:
+
+| Location | Does your copy arrive? |
+| --- | --- |
+| `skills/` | **Yes**, one symlink per directory you declared |
+| `agents/`, `commands/`, `output-styles/`, `rules/`, `themes/`, `workflows/` | No. The root moved, and nothing puts these back |
+| `plugins/` | No, and deliberately — executable |
+| every ancestor directory's `CLAUDE.md`, `.claude/rules` and `.mcp.json`, walked up to `/` | No. The walk leaves the project, and everything above it is denied |
+| `/etc/claude-code/**` — managed settings, MCP and rules | No. Absolute, moved by no variable, and denied |
+| `.claude/…` inside the project | Yes. It is in the project, so it was never outside |
+
+`opencode` — its root is moved by `XDG_CONFIG_HOME`, and its own configuration file by `OPENCODE_CONFIG`:
+
+| Location | Does your copy arrive? |
+| --- | --- |
+| `skills/` | **Yes**, through the `skills.paths` setting |
+| `agent/`, `command/`, `prompts/`, `modes/`, `themes/` | No |
+| `plugin/`, and `.opencode/plugin/*.ts` | No, and deliberately — executable |
+| `~/.agents/skills` and `~/.claude/skills` | No. These are read `$HOME`-relative and **no variable moves them**; a session is denied `$HOME`, which is what stops them |
+| `.opencode/…` inside the project | Yes |
+
+`pi` — its root is moved to `.agents/pi` by `PI_CODING_AGENT_DIR`:
+
+| Location | Does your copy arrive? |
+| --- | --- |
+| `skills/` | **Yes**, through the `skills` setting |
+| `prompts/`, `themes/` | No |
+| `extensions/`, and `.pi/extensions` | No, and deliberately — executable |
+| `~/.agents/skills` | No, for the same `$HOME`-relative reason as `opencode`'s |
+| `.pi/…` inside the project | Yes |
+
+Two kinds of "no" in those tables are worth telling apart.
+Most are a *relocation*: the agent looks in its new root, your host copy is still where you left it, and neither can see the other.
+The `$HOME`-relative rows and `claude`'s ancestor walk are the other kind — locations no variable moves, where the agent genuinely still looks outside the project and is **denied**.
+Those are the rows along which an extension could otherwise arrive in a session that declared nothing, so the suite asserts the undeclared case as a set equality rather than trusting that nothing was granted.
+
+Nothing executable arrives by this route for any agent — a plugin, a hook or a `.ts` extension gets nowhere near it.
+That is not an oversight in the declaration's reach; it is [what makes the declaration safe to inherit](#extending-an-agent). Such code runs with everything the session can reach, where a skill only tells the agent what to do, so widening for it is a decision to make deliberately rather than one to inherit from a variable set months ago.
 
 ### The API key inside a session is not your API key
 
