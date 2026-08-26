@@ -4673,7 +4673,7 @@ session_readable() {
 # boundary was decided inside the repository.
 check_r9() {
 	local outside home proj agent binary entry nono_bin
-	local project i rc want canary got missing extra arm surface mode
+	local project i rc want canary got missing extra arm surface mode cfg
 	local found=0
 	local -a table=() binaries=() invocation=() declared=() probe=() secrets=()
 	local -a grant=()
@@ -4772,6 +4772,36 @@ check_r9() {
 
 		# Both arms, then the same arm again with the host confinement
 		# description deleted. Each writes its grant and its readable set.
+		#
+		# `XDG_CONFIG_HOME` is the fabricated home's own `.config`, which is
+		# where the host confinement description above was planted. That is
+		# deliberate and it is what makes the `nohost` arm an observation.
+		#
+		# It used to be a directory nothing created, on the understanding that
+		# nono would then fall back to `$HOME/.config` and find the plant
+		# anyway. The fallback is real but conditional, measured over three
+		# cases with uniquely-named profiles: a plant under `$XDG_CONFIG_HOME`
+		# is found; a plant under `$HOME/.config` is found only when
+		# `$XDG_CONFIG_HOME` does **not exist**; and with `$XDG_CONFIG_HOME`
+		# existing and empty, the `$HOME/.config` plant is **not found**. It is
+		# a fallback, not a second search path.
+		#
+		# The entry point runs `mkdir -p "$XDG_CONFIG_HOME"` before it reaches
+		# `nono run`, so the third case is the one that applied: the directory
+		# existed by the time nono looked, no fallback happened, and the plant
+		# was outside the search path altogether. Deleting a file nono could not
+		# see cannot change anything, so the arm compared two identical grants
+		# and passed for a reason that had nothing to do with its claim. The
+		# hazard the audit recorded as future — "anything that creates
+		# `$outside/cfg` makes it vacuous" — had already happened, and the thing
+		# that created it was the entry point under test.
+		#
+		# Pointed here, nono genuinely resolves that directory and genuinely
+		# sees the description. It still takes no part, because the entry point
+		# names its own profile by store path and an argument beats every
+		# discovery route — which is the thing R9 is for, and is now observed
+		# rather than assumed.
+		cfg="$home/.config"
 		for arm in declared bare nohost; do
 			case $arm in
 			declared | nohost)
@@ -4788,7 +4818,7 @@ check_r9() {
 				# the session prints the grant.
 				rm -rf "$home/.config/nono"
 				env "${SESSION_ENV[@]}" "HOME=$home" \
-					"XDG_CONFIG_HOME=$outside/cfg" "$surface" \
+					"XDG_CONFIG_HOME=$cfg" "$surface" \
 					env -C "$proj" \
 					"$entry/$binary" --version \
 					>/dev/null 2>"$outside/err.$agent.$arm" || :
@@ -4796,7 +4826,7 @@ check_r9() {
 				printf '{"meta":{"name":"%s-host"}}\n' "$canary" >"${secrets[3]}"
 			else
 				env "${SESSION_ENV[@]}" "HOME=$home" \
-					"XDG_CONFIG_HOME=$outside/cfg" \
+					"XDG_CONFIG_HOME=$cfg" \
 					"ANTHROPIC_API_KEY=sk-ant-canary-$RANDOM$RANDOM" \
 					"$surface" \
 					env -C "$proj" \
