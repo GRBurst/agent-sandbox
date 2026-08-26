@@ -382,6 +382,28 @@ check_j1_1() {
 		nix develop --accept-flake-config "$ref" --command bash -c \
 		'for b in agent-sandbox-caller-sentinel claude; do printf "%s=%s\n" "$b" "$(command -v "$b" || echo ABSENT)"; done' 2>&1) && rc=0 || rc=$?
 	if [ "$rc" -ne 0 ]; then
+		# Resolving the reference goes through the GitHub API, which allows
+		# sixty unauthenticated calls an hour *per address*. A few suite runs
+		# in one hour exhaust it and this check then goes red on a tree that is
+		# perfectly consumable — and reads exactly like a broken end-to-end
+		# path, which is the one thing it exists to detect. So the quota is
+		# named when it is the cause.
+		#
+		# Still a failure rather than a skip. A skip here would let the only
+		# check that consumes this repository the way a stranger does go quiet
+		# whenever the quota is spent, and a shared address spends it faster
+		# than one machine can. What changes is that the reader is told which
+		# of the two they are looking at, per **P9**.
+		#
+		# Not pinned to a revision, which would resolve without the API and was
+		# the alternative considered. FR-19's claim is that the canonical
+		# reference — `HEAD` on it — is consumable, and a pinned check stops
+		# making that claim, so the quota is the cheaper thing to live with.
+		if grep -qiE 'HTTP error 403|rate limit exceeded' <<<"$probe"; then
+			fail "$(printf 'the GitHub API refused to resolve %s: its unauthenticated quota of sixty calls an hour for this address is spent, so this says nothing about whether the reference is consumable. Wait for the reset and run it again.\n%s' \
+				"$ref" "$probe")"
+			return 1
+		fi
 		fail "$(printf 'the environment could not be entered from %s: exit %s\n%s' "$ref" "$rc" "$probe")"
 		return 1
 	fi
