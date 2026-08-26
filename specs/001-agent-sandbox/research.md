@@ -3119,6 +3119,27 @@ The reach is host-shaped, so the same description is a different boundary on a d
 And `flake.nix`'s claim that every tool a session finds on `PATH` is one it was granted is not true of a host that carries `/usr/bin`; the substrate is what this environment *provides*, not the whole of what a session may *read*.
 That contradiction is the product's to resolve and is carried in `tasks.md` under M10a.
 
+### The group can be opted out of, and a session does not survive it
+
+M10a states the contradiction as a choice: either the description opts out of the group and the substrate is the whole reach, or the reach is stated as what it is and `flake.nix`'s sentence is corrected.
+Both halves of that choice have now been measured rather than argued.
+
+**The opt-out exists and is accepted.** `groups.exclude` is documented as removing "groups from the resolved group set, including inherited defaults", which is what a group reaching a description that declares `groups.include: []` needs. Adding `"exclude": ["system_read_linux_core", "system_read_macos"]` to the shipped description turns every probe: `/usr/bin`, `/bin`, `/lib`, `/etc/ssl` and `/usr/bin/gpg` all move from `granted_path` to `path_not_granted`. `nono profile validate --strict` accepts the result — `all 16 group references valid`.
+
+**A session under it loses the substrate it was supposed to keep.** The same command run twice, once per description, from the entered environment on a NixOS host, as `sh -c 'git --version; git ls-remote <public host> HEAD'`:
+
+| | shipped | with the two groups excluded |
+| --- | --- | --- |
+| the session starts | yes | yes |
+| `git --version` | `git version 2.55.0` | prints nothing — `git` does not run |
+| `git ls-remote` over HTTPS | succeeds | fails |
+
+So the opt-out is not a one-line correction with no cost. It removes the host reach *and* the paths a nix-linked session turns out to depend on: `/bin` and `/usr/bin`, because nono manages `PATH` itself and the entries it leaves resolve through them, and `/etc/ssl`, without which the egress through the injected proxy cannot complete a handshake.
+
+Which way the contradiction is resolved is therefore a decision about the product's guarantee and not about a sentence.
+Opting out is reachable, but it is a piece of work — the substrate's own directories granted explicitly, and the session's `PATH` and CA bundle established from the closure rather than from the host — and until that work is done, opting out ships a description under which no agent runs.
+The narrow alternative is to correct `flake.nix`'s sentence to say what is true and record the group's reach where a reader will find it.
+
 ### Pinning `PATH` would have hidden this rather than fixed it
 
 The obvious repair for a check whose verdict varies by machine is to stop the variation: pin `PATH` to the substrate in `session_env`.

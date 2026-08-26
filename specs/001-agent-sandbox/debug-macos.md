@@ -22,6 +22,7 @@ The workflow is new in `M9`, so no run predates the feature and there is no gree
 | 7 | `fb0333b` | **1 of 35 failed** | **3 of 33 failed** |
 | 8 | `a1f5ea4` | **35 passed** | **33 passed, 2 skipped** |
 | 9 | `d797e91` | **35 passed** | **33 passed, 2 skipped** |
+| 10 | `ea5a94f` | **35 passed** | **33 passed, 2 skipped** |
 
 Run 1's cause is worth keeping because it is not this repository's bug: `cachix/install-nix-action@v27` installed nix 2.22.1, whose darwin installer assigns `_nixbld1` the UID 301 that macOS 15 reserves. Nix 2.24.7 moved the range to 351. The action is now pinned.
 
@@ -45,6 +46,10 @@ It matters because those deletions touched two checks that had been failing on m
 Run 9 answers that both checks still pass on both platforms, so the arm closes on a tree carrying no scaffolding.
 It is also the first run whose logs are the suite's own output and nothing else.
 
+Run 10 is `ea5a94f`, the documentation commit that closed run 9's record, and it carries the same counts on both platforms.
+It adds nothing to the argument about confinement — the tree it ran is run 9's plus two spec files — and it is here only so that the last recorded run is the one at the head of `main`.
+Its two `reach.json` artefacts are the first pair anyone has held side by side, and what they say is under *What the green runs left standing*.
+
 What runs 8 and 9 do not settle is recorded under *What the green runs left standing* below.
 The sections that follow it remain the description of what was wrong, kept because the same symptom will read the same way if it returns.
 
@@ -53,6 +58,10 @@ The sections that follow it remain the description of what was wrong, kept becau
 A green run says the suite agrees with itself on both platforms. It does not say the suite measures everything the spec asks for. Auditing the green runs against the spec found five things, none of them introduced by the class fixes and none of them visible as a failure.
 
 **The cross-platform comparison is weaker than SC-8 reads.** The `platforms` job diffs a per-platform `reach.json` built by stripping every `/nix/store/` string out of each agent's confinement description. Measured here: `filesystem.read` is *entirely* store paths, `filesystem.allow` and `groups.include` are empty, and `nix eval .#leakRegistry` is `[]`. So the artefact that survives the strip is one platform-independent nix expression holding `$WORKDIR` placeholders, `workdir.access` and the state redirection. It can differ only if someone adds a platform conditional under `lib/`. SC-8 asks that "the effective reach observed is the same on both", and an identical description is not an observation of reach.
+
+Run 10's two artefacts confirm this from the product rather than from the reasoning: `diff` over the downloaded `reach-x86_64-linux/reach.json` and `reach-aarch64-darwin/reach.json` reports **no difference at all**, and in both of them `filesystem.read` is `[]` for all three agents — the strip does not thin that list, it empties it. So the job's `diff` compares two files that carry no filesystem grant of any kind.
+
+Worse, and new: the reach the group confers is invisible to *every* artefact-based instrument, not just to the stripped one. `nono profile show --format manifest --json` over the shipped description lists no non-store grant whatsoever, while `nono -s why --path /usr/bin --op read` against the same description answers `{"status":"allowed","reason":"granted_path"}`. A comparison built by diffing descriptions or manifests therefore cannot see the one thing the two platforms differ on, however it is filtered. Only `nono why`, asked path by path, sees it.
 
 The per-platform `check_sc1` equalities do read the resolved grant, but each subtracts a floor derived by resolving a `{meta}`-only description — and the floor is exactly where the platform difference lives, since nono's `system_read_macos` grants `/private` and `system_read_linux_core` grants `/usr/bin` and two dozen more wherever they exist on the host. The one thing that differs between platforms is therefore subtracted on both sides of every equality. The host-dependence of that grant is already carried to `M10a`; its consequence for FR-20 and SC-8 is what is new.
 
