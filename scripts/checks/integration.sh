@@ -3948,6 +3948,19 @@ check_opencode() {
 	printf '{\n  "$schema": "https://opencode.ai/config.json",}\n' >"$surface"
 
 	find "$home" -printf '%p\t%s\t%T@\n' | sort >"$outside/before"
+	# The project is snapshotted too, and for the same reason the home is: the
+	# control below asks whether the *session* wrote inside the project, and a
+	# listing taken only afterwards cannot tell the session's writes from this
+	# check's own. The seed above is the case that made it necessary — it plants
+	# the skill-surface file, and its parent directories with it, so a listing
+	# would have been non-empty whatever the session did. Taken after the seed
+	# and after `mkdir -p "$capture"`, so both appear on both sides and cancel.
+	#
+	# The capture subtree is excluded on both sides rather than cancelled,
+	# because its *contents* are written during the run by the session's own
+	# redirections and would otherwise satisfy the control by themselves.
+	find "$project" -not -path "$capture" -not -path "$capture/*" \
+		-printf '%p\t%s\t%T@\n' | sort >"$outside/proj.before"
 
 	# A credential in the calling environment, so the mediated route has
 	# something to substitute. The value is a canary: it must not survive into
@@ -4033,12 +4046,16 @@ check_opencode() {
 
 	# The control: without state in the project, an unchanged home proves
 	# nothing. It accumulates rather than returning, because a lost relocation
-	# breaks the control and the subject at once. The capture directory is this
-	# check's own doing and would make the control true whatever the session
-	# did, so it is not counted; `-not -path` takes a pattern rather than a
-	# regular expression, which is the form BSD find has too.
-	mapfile -t landed < <(find "$project" -mindepth 1 \
-		-not -path "$capture" -not -path "$capture/*" 2>/dev/null | sort)
+	# breaks the control and the subject at once.
+	#
+	# It is a *difference*, not a listing, so only what the session wrote counts
+	# — the seeded surface file and its parent directories are on both sides and
+	# cancel. The capture subtree is excluded on both sides for the reason given
+	# where the first snapshot is taken. `-not -path` takes a pattern rather
+	# than a regular expression, which is the form BSD find has too.
+	find "$project" -not -path "$capture" -not -path "$capture/*" \
+		-printf '%p\t%s\t%T@\n' | sort >"$outside/proj.after"
+	mapfile -t landed < <(comm -13 "$outside/proj.before" "$outside/proj.after" | cut -f1)
 	if [ "${#landed[@]}" -eq 0 ]; then
 		found=1
 		fail "the session wrote nothing inside the project, so an unchanged home directory would prove nothing"
