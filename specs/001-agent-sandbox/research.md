@@ -781,12 +781,11 @@ M4b's own planted violation therefore occurred unbidden, before the code that wa
 - `D3`'s shadowing is not a convenience. On a machine that has the agent installed, the confined wrapper must come first on `PATH` or the environment silently runs the host's copy.
 - The same is true of `nono`, which is why the suite resolves it from the flake. Sabotaging a `nono` on `PATH` (`exit 3`) leaves all five component and integration checks green *with* the pinning, and fails three component checks plus `check_r6` *without* it.
 
-### Method notes
+### Three requirements this task turned up
 
-- `mktemp -d TEMPLATE` ignores `TMPDIR` and creates a **relative** directory in the current directory; only `mktemp -d -p DIR TEMPLATE` places it. The relative path then reached nono as `HOME`, which refused it: `Environment variable 'HOME' validation failed: must be an absolute path`.
-- A flake in a dirty tree cannot see an untracked file: `error: Path 'lib/confined-agent.nix' … is not tracked by Git`. `git add -N` is enough.
-- `$XDG_STATE_HOME` must stay outside the project, or nono refuses to start: `Refusing to grant '<project>' … because it overlaps protected nono state root`. The integration layer's four conditions, recorded in `M3c`, all still hold under `0.74.0`.
-- The devShell has to carry `shellcheck` and `shfmt` itself. `AGENTS.md` §4 names both, and until now they resolved only from a user profile — the same class of mistake as the host `nono`.
+- `mktemp -d TEMPLATE` ignores `TMPDIR` and creates a **relative** directory in the current directory; only `mktemp -d -p DIR TEMPLATE` places it. A relative path reaches nono as `HOME` and is refused: `Environment variable 'HOME' validation failed: must be an absolute path`. (`-p` is GNU-only, which is why `outside_root` uses the `TEMPLATE` form with an absolute prefix instead.)
+- A flake in a dirty tree cannot see an untracked file: `error: Path '…' is not tracked by Git`. `git add -N` is enough.
+- The devShell has to carry `shellcheck` and `shfmt` itself. `AGENTS.md` §4 names both, and until this they resolved only from a user profile — the same class of mistake as the host `nono`.
 
 ## M4c
 
@@ -1000,11 +999,9 @@ The pre-flight reads that as assertion 1 failing and refuses with `77`, naming L
 Inside the devShell the store's `coreutils` comes first on `PATH` and the same code passes, which is why `check_r6` fails when the suite is run directly and passes under `nix develop -c`.
 The checks resolve every binary they run through `substrate_member` precisely to avoid this; the shipped pre-flight does not.
 
-### Method notes
+### The manifest's warnings share a stream with its JSON
 
-- `nono profile show --format manifest` writes its `WARN` lines to the same stream as the JSON.
-  `sed -n '/^{/,$p'` before `jq`, or `jq` fails with `Invalid numeric literal at line 1, column 2`.
-- With `HOME` inside the project, nono also warns that it is *skipping* the `system_write_linux` grant on `<project>/.tmp` for the same overlap reason, before going on to refuse.
+`nono profile show --format manifest` writes its `WARN` lines to the same stream as the JSON, so anything parsing it needs `sed -n '/^{/,$p'` first, or `jq` fails with `Invalid numeric literal at line 1, column 2`.
 
 ## M5b — A write outside the project is refused
 
@@ -1222,12 +1219,6 @@ Four separate things follow, and only the last was anticipated.
 
 `check_r5` does not assert against this. Its arms all drive the real entry point, which names a store path, and the by-name arm it does use resolves a file the check itself planted in the config root, so it never reaches the registry. What the check does assert is the property that makes all of the above unreachable: the reach of a session started in a hostile checkout equals the reach of one started in a clean one. The pull is recorded here as the sharpest available account of what the plant is protecting against, and as a correction owed to `D10`.
 
-### Method notes
-
-`env VAR=VAL … cmd --flag` stops treating arguments as assignments at the first one that is not `VAR=VAL`, so flags handed to `env` before the command become `env: '--profile': No such file or directory`. Every flag goes after the command name.
-
-`XDG_STATE_HOME` must be outside the workdir. Pointed inside it, nono refuses with `Refusing to grant '<project>' (source: user) because it overlaps protected nono state root '<project>/…/nono'`, which is the same protected-state-root refusal `M5b` met from the other side.
-
 ## M5f — A host-global configuration does not reach an undeclared session
 
 Measured on x86_64-linux with nono 0.74.0 against `claude-code` 2.1.237, through the built `.#claude` entry point and, for the arms that need a baseline, the raw binary out of the same closure.
@@ -1437,10 +1428,6 @@ A `bash` probe out of the substrate, in a shipped-description session with the f
 
 Three things follow. `D13`'s hole is wider than that decision states — *no* XDG root crosses, and neither does `TMPDIR`, so the devShell's redirection stops at the boundary entirely and the task's "not only the ones the devShell happens to redirect" turns out to mean *none of them*. Every `$HOME`-relative fallback is denied, which is **P9** working as designed. And `/tmp` **is writable** inside a session, because it is among the 33 system paths in the floor — so a tool falling back there because `TMPDIR` is unset writes outside the project, silently, at a path two projects share. That last one is the only hole here that no criterion had named, and it is the reason `TMPDIR` joins the four XDG keys rather than the state root going in alone.
 
-### A plant harness that reverts by `git checkout` will eat an uncommitted GREEN
-
-The first harness for this task reverted with `git checkout -- lib/agents.nix lib/confinement.nix lib/confined-agent.nix` from an `EXIT` trap. The GREEN change was not yet committed, so the trap discarded it along with the plant, and the next run measured a tree with no relocated roots at all and reported four coverage failures that had nothing to do with the plant. It is a false result that reads exactly like a true one. A harness must back the files up by copy and restore by copy, and this one now says so where the trap is set.
-
 ### Two nono facts about granting the fallback, which the plant needs
 
 A grant naming a regular file is refused at startup: `nono: Configuration parse error: CLI path '<home>/.claude.json' is not a directory. Use --allow-file for single files.` And granting `$HOME/.claude` is not sufficient on its own, because `~/.claude.json` is a sibling rather than a child — which is why nono's own `nolabs-ai/claude` pack names `$HOME/.claude`, `$HOME/.claude.json` and `$HOME/.claude.json.lock` separately. A plant reproducing the leak needs both grants and both flags.
@@ -1492,12 +1479,6 @@ That is why `check_j3_1` cannot select its records by project path. Under the pl
 ### The read-only arm fires one half and not the other
 
 Appending the same path to `read` rather than `allow` fires the reach assertion and leaves every cross-write assertion green. That is the measured reason both halves of FR-8 are asserted rather than one standing in for the other: a read grant on a sibling is a leak that no write attempt can observe.
-
-### Two method notes
-
-A jq `.` **rebinds after a `|`**. The ancestor clause was first written `any(.tracked_paths[]; . == $p or startswith($p + "/") or ($p | startswith(. + "/")))`, and inside that last parenthesis `.` is `$p`, so the clause compared `$p` against itself and never matched. It has to bind the element first: `. as $t | $t == $p or ($t | startswith($p + "/")) or ($p | startswith($t + "/"))`. The bug was silent — the plant still failed, on the other half, so only the message text (`reaches 0 of the two checkouts (none)`) gave it away.
-
-`v=$(<"$f" 2>/dev/null)` yields the empty string whatever the file holds. Bash's `$(<file)` fast path takes no additional redirection, so the added `2>/dev/null` turns it into an ordinary redirection-only command with no output.
 
 ## M7 — The credential surface, and interception measured rather than reasoned
 
@@ -1647,14 +1628,6 @@ A service name in `network.credentials` with no matching definition is **refused
 
 The substitute carries **no `nono_` prefix**. `M1b` recorded the sandbox holding a phantom `nono_<64 hex>`; what a proxy credential route hands the child is bare 64 hex. The prefixed form presumably belongs to `credential_providers` phantoms, which no arm here got far enough to see.
 
-### Method note
-
-`env VAR=VAL … cmd` stops treating arguments as assignments at the first one that is not `VAR=VAL`, so every flag goes after the command name. And a probe that reads `NONO_CAP_FILE` with a `while IFS= read -r` loop gets a truncated document; if the manifest is ever needed, it has to be read after the session rather than during it.
-
-**A plant harness must not nest `direnv exec .`.** A harness run as `direnv exec . bash .tmp/plant.sh` cannot call `direnv exec . bash scripts/validate.sh` from inside itself: the inner call dies with `.envrc is blocked. Run \`direnv allow\` to approve its content`and the layer produces no output whatsoever, which reads exactly like a layer that found nothing to say. It is already inside the environment, so it calls`bash scripts/validate.sh\` directly.
-
-**A `sed` plant needs a guard that the edit landed.** The `allow_vars` items in `lib/confinement.nix` are indented eight spaces, not ten; a pattern written for ten matched nothing, and the run would have reported a plant that changed no behaviour as a plant that bit nothing. The harness now aborts unless `git diff` mentions the string it meant to add.
-
 ## M7b — Authenticating once serves every project, and every agent
 
 Measured on x86_64-linux with nono 0.74.0, against the shipped `.#confinement-claude-code` — which carries `network.credentials = ["anthropic"]` since `M7a`. Every arm ran a bash probe out of the substrate printing `env -0`, with the fake `$HOME`, the config root, the ambient `XDG_STATE_HOME` and the scratch checkouts as siblings under one `mktemp -d -p "$XDG_RUNTIME_DIR"`.
@@ -1702,10 +1675,6 @@ Two things follow. `check_r3`'s `routed` literal grows by a base URL per declare
 
 `NONO_PROXY_TOKEN` held the same 64 hex as `ANTHROPIC_API_KEY` in every arm, with six routes declared as with one. `M7a` measured the equality; this adds that the token is the session's rather than the route's, so a second route would not yield a second value to compare.
 
-### Method note
-
-**A probe must write its dump inside the granted workdir.** The first harness wrote `env -0` to a path outside it: every arm exited 1 with no output, which reads exactly like the mechanism refusing to start rather than like a redirection being denied.
-
 ## M7c — A stale substitute answers differently from a denied path
 
 Measured on x86_64-linux with nono 0.74.0, against the shipped `.#confinement-claude-code`. One probe out of the substrate makes a provider request with bash's own `/dev/tcp`: there is no HTTP client in `sessionTools`, and adding one would widen every session's substrate for a check's convenience. The request is `POST <ANTHROPIC_BASE_URL>/v1/messages` with `connection: close`, and the response is read with the substrate's own `timeout` and `cat`.
@@ -1743,11 +1712,10 @@ The valid-token arm cannot be in the check, so the check cannot show a provider 
 
 `plan.md` said "collapse both failure paths onto one message **in the wrapper**". The wrapper produces neither message; the knob is the agent table's `credentialServices`. Emptied, no route exists, no base URL crosses, and every failure the session can observe is of one kind — there are no longer two messages to differ.
 
-### Method notes
+### Two facts about what a denial probe may target
 
-- **The environment is filtered, so a probe takes its targets as arguments.** The first version passed the outside path in `SECRET=`; the variable does not cross — `allow_vars`, which `check_r3` asserts — and the probe reported `No such file or directory` for a denial it had never attempted.
-- **`/etc/shadow` is the wrong target for the denial half.** It is `0640 root:shadow`, so it says `Permission denied` outside the sandbox too. The file has to be one the harness made world-readable.
-- The proxy resets the connection after the body, so the reader appends `cat: -: Connection reset by peer` to what it captured.
+- **`/etc/shadow` is the wrong target for the denial half.** It is `0640 root:shadow`, so it says `Permission denied` outside the sandbox too. The file has to be one the harness made world-readable, or the observation is not the boundary's.
+- The proxy resets the connection after the body, so a reader appends `cat: -: Connection reset by peer` to what it captured.
 
 ## M7d — What a second authentication changes, and what it does not
 
@@ -2173,16 +2141,11 @@ Inside a confined session the host path is denied instead, so the agent fails ra
 
 Reading the binary for variable names appeared not to be available for this agent, `strings -a` over the resolved `opencode` for `OPENCODE_[A-Z0-9_]+` seeming to yield nothing because it is a compiled bun bundle. [`M8c`](#m8c--opencode-needs-no-variable-of-its-own-and-takes-its-credential-from-the-environment) found otherwise — the bundle carries 84 distinct names — so the sentence stands only as a warning that none of them relocates a root, not as a claim that they are unreadable.
 
-### Method notes
+### Three properties of the enumeration instruments
 
-- `opencode debug skill` is the enumeration instrument of choice, but it reports what the agent **resolved**, not every path it tried.
-  A root that is denied and one that is empty look the same.
-  Enumerating the locations an agent *attempts* still needs `strace -f -e trace=openat`, which is how the other two agents were measured.
-
-- **An agent has to be given work before it looks for extensions.** `pi --list-models` and the equivalent cheap invocations produce 343 trace lines and touch almost nothing; a print-mode run (`-p 'hi'` with a syntactically valid but wrong `ANTHROPIC_API_KEY`) produces around a thousand for `pi` and nearly eight thousand for `claude-code`, because discovery completes before the request is sent and the request then fails with a 401.
-  The 401 is the signal that discovery ran to completion, so it is the instrument working rather than the measurement failing.
-
-- **Plant a fixture in every candidate root, not only the ones expected to win.** Dedup, precedence and trust gates are all invisible when only one root is populated, and each of the three findings below about ordering came from a root that had a file in it.
+- `opencode debug skill` reports what the agent **resolved**, not every path it tried, so a root that is denied and one that is empty look identical. Enumerating what an agent *attempts* needs `strace -f -e trace=openat`.
+- **An agent has to be given work before it looks for extensions.** `pi --list-models` produces 343 trace lines and touches almost nothing; a print-mode run produces around a thousand for `pi` and nearly eight thousand for `claude-code`, because discovery completes before the request is sent. The request then fails with a 401, and that 401 is the signal that discovery ran to completion.
+- **A fixture belongs in every candidate root, not only the ones expected to win.** Dedup, precedence and trust gates are all invisible when only one root is populated.
 
 ### `pi` — one variable moves the global surface, and the project surface is behind a trust gate
 
@@ -2534,26 +2497,12 @@ Seeding the state is the deterministic form of a defect whose trigger is a previ
 This section is the working record for the macOS side of `M9d`, written so that a session picking the work up needs nothing but this file, and so that nothing already measured is measured again.
 `M9d`'s task entry carries the decision and the criteria; what follows is the evidence.
 
-### How the arm got here, in five runs
+### One cause that was never this repository's
 
-The workflow itself is new in `M9`, so no macOS run predates this feature.
-Each row is a pushed commit and the two jobs it produced.
-
-| run | commit | Linux | macOS |
-| --- | --- | --- | --- |
-| 1 | `5d221cc` | 34 passed | the job died in the nix installer, two steps before the suite |
-| 2 | `4c362f8` | 34 passed | 23 of 33 failed, every session refused to start |
-| 3 | `e189d82` | 34 passed | the same 23, plus the probe step's answers |
-| 4 | `518ed2d` | 34 passed | **11 of 33 failed**, sessions start |
-| 5 | `a8316ed` | 34 passed | the same 11, with the tracing that classified them |
-
-Run 1 was `cachix/install-nix-action@v27`, which installs nix 2.22.1, whose darwin installer assigns `_nixbld1` the UID 301.
-macOS 15 and later reserve 300–304 for Apple's own daemon users, so `dscl . create /Users/_nixbld1 UniqueID 301` failed with `eDSRecordAlreadyExists`.
-Upstream fixed it in 2.24.7 by moving the first build UID to 351.
-No repository code was implicated, and the pinning commit that followed made the installer a non-issue.
-
-Runs 2 and 3 were the scratch-root refusal that `M9d` exists for, and run 4 is the derived `outside_root` landing.
-Runs 4 and 5 are the same eleven failures; run 5 differs only in what the failures say about themselves.
+The run-by-run record is in [debug-macos.md](debug-macos.md#where-the-arm-stands) and is not repeated here.
+One row's cause belongs with the findings rather than with the record, because it is not a bug in anything this repository ships: `cachix/install-nix-action@v27` installs nix 2.22.1, whose darwin installer assigns `_nixbld1` the UID 301.
+macOS 15 and later reserve 300–304 for Apple's own daemon users, so `dscl . create /Users/_nixbld1 UniqueID 301` fails with `eDSRecordAlreadyExists`.
+Upstream fixed it in 2.24.7 by moving the first build UID to 351, and the action is pinned past it.
 
 ### The instruments are mirror images, and neither platform has both
 
@@ -2738,14 +2687,7 @@ A fifth thing, which nothing had asked, was found in the same logs and would hav
 This section records what each answer is, how it was obtained, and what it changed.
 The measures themselves are in [tasks.md](tasks.md) § M9e, and a per-check reproduction table is in [debug-macos.md](debug-macos.md).
 
-### The logs were the instrument, and they were already downloaded
-
-The failing run is `a8316ed`, whose logs the previous session fetched to read the `DBG` lines it had planted and then stopped reading.
-Everything below comes from those same two files — the darwin job's 1939 lines and the Linux job's 977 — which are not kept in the repository; [debug-macos.md](debug-macos.md) says how to fetch them again.
-
-The lesson generalises past this feature.
-The tracing that `M9d` added answered its own question and was then treated as spent, but the *untraced* output around it — nono's banner and its supervisor trailer, printed on every session and quoted in full by every failure message — is what carried three of the four answers.
-A macOS log is twice the length of a Linux one for exactly this reason, and that bulk was read as noise.
+Everything below was read off the logs of run `a8316ed`. The untraced output — nono's banner and its supervisor trailer, printed on every session and quoted in full by every failure message — carried three of the four answers; the tracing added for the purpose carried one.
 
 ### U3 — the banner prints identically on darwin
 
@@ -2972,11 +2914,7 @@ Two nono behaviours bound the design and bear on `outside_root` and on M10a's qu
 - Granting a directory that holds nono's own state root is refused before the sandbox starts — `Refusing to grant '…/home' (source: Profile) because it overlaps protected nono state root '…/home/.nono'.` This is emitted by `nono why` as well as by `nono run`, so a `why` query can fail for a reason unrelated to its path.
 - Pointing `HOME` **inside** the project makes nono refuse with `Landlock deny-overlap is not enforceable on Linux. Refusing to start with conflicting policy. 48 deny rule(s) cannot apply under an allowed parent directory.` So the guard against a project that is its own home states more clearly something nono already refuses on Linux.
 
-### A latent defect the rewrite exposed
-
-`:` is a POSIX **special builtin**, so a redirection failure on it exits a non-interactive shell outright rather than setting a status, and `2>/dev/null` is never installed because redirections apply left to right.
-The assertion the rewrite replaced was `sh -c ": > \"$canary\""`, which therefore **passed by reading the shell's own abort as the child's denial**.
-The subshell form `( : > … ) 2>/dev/null` is what actually observes the child.
+The assertion this rewrite replaced was `sh -c ": > \"$canary\""`, which **passed by reading the shell's own abort as the child's denial** — the `:` special-builtin defect recorded above.
 
 ### Class A — a derived wording needs a control of its own
 
@@ -3088,16 +3026,12 @@ The floor is also asymmetric: `ARMS_NOISE` is assigned unconditionally, but the 
 On Linux the subtraction is a no-op over a missing file.
 That is currently harmless, since only the darwin branch reads it, but it is a variable that promises an observation that was never made.
 
-### Method notes
+### Two instruments worth keeping
 
 `-e trace=openat` answers *what* was reached for and cannot answer *who* reached.
-Adding `execve` to the same trace turns it into a process census and makes the nix/host distinction visible, which is the distinction that mattered here.
+Adding `execve` to the same trace turns it into a process census and makes the nix/host distinction visible.
 
-Phase markers cost one line and make a trace bucketable: `mark() { : <"/AGENTSANDBOX_MARK_$1" 2>/dev/null || true; }` opens a path that cannot exist, so the failed `openat` lands in the stream as a labelled boundary and a span is extracted with `awk`.
-This is how the plain-commit span was measured separately from the session's — `[0 paths, from 170 traced lines]` — which is the evidence that narrowing the span is sufficient.
-
-A check that passes locally and fails in CI should have its *precondition* tested before its logic.
-Here `nono -s why --path /usr/bin/gpg --op read` against the profile answered the whole question in one call, and it answers on a host where `/usr/bin/gpg` does not exist, because the verdict follows from the granted prefix rather than from the file.
+`nono -s why --path /usr/bin/gpg --op read` against the profile answers the whole question in one call, and it answers on a host where `/usr/bin/gpg` does not exist, because the verdict follows from the granted prefix rather than from the file.
 
 ## M9e — What fixing classes D and E measured, and the grant nobody declared
 
