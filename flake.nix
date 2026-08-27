@@ -38,10 +38,12 @@
     let
       inherit (nixpkgs) lib;
 
-      # The two systems the agents are actually available for: M4b read the
-      # input's own outputs and found x86_64-linux, aarch64-linux and
-      # aarch64-darwin, with no x86_64-darwin. genAttrs rather than flake-utils
-      # (D7) — a new input is not worth six lines.
+      # The two systems this environment is verified on. M4b read the input's own
+      # outputs and found the agents available for three — x86_64-linux,
+      # aarch64-linux and aarch64-darwin, with no x86_64-darwin — so aarch64-linux
+      # is left out for want of a runner rather than for want of a package, and
+      # declaring a system nothing has ever entered would claim more than is known.
+      # genAttrs rather than flake-utils (D7) — a new input is not worth six lines.
       systems = [
         "x86_64-linux"
         "aarch64-darwin"
@@ -73,6 +75,9 @@
           # it. Linux only, so devShells.aarch64-darwin.default keeps evaluating.
           sessionTools =
             (with pkgs; [
+              # The justfile is where AGENTS.md §4's format-and-lint table is
+              # runnable rather than remembered. It wraps no assertion of its
+              # own: scripts/validate.sh stays the verification entry point.
               just
               jq
               yq-go
@@ -89,10 +94,12 @@
               # The agent's Bash tool reaches for git before anything else, and
               # until M4c it resolved from the host user profile or not at all.
               git
-              # The workflow pins every action to a commit SHA, and `pinact run
-              # --check` is what proves a pin still matches the tag its comment
-              # claims. Under AGENTS.md §3 that proof may not depend on the
-              # maintainer having pinact in a user profile.
+              # The workflow pins every action to a commit SHA, and `just pins`
+              # is what proves a pin still matches the tag its comment claims —
+              # `pinact run -fix=false --verify-comment`, since -fix=false on
+              # its own only asks whether the pin is a SHA at all. Under
+              # AGENTS.md §3 that proof may not depend on the maintainer having
+              # pinact in a user profile.
               pinact
             ])
             ++ lib.optionals isLinux [ pkgs.strace ];

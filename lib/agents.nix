@@ -63,8 +63,8 @@ let
           placeholder. No value may name a location outside it: a value that
           carries a path lies under the placeholder, and a value that carries a
           setting rather than a path carries no path separator at all. That is
-          FR-4, and `check_state_vars` asserts it over every entry in this
-          table rather than over a named one.
+          FR-4, and `check_confinement_validates` asserts it over every entry
+          in this table rather than over a named one.
         '';
       };
       skillSurface = mkOption {
@@ -168,8 +168,11 @@ lib.mapAttrs (_: checkAgent) {
     # exit 127 with nono reporting the binary readable but unexecutable — but
     # `nix_runtime` pays for the store with six further paths, two of them under
     # the home directory. M3c measured a path grant on the store conferring read
-    # alone, so the substrate is granted from the leak registry instead, where
-    # its justification is written down and `check_sc1` keeps it in view.
+    # alone, so the substrate is granted as a category of its own instead: M4c
+    # made it the closure of what the session executes, read out of a built
+    # derivation by lib/confinement.nix, and `check_sc1` keeps it in view. It was
+    # briefly a leak-registry entry, which D18 withdrew — a derived set owes no
+    # human-written justification, and the registry is empty again.
     #
     # git_config is deliberately not here. It grants read on the host's git
     # configuration, and read-only is no protection when the danger is that a

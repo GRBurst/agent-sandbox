@@ -55,6 +55,7 @@ stranger_env() {
 		"TMPDIR=$project/.tmp/session"
 		"USER=$(id -un)"
 		NONO_NO_UPDATE_CHECK=1
+		NONO_NO_SAVE_PROMPT=1
 		"PATH=$nixbin"
 	)
 	STRANGER_PATH=$nixbin

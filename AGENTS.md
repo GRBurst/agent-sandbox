@@ -1,7 +1,7 @@
 # Agent Rules
 
 This repository is a **consumable development environment**.
-Pointed at from a flake, a devenv configuration or a devcontainer, whether from GitHub or a local checkout, it sets a project up with agents already configured.
+Pointed at as a flake, whether from GitHub or a local checkout, it sets a project up with agents already configured.
 **Project isolation is the product**: nothing — credentials, caches, history, agent state — leaks between the projects that use it.
 
 There is no cloud, no Kubernetes and no deployed service, and nothing is ever delivered anywhere.

@@ -61,10 +61,21 @@ pkgs.writeShellApplication {
     # wrapper would be a second place P1's variables are decided.
     mkdir -p "''${XDG_CONFIG_HOME:?not set; enter the environment (nix develop / direnv) rather than running this from the store}"
 
-    # The profile cannot carry this: nono reserves the NONO_ prefix and its
-    # validator rejects a set_vars entry using it. An agent session is not the
-    # place to discover that the mechanism updated itself mid-run (P8).
+    # The profile cannot carry either of these: nono reserves the NONO_ prefix
+    # and its validator rejects a set_vars entry using it. An agent session is
+    # not the place to discover that the mechanism updated itself mid-run (P8).
     export NONO_NO_UPDATE_CHECK=1
+
+    # A denial is the environment working. On a terminal nono follows it with a
+    # review offering to save the denied path as a grant in a user profile, and
+    # here that offer can only mislead: $XDG_CONFIG_HOME is inside the project,
+    # so the file lands in the checkout, and the description below is named on
+    # the command line, which R5 measured beats a discovered profile. It would
+    # write something that reads as a widening of the confinement and can never
+    # take effect. Suppressing the offer withholds no information: the
+    # denial is still reported, and a path an agent genuinely needs belongs in
+    # the description or the leak registry, where it has to justify itself.
+    export NONO_NO_SAVE_PROMPT=1
 
     # FR-10 / R6. Refuse rather than start unconfined. Embedded rather than
     # sourced so the entry point depends on nothing outside its own closure.

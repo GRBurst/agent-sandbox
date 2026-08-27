@@ -4,6 +4,8 @@
 
 Read [plan.md § Read first](plan.md#read-first) before starting `M1a`. One task is one commit. RED before GREEN, every time.
 
+Every task heading carries an explicit `<a id="…">` of its own task id, so a cross-reference is written `[M1a](#m1a)`. Link to that and never to the heading's generated slug: the slug contains the status, so it changes every time a task advances, and the links to it break silently. This is the same convention [plan.md](plan.md#decisions) uses for its decisions.
+
 ______________________________________________________________________
 
 ## M1 — Ground truth: the harness, and the unknowns that block design
@@ -11,6 +13,8 @@ ______________________________________________________________________
 The spikes exist because [D1](plan.md#d1) forks the architecture and the fork cannot be guessed. Each spike ends with a written finding in `research.md`, not with code.
 
 `M1a` through `M1f` have landed. `M1g` was added after them, because closing `M1b` and `M1c` moved `claude-code` from one agent among several to the reference case and the credential source for the other two, and nothing in `M1` had established that its configuration root relocates. It is the first task of the implementing session.
+
+<a id="m1a"></a>
 
 ### M1a — The scenario ↔ check bijection (Status: DONE)
 
@@ -35,6 +39,8 @@ Decisions the plan did not anticipate:
 - The planted violation for `check_r5` needed a green suite to bite, so all 19 checks were stubbed transiently, the deletion was observed to isolate exactly `r5`, and the stubs were removed. The suite is intentionally left RED: `check_sc3` is the feature's progress bar and goes green only when the last scenario lands.
 - **The baseline is now 20, not the 19 recorded above.** `R10` was added to the spec after this task landed, and `check_sc3` picked it up with no edit to the parser or to any list — which is the property the check was written for. A run today reports `j1_1 j2_1 j3_1 j4_1 j5_1 j6_1 j7_1 r1 r2 r3 r4 r5 r6 r7 r8 r9 r10 rep1 rep2 rep3`, `1 of 1 checks failed`, exit 1. That set is the baseline every later task compares against: the failing set shrinks by exactly the scenarios the task covers, and nothing else moves.
 
+<a id="m1b"></a>
+
 ### M1b — Spike: can each agent be pointed at a substituted endpoint? (Status: DONE)
 
 The pivot. Determines whether the leak registry is empty or holds one credential file per agent, per [D1](plan.md#d1).
@@ -56,6 +62,8 @@ The pivot. Determines whether the leak registry is empty or holds one credential
 - Two findings the plan did not anticipate, recorded in `research.md` and carried forward: `nono run --credential __bogus__ --dry-run true` exits 0, so nono does not validate credential service names and the wrapper must; and the shipped `nolabs-ai/claude` pack grants `$HOME/.claude` read-write, which is the leak this feature removes, so that pack cannot be extended unmodified.
 - `spec.md` Risk 1 asserted "whether each agent's provider endpoint is configurable is what FR-6 actually turns on". That is falsified, and the risk has since been **rewritten in place as resolved** with its premise named wrong, rather than waiting for close-out. What remains of it sits under FR-7 and is narrower: not whether an endpoint can be substituted, but where the other two agents obtain the credential ([D14](plan.md#d14)).
 
+<a id="m1c"></a>
+
 ### M1c — Spike: where does `git` get its credential inside the boundary? (Status: DONE)
 
 Journey 6 may be unachievable as written — spec Risk 2, which is a gap in the spec rather than in the research.
@@ -76,6 +84,8 @@ Journey 6 may be unachievable as written — spec Risk 2, which is a gap in the 
 - One trap kept for the `codex` follow-up: nono's `codex_macos` group grants `$HOME/Library/Keychains/login.keychain-db` read **and write**, which would undo `deny_keychains_macos`.
 - **Verification gap, since closed by hand.** `nono run` cannot execute from an agent session in this repository, because the outer sandbox denies `$HOME` and nono fails to create its own audit directory under `$XDG_STATE_HOME/nono`. Anything needing a live session is therefore run by a human, or by the checks on a machine where `$HOME` is writable. Both live runs behind the correction above were run that way.
 
+<a id="m1d"></a>
+
 ### M1d — Spike: does `pi`'s configuration root actually relocate? (Status: DONE)
 
 The finding reversed once between research rounds, so it is verified before FR-4 leans on it.
@@ -93,6 +103,8 @@ The finding reversed once between research rounds, so it is verified before FR-4
 - **`PI_CODING_AGENT_SESSION_DIR` does not exist.** The task named it and `docs/environment-variables.md` documents it, but the string is absent from the 112 MB binary, where `PI_CODING_AGENT_DIR` occurs exactly once. Setting it is a no-op. It is dropped from the plan's `stateVars` sketch, with the reason recorded there.
 - **FR-22 is not satisfied by relocation.** Relocation puts the npm install inside the project — `$PI_CODING_AGENT_DIR/npm/node_modules/…`, observed — which satisfies FR-4. But `pi` still "installs any missing packages automatically on startup", `pi install` runs a real `npm install` that reached the registry here even under `PI_OFFLINE=1`, and the `package.json` it generates loosens a pinned spec to a caret range. So the environment ships no `pi` packages and sets `PI_OFFLINE`, added to the plan's sketch. `M8d` corrects the reading of that variable: it is the *startup* install it stops, which this spike could not observe because it declared no package, and the explicit-command half is stopped by the substrate carrying no `npm` rather than by the variable.
 - `spec.md` was corrected in place, as this task's third criterion directs: the `pi` edge case, and the assumption at *Assumptions validated by research* that still described the finding as unverified. The *Assumptions the plan must confirm* checklist was left alone — it is a to-do list retired at close-out, not a statement of fact, and the same reasoning left `M1b`'s counterpart untouched.
+
+<a id="m1e"></a>
 
 ### M1e — Spike: is nono's resolved policy machine-readable? (Status: DONE)
 
@@ -114,6 +126,8 @@ The finding reversed once between research rounds, so it is verified before FR-4
 - Two hermeticity findings that change what the environment must set. nono makes a network update check on almost any invocation and caches it under `$XDG_STATE_HOME/nono`; `NONO_NO_UPDATE_CHECK=1` suppresses it with identical output and zero files written. And nono **silently falls back to the host's `$HOME/.config`** when `XDG_CONFIG_HOME` names a directory that does not exist, warning rather than failing — so the directory must be created before nono runs or the redirection is quietly undone.
 - `ai.nix`'s "nono has no general `--env` flag" holds for the command line and not for the profile: `environment.set_vars` / `allow_vars` / `deny_vars` exist, with `$WORKDIR` expansion. This confirms D4 and D6 rather than contradicting them, and it means each agent's relocation variables live in the confinement description rather than in a wrapper. D4's *merge* claims remain unsettled and are `check_component_merge`'s job.
 
+<a id="m1f"></a>
+
 ### M1f — Spike: which agent packages exist, and where? (Status: DONE)
 
 Decides whether a `numtide/llm-agents.nix` input is added at all. It is not added speculatively.
@@ -133,6 +147,8 @@ Decides whether a `numtide/llm-agents.nix` input is added at all. It is not adde
 - **The input is the sole source of all five packages, in the environment and in the checks alike**, confirmed with the user after this task's findings were reported. Its `nixConfig.extra-substituters` for `https://cache.numtide.com` is not inherited by a consumer of this flake, so that substituter and its key `niks3.numtide.com-1:DTx8wZduET09hRmMtKdQDxNNthLQETkc/yaX7M4qK0g=` are re-declared here and passed explicitly in CI; the earlier note treating the cache as a first-run cost for the handbook understated it, and `research.md` was corrected in place. The input also pins its own unstable `nixpkgs`, leaving the `follows`-or-not question to `M4b`, and sets `allow-import-from-derivation = false`, which **P8** wants and nothing here relaxes.
 - Upstream `HEAD` moved from `3589c005…` to `c4c6673c…` while `M1` was in flight, so the lock must pin a revision rather than track the branch or the versions recorded here stop describing what is built.
 - Availability was established by evaluation, not by building. Nothing was built for `aarch64-darwin`, and no check in this repository can reach that platform.
+
+<a id="m1g"></a>
 
 ### M1g — Spike: does `claude-code`'s configuration root relocate? (Status: DONE)
 
@@ -168,6 +184,8 @@ ______________________________________________________________________
 
 Independent of everything else, and it clears the ground. Doing it first means no later check passes because a Kafka leftover happened to satisfy it.
 
+<a id="m2a"></a>
+
 ### M2a — No artefact of the prior project remains (Status: DONE)
 
 **Scenario**: R7
@@ -182,7 +200,7 @@ Independent of everything else, and it clears the ground. Doing it first means n
 
 **Implementation notes**
 
-- **The criterion "`validate.sh --layer unit` passes" was wrong as written, and has been corrected in place.** `check_sc3` is deliberately red until the last scenario lands, which [M1a](#m1a--the-scenario--check-bijection-status-done) recorded as the feature's progress bar. The criterion now states the property M1a actually defined: `check_r7` passes, and the set `check_sc3` names shrinks by exactly `r7`. Observed 20 → 19, `comm` in both directions giving `r7` and nothing else. The same stale wording survives in `M2c` and `M3a`; it will be corrected as each is reached.
+- **The criterion "`validate.sh --layer unit` passes" was wrong as written, and has been corrected in place.** `check_sc3` is deliberately red until the last scenario lands, which [M1a](#m1a) recorded as the feature's progress bar. The criterion now states the property M1a actually defined: `check_r7` passes, and the set `check_sc3` names shrinks by exactly `r7`. Observed 20 → 19, `comm` in both directions giving `r7` and nothing else. The same stale wording survives in `M2c` and `M3a`; it will be corrected as each is reached.
 - **The check matches package names as nix reports them, not as `flake.nix` spells them.** `openjdk25` evaluates to pname `openjdk` and `bash` to `bash-interactive`, so the forbidden list holds the reported name. A version bump cannot then reintroduce one under a new attribute, which an exact match on the attribute spelling would have missed.
 - **One evaluation supplies both halves.** `devshell_facts` evaluates `devShells.<system>.default` once, with `--apply`, into `{ packages, hook }`; the system comes from `builtins.currentSystem` rather than being hardcoded, so `M9`'s second platform needs no edit here. `mkShell` folds its `packages` argument into `nativeBuildInputs`, which is what gets read. 0.7s, no build.
 - **The description is asserted by property, not by value**: it must not match `kafka|hivemind|playground`, case-insensitively. Pinning the new string would make the check a restatement of `flake.nix`. It now reads `"Per-project confined agent sessions"`.
@@ -191,6 +209,8 @@ Independent of everything else, and it clears the ground. Doing it first means n
 - **`npm_config_cache` and `NPM_CONFIG_USERCONFIG` were kept** although `nodejs` went. Two of the three agents are node programs and will run `npm` inside a session, so those two redirections are this feature's, not the prior project's. The task's list of six variables was followed exactly.
 
 The leftovers are not only a tidiness matter. A live session was observed inheriting `JAVA_HOME` and an `XDG_DATA_DIRS` carrying openjdk, postgresql, zellij and nodejs store paths, so they are on the boundary this feature is drawing, not beside it. Formatting is `nixfmt`, per [AGENTS.md](../../AGENTS.md#4-verify-every-change); an `alejandra`-formatted `flake.nix` was discarded once already.
+
+<a id="m2b"></a>
 
 ### M2b — The two bootstrap variables are mirrored (Status: DONE)
 
@@ -214,6 +234,8 @@ P1's bootstrap exception requires a check that parses both files. `flake.nix` cl
 - **The anti-vacuity guard bit unplanted, on the first run.** It reported `no exports found before 'use flake' in .envrc; the mirror comparison would be vacuous` — because line 6 of `.envrc` mentions `use flake` inside a comment and the region parser stopped there. Fixed by matching the directive (`^[[:space:]]*use[[:space:]]+flake`) rather than the words. The comment was deliberately left saying `use flake`, so the file keeps the trap the parser has to survive.
 - **Both stale comments were corrected,** not just the one the criterion names. `.envrc` carried the same fiction — "scripts/validate.sh compares both files against .claude/settings.json" — and now names `check_bootstrap_mirror`. Neither `.claude/settings.json` nor that comparison has ever existed.
 - **`check_sc3` is unmoved at 19,** as it should be: "P1 mirror" is a plan-level property, not one of the spec's numbered scenarios, so this check is not a scenario check and the bijection does not see it.
+
+<a id="m2c"></a>
 
 ### M2c — The container and the orphans are deleted (Status: DONE)
 
@@ -239,6 +261,8 @@ P1's bootstrap exception requires a check that parses both files. `flake.nix` cl
 ______________________________________________________________________
 
 ## M3 — The registry and the confinement description
+
+<a id="m3a"></a>
 
 ### M3a — The leak registry is typed and well-formed (Status: DONE)
 
@@ -266,6 +290,8 @@ An empty list is the expected outcome, not a placeholder: `M1b` resolved [D1](pl
 - `lib/leak-registry.nix` had to be `git add`ed before `nix eval` could see it — a flake reads the git tree, not the working directory, so an untracked file is invisible.
 - **`shellcheck` and `shfmt` folded in on request.** Both are named in AGENTS.md's lint table and had been resolving from a user profile, so under §3 the lint step was not reproducible for a stranger. Now in the devShell, verified resolving from `/nix/store`.
 - **Six further Known drift entries retired**, having been falsified by `M2a`, `M2b` and this task rather than by close-out: the whole "environment still belongs to the previous project" block, the claim that `scripts/validate.sh` does not exist, the byte-identical mirror criterion, the hand-run bootstrap comparison now automated, and the absent linters. The handbook's verification section now names `scripts/validate.sh` and explains why it exits non-zero by design. `plan.md`'s close-out list was corrected to say which entries remain.
+
+<a id="m3b"></a>
 
 ### M3b — A confinement description is generated and validates (Status: DONE)
 
@@ -297,7 +323,9 @@ The `set_vars` assertion is derived, not restated: the check applies the agent t
 
 `shellcheck`'s `SC2016` is suppressed once, with its reason: `$WORKDIR` in the `--apply` expression must reach nono unexpanded.
 
-### M3c — Granted reach is the project directory (Status: IMPLEMENTED)
+<a id="m3c"></a>
+
+### M3c — Granted reach is the project directory (Status: DONE)
 
 **Scenario**: SC-1
 
@@ -321,6 +349,8 @@ The floor is derived by stripping the description under test down to `{meta}` wi
 `check_confinement_validates` lost its `nix_runtime` assertion and gained one that the store is granted read, with the prefix from `nix eval builtins.storeDir` rather than spelled out. It is independent of `check_sc1` by construction: emptying the registry takes the grant with it, so the two sides still agree and only the substrate assertion fires. That was planted and observed.
 
 **The planting found a defect in the check itself.** With `$HOME/.ssh` granted, `jq` reported `Cannot index string with string ("path")` beside the expected failure: in `$p | startswith(.path + "/")` the pipe rebinds `.` to `$p`, so `.path` indexed a string. The exact-match disjunct short-circuited for `/nix/store` and hid it. The entry is now bound with `. as $e` before the pipe. Known gap: with one registered path granted exactly, the prefix branch is not exercised by any current data, and a defect there would make the check too strict rather than too lax.
+
+<a id="m3d"></a>
 
 ### M3d — the merge is what the plan claims (Status: DONE)
 
@@ -365,7 +395,9 @@ ______________________________________________________________________
 
 The MVP slice. After this group `claude-code` is confined and could be handed to a consumer even if nothing else lands. It is the reference case not because it is the easiest — `M1g` exists precisely because it is not — but because `opencode` and `pi` obtain their credential from the session it authenticates, so nothing about FR-6 or FR-7 can be shown until it works.
 
-### M4a — The pre-flight refuses an unenforceable host (Status: IMPLEMENTED)
+<a id="m4a"></a>
+
+### M4a — The pre-flight refuses an unenforceable host (Status: DONE)
 
 **Scenario**: R6
 
@@ -394,7 +426,9 @@ RED was `FAIL check_r6` / `lib/preflight.sh: no such file`, which is "no `77` an
 
 `check_sc3`'s set shrank from 21 to 20, `r6` leaving and nothing else moving. The suite is `1 of 8 checks failed`, that one being the progress bar.
 
-### M4b — A confined `claude` starts (Status: IMPLEMENTED)
+<a id="m4b"></a>
+
+### M4b — A confined `claude` starts (Status: DONE)
 
 **Scenario**: Journey 1.1
 
@@ -403,7 +437,7 @@ RED was `FAIL check_r6` / `lib/preflight.sh: no such file`, which is "no `77` an
 - [x] Check written and seen to FAIL with: `expected exactly one confined claude session, found 0` — **not** the predicted `claude: command not found`, and the difference is the finding below
 - [x] `lib/confined-agent.nix` written; the wrapper shadows the agent name and the raw binary is not on `PATH` ([D3](plan.md#d3))
 - [x] `flake.nix` exports `devShells.<system>.default` for **both** systems via `lib.genAttrs` ([D7](plan.md#d7))
-- [x] `numtide/llm-agents.nix` added as the sole source of `nono`, `claude-code`, `opencode` and `pi`, pinned to a revision rather than a branch. **`allowUnfree` is not scoped to anything, because there is nothing to scope** — see below ([M1f](#m1f--spike-which-agent-packages-exist-and-where-status-done))
+- [x] `numtide/llm-agents.nix` added as the sole source of `nono`, `claude-code`, `opencode` and `pi`, pinned to a revision rather than a branch. **`allowUnfree` is not scoped to anything, because there is nothing to scope** — see below ([M1f](#m1f))
 - [x] `XDG_DATA_HOME` points inside the project, in **both** `.envrc` and `flake.nix` per **P1**, above `use flake` so `check_bootstrap_mirror` picks it up without being edited
 - [x] `nixConfig` declares `https://cache.numtide.com` and the key `niks3.numtide.com-1:DTx8wZduET09hRmMtKdQDxNNthLQETkc/yaX7M4qK0g=` as the **record** of where the binaries come from, and `docs/HANDBOOK.md` says what actually reaches the cache, because nix ignores the block for a non-trusted user
 - [x] The `inputs.nixpkgs.follows` question decided either way, with the reason written down rather than left to the default
@@ -434,7 +468,9 @@ The wrapper creates `$XDG_CONFIG_HOME` before invoking nono. `M1e` observed that
 
 `check_sc3`'s set shrank from 20 to 19, `j1_1` leaving and nothing else moving. The suite is `1 of 9 checks failed`, that one being the progress bar. Both systems evaluate: `packages.<system>.{claude,nono,confinement-claude-code}` and `devShells.<system>.default` all produce a derivation for `x86_64-linux` and `aarch64-darwin`, and `nix flake check` passes for the host system.
 
-### M4c — The execution substrate is the session's own closure (Status: IMPLEMENTED)
+<a id="m4c"></a>
+
+### M4c — The execution substrate is the session's own closure (Status: DONE)
 
 **Scenario**: SC-1
 
@@ -477,7 +513,9 @@ Refusals come immediately after the first working session, because they are what
 
 Every task in this group is subject to [D9](plan.md#d9): a check whose observable is a failure carries a positive control in the same session, because a session that never started, a binary that is missing and a boundary that works all produce the same failure. The control is named in each task below and is not optional.
 
-### M5a — A key outside the project is unreadable (Status: IMPLEMENTED)
+<a id="m5a"></a>
+
+### M5a — A key outside the project is unreadable (Status: DONE)
 
 **Scenario**: R1
 
@@ -511,7 +549,9 @@ Granting an **ancestor** of a denied path refuses to start instead of narrowing 
 
 The integration layer is `4 checks passed` and the whole suite is `1 of 11 checks failed`, that one being the progress bar. **The integration layer must be run from inside the devShell** — `nix develop -c bash scripts/validate.sh --layer integration` — because the pre-flight `check_r6` exercises execs `true` by bare name, which on a host carrying one outside the store resolves to an ungranted path and turns assertion 1 into a false 77. Recorded in the plan's coverage gap.
 
-### M5b — A write outside the project is refused (Status: IMPLEMENTED)
+<a id="m5b"></a>
+
+### M5b — A write outside the project is refused (Status: DONE)
 
 **Scenario**: R2
 
@@ -542,7 +582,9 @@ The second row is the one that changed the task. nono protects a state root **ca
 
 The integration layer is `5 checks passed`, run as `nix develop -c bash scripts/validate.sh --layer integration`, and the whole suite is `1 of 12 checks failed`, that one being the progress bar: `check_sc3`'s missing-scenario set went from 20 to 19, `r2` leaving and nothing else moving.
 
-### M5c — No host secret crosses (Status: IMPLEMENTED)
+<a id="m5c"></a>
+
+### M5c — No host secret crosses (Status: DONE)
 
 **Scenario**: R3
 
@@ -576,7 +618,9 @@ So nono's default without the key is pass-everything, and the 221 corroborates t
 
 The integration layer is `6 checks passed`, run as `nix develop -c bash scripts/validate.sh --layer integration`, and the whole suite is `1 of 13 checks failed`, that one being the progress bar: `check_sc3`'s missing-scenario set went from 19 to 18, `r3` leaving and nothing else moving.
 
-### M5d — An agent cannot widen its own confinement (Status: IMPLEMENTED)
+<a id="m5d"></a>
+
+### M5d — An agent cannot widen its own confinement (Status: DONE)
 
 **Scenario**: R4
 
@@ -608,7 +652,9 @@ The integration layer is `6 checks passed`, run as `nix develop -c bash scripts/
 
 The integration layer is `7 checks passed`, run as `nix develop -c bash scripts/validate.sh --layer integration`, and the whole suite is `1 of 14 checks failed`, that one being the progress bar: `check_sc3`'s missing-scenario set went from 18 to 17, `r4` leaving and nothing else moving.
 
-### M5e — An untrusted repository cannot grant itself paths (Status: IMPLEMENTED)
+<a id="m5e"></a>
+
+### M5e — An untrusted repository cannot grant itself paths (Status: DONE)
 
 **Scenario**: R5
 
@@ -661,11 +707,13 @@ What that settles before the check is written:
 - The plant the criterion names is the wrapper resolving `--profile evil`, or dropping `--profile` so `NONO_PROFILE` decides. Both were measured reading the canary out, so either bites.
 - Still unmeasured, and owed before this task can claim to have covered the surface: what keys `nono/config.toml` accepts, what a project-level `trust-policy.json` can do, and `--bypass-protection <PATH>`, which is documented as overriding a deny rule.
 
-### M5f — A host-global configuration does not reach an undeclared session (Status: IMPLEMENTED)
+<a id="m5f"></a>
+
+### M5f — A host-global configuration does not reach an undeclared session (Status: DONE)
 
 **Scenario**: Journey 8.2
 
-This task was written against R9 and is now the *undeclared* half of the pair R9 became. A machine with no declaration is the state every consumer starts in and the only state a stranger is ever in, so it belongs here, with the rest of the boundary, and needs none of the mechanism `M8f` builds. R9 itself is the declared half and is a difference between two runs, which is why it moved to [`M8g`](#m8g--the-declared-surface-is-exactly-what-arrives-status-pending).
+This task was written against R9 and is now the *undeclared* half of the pair R9 became. A machine with no declaration is the state every consumer starts in and the only state a stranger is ever in, so it belongs here, with the rest of the boundary, and needs none of the mechanism `M8f` builds. R9 itself is the declared half and is a difference between two runs, which is why it moved to [`M8g`](#m8g).
 
 **RED**: `check_j8_2` plants a whole host-global agent configuration in the fake `$HOME` — an authoring surface among it — declares nothing, and compares the session's granted reach to `{project} ∪ registry`.
 
@@ -704,7 +752,9 @@ The in-project control cannot be `.claude/skills`. Every arm printed `1 project-
 
 The integration layer is `9 checks passed`, run as `direnv exec . bash scripts/validate.sh --layer integration`, and the whole suite is `1 of 16 checks failed`, that one being the progress bar: `check_sc3`'s missing-scenario set went from 16 to 15.
 
-### M5g — A host tool configuration does not direct the session (Status: IMPLEMENTED)
+<a id="m5g"></a>
+
+### M5g — A host tool configuration does not direct the session (Status: DONE)
 
 **Scenario**: R10
 
@@ -740,7 +790,9 @@ A `core.hooksPath` hook in a granted directory does run, measured unconfined, so
 - **Plant 2 reconstructs the incident the decision was written from**, and is the one that matters: `credential.helper = cache` in the effective configuration, `commit.gpgsign` producing `gpg failed to sign the data`, and a program named by the host configuration **executing inside the session** and leaving its marker.
 - **Two bugs in the check were found by planting, not by writing it.** `git config --file` happily parses a `--show-origin` listing and exits 0, so the control's fallback never ran; and git lowercases keys in `--list`, so `core.hooksPath` read back as `core.hookspath` and the one directive observed *running* was the one directive not reported. It was the only assertion of the six that could not have failed. Both say the same thing: a check that has only ever passed has not been checked.
 
-### M5h — Every refusal check has a control (Status: IMPLEMENTED)
+<a id="m5h"></a>
+
+### M5h — Every refusal check has a control (Status: DONE)
 
 **Scenario**: none directly — this enforces [D9](plan.md#d9) over the suite, which is why it comes last in this group, when there are refusal checks to enforce it over.
 
@@ -773,7 +825,9 @@ ______________________________________________________________________
 
 ## M6 — State stays, and projects do not cross
 
-### M6a — Agent state lands in the project (Status: IMPLEMENTED)
+<a id="m6a"></a>
+
+### M6a — Agent state lands in the project (Status: DONE)
 
 **Scenario**: Journey 2.1
 
@@ -811,7 +865,9 @@ The scenario already holds for `claude-code`, so the first criterion's FAIL has 
 
 The unit layer's progress bar went from 14 missing scenarios to 13, `j2_1` leaving and nothing else moving. The integration layer is `11 checks passed`, the component layer `3 checks passed`, the whole suite `1 of 19 checks failed` — that one the progress bar — and `nix flake check` is `all checks passed!`.
 
-### M6b — Two concurrent projects share nothing (Status: IMPLEMENTED)
+<a id="m6b"></a>
+
+### M6b — Two concurrent projects share nothing (Status: DONE)
 
 **Scenario**: Journey 3.1
 
@@ -849,7 +905,9 @@ ______________________________________________________________________
 
 Gated on `M1b` and `M1g`. [D1](plan.md#d1) resolved to the branch where the real secret never enters the boundary, so no credential file is granted and the registry stays empty. This group lands **before** `M8` finishes, because [D14](plan.md#d14) makes `opencode` and `pi` draw their credential from the session `claude-code` authenticates — there is nothing for them to draw from until the arrangement below exists.
 
-### M7a — A readable credential is a substitute (Status: IMPLEMENTED)
+<a id="m7a"></a>
+
+### M7a — A readable credential is a substitute (Status: DONE)
 
 **Scenario**: Journey 4.1
 
@@ -893,7 +951,9 @@ Gated on `M1b` and `M1g`. [D1](plan.md#d1) resolved to the branch where the real
 
 The full suite is `1 of 21 checks failed`, the one being `check_sc3`, the deliberate progress bar, now at 11 missing scenarios. `nix flake check` passes.
 
-### M7b — Authenticating once serves every project, and every agent (Status: IMPLEMENTED)
+<a id="m7b"></a>
+
+### M7b — Authenticating once serves every project, and every agent (Status: DONE)
 
 **Scenario**: Journey 5.1
 
@@ -932,7 +992,9 @@ Two axes in one scenario. Across projects is the original claim; across agents i
 
 The full suite is `1 of 22 checks failed`, the one being `check_sc3`, the deliberate progress bar, now at 10 missing scenarios — `j5_1` leaving and nothing else moving. `nix flake check` passes. `plan.md` gained the machine/session/project scope table that resolves the FR-4 tension, and Journey 5 left the live-OAuth coverage gap, which now belongs to `Rep3` alone.
 
-### M7c — Authentication failure is not a denial (Status: IMPLEMENTED)
+<a id="m7c"></a>
+
+### M7c — Authentication failure is not a denial (Status: DONE)
 
 **Scenario**: R8
 
@@ -958,7 +1020,9 @@ The full suite is `1 of 22 checks failed`, the one being `check_sc3`, the delibe
 
 The full suite is `1 of 23 checks failed`, the one being `check_sc3`, the deliberate progress bar, now at 9 missing scenarios.
 
-### M7d — Authenticating twice is harmless (Status: IMPLEMENTED)
+<a id="m7d"></a>
+
+### M7d — Authenticating twice is harmless (Status: DONE)
 
 **Scenario**: Rep3
 
@@ -985,7 +1049,9 @@ The full suite is `1 of 23 checks failed`, the one being `check_sc3`, the delibe
 
 The full suite is `1 of 24 checks failed`, the one being `check_sc3`, the deliberate progress bar, now at 8 missing scenarios.
 
-### M7e — The toolchain survives interception (Status: IMPLEMENTED)
+<a id="m7e"></a>
+
+### M7e — The toolchain survives interception (Status: DONE)
 
 **Scenario**: Journey 6.1
 
@@ -1033,7 +1099,9 @@ The full suite is `1 of 25 checks failed`, the one being `check_sc3`, the delibe
 
 ______________________________________________________________________
 
-### M7f — A commit needs no key (Status: IMPLEMENTED)
+<a id="m7f"></a>
+
+### M7f — A commit needs no key (Status: DONE)
 
 **Scenario**: Journey 6.2, R11
 
@@ -1076,7 +1144,9 @@ Each of the two new agents needs `credentialServices` in its table entry, and de
 
 The consumer's own authoring surface (FR-25) closes this group rather than opening it. It has to be enumerated per agent before it can be granted for any, so it depends on all three being confined — which is also why `M5f` keeps only the undeclared half, the half that needs no mechanism at all.
 
-### M8a — Extract `mkEntryPoint` (Status: IMPLEMENTED)
+<a id="m8a"></a>
+
+### M8a — Extract `mkEntryPoint` (Status: DONE)
 
 A refactor, and therefore its own task per P6. No behaviour changes — and, as it turned out, no refactor either.
 
@@ -1094,7 +1164,9 @@ That leaves the criterion's own evidence worthless, since a diff across no chang
 
 One observation banked for the rest of the group. Every integration check and three component checks hardcode `agent=claude-code`, which is right for a reference case but means the suite does not start exercising a second agent merely because the table grew. `check_j5_1` is the only check that derives its subjects from `builtins.attrNames agents`. `M8c` and `M8d` decide per property which of the others should follow it.
 
-### M8b — `claude-code`'s subagent and lock fallbacks (Status: IMPLEMENTED)
+<a id="m8b"></a>
+
+### M8b — `claude-code`'s subagent and lock fallbacks (Status: DONE)
 
 **Scenario**: Journey 2.1 extended — spec Risk 12: `CLAUDE_CONFIG_DIR` has documented fallbacks in subagent and lock paths, and `M1g` counted thirteen candidate variables rather than one.
 
@@ -1115,7 +1187,9 @@ The plant is the two-part one [plan.md](plan.md#planted-violations) already reco
 
 Two stale sentences were corrected in place while here: research.md's "the four `XDG_*` roots stay out of `set_vars`", which `M6a` contradicted, and plan.md's sketch comment promising that `M8b` would set the remaining ten.
 
-### M8c — `opencode` (Status: IMPLEMENTED)
+<a id="m8c"></a>
+
+### M8c — `opencode` (Status: DONE)
 
 **Scenario**: Journey 2.1 for `opencode`.
 
@@ -1143,7 +1217,9 @@ The second plant is worth recording for its surprise. Removing a root's relocati
 
 Suite after the task: `1 of 28 checks failed`, the failure being `check_sc3`'s deliberate progress bar, now missing `j7_1 j8_1 r9 rep1 rep2`. `nix flake check` passes.
 
-### M8d — `pi`, and pre-provisioned extensions (Status: IMPLEMENTED)
+<a id="m8d"></a>
+
+### M8d — `pi`, and pre-provisioned extensions (Status: DONE)
 
 **Scenario**: Journey 2.1 for `pi`, plus FR-22.
 
@@ -1167,7 +1243,9 @@ Shaped by `M1d`: relocation holds through the single variable `PI_CODING_AGENT_D
 
 Suite after the task: `1 of 29 checks failed`, the failure being `check_sc3`'s deliberate progress bar, still missing `j7_1 j8_1 r9 rep1 rep2`. `nix flake check` passes, now evaluating a third confinement.
 
-### M8e — Spike: where does each agent read its declarative extensions from? (Status: IMPLEMENTED)
+<a id="m8e"></a>
+
+### M8e — Spike: where does each agent read its declarative extensions from? (Status: DONE)
 
 **Scenario**: none — a spike. It exists because this feature has now been wrong three times about a location by reading rather than measuring, and FR-25 cannot be implemented against a guess.
 
@@ -1195,7 +1273,9 @@ Do not trust an agent's own listing command alone. `opencode debug skill` report
 
 No check changed, and none should have: a spike that alters behaviour is not a spike. The suite is unchanged at `1 of 29 checks failed`, the failure being `check_sc3`'s progress bar.
 
-### M8f — A declared authoring surface arrives (Status: IMPLEMENTED)
+<a id="m8f"></a>
+
+### M8f — A declared authoring surface arrives (Status: DONE)
 
 **Scenario**: Journey 8.1
 
@@ -1218,7 +1298,9 @@ No check changed, and none should have: a spike that alters behaviour is not a s
 
 The suite is at `1 of 30 checks failed`, `check_sc3` now missing only `j7_1 r9 rep1 rep2`.
 
-### M8g — The declared surface is exactly what arrives (Status: IMPLEMENTED)
+<a id="m8g"></a>
+
+### M8g — The declared surface is exactly what arrives (Status: DONE)
 
 **Scenario**: R9
 
@@ -1251,7 +1333,9 @@ ______________________________________________________________________
 
 ## M9 — Consumability, idempotency and CI
 
-### M9a — A stranger reaches a confined agent from the ref (Status: IMPLEMENTED)
+<a id="m9a"></a>
+
+### M9a — A stranger reaches a confined agent from the ref (Status: DONE)
 
 **Scenario**: Journey 1.1 at the end-to-end layer — the layer AGENTS.md names as the one that matters and the one easiest to fake.
 
@@ -1263,14 +1347,14 @@ ______________________________________________________________________
 1. **The obvious invocation passes against that agentless ref.** `nix develop --command` prepends the devshell's `PATH` and *keeps the caller's*, so `command -v claude` inside `nix develop <ref>` resolved the developing checkout's own wrapper, at position 53 of `$PATH`. The instrument is therefore part of this task's definition: `env -i` with a scratch `HOME`, never `direnv exec .`. It has since been run end to end and **does not lie** — against the agentless ref all four of `claude`, `opencode`, `pi` and `nono` report `ABSENT` while the ref's own `kcat` and `kafkactl` resolve, so the inheritance control this task's checklist demands is proven rather than assumed. Two details of it are load-bearing and [written up](research.md#the-instrument-that-does-not-lie): its `PATH` is **derived** as `dirname "$(command -v nix)"` rather than written down, because the literal that works on NixOS does not exist on the macOS runner `M9c` adds; and it must carry a scratch `TMPDIR`, because `env -i` strips it and the fallback to `/tmp` is denied to anyone developing this from inside a confined session.
 1. **`--accept-flake-config` is load-bearing.** A clean run was seen to print `ignoring untrusted flake configuration setting 'extra-substituters'`, so the declared cache does nothing for a stranger who is not a trusted user. That changes what the handbook tells a stranger to type, not only what the check does.
 1. **The harness needs one new file.** `scripts/checks/e2e.sh` does not exist; every function that walks the layers skips a missing file, and `M8g`'s found-versus-ran guard counts only files that exist.
-1. **No agent could be started by hand at all, and the whole suite was green.** Asked to type `opencode` inside the environment, a human got a hang and no output. The pre-flight omitted `--allow-cwd`, on the reasoning recorded at [`M4a`](#m4a--the-pre-flight-refuses-an-unenforceable-host-status-done) that it writes nothing inside the project; measured, the flag is the *consent*, and without it nono's behaviour depends on `stdin` — [three states, tabulated](research.md#the-three-states-of---allow-cwd). On a terminal it **asks**, and the pre-flight had sent both its streams to `/dev/null`, so the question was invisible and the wrapper waited forever. Fixed here, with the flag on both confined runs and nono's own stderr now quoted on a refusal (P9). Two things about this are worth more than the fix. First, **no check could have caught it**: `validate.sh` pins every check's `stdin` to `/dev/null`, which is the one state in which the prompt does not happen, so `check_r6`'s new fourth arm asserts on the argv the pre-flight passes rather than on the outcome. Second, it is precisely the failure this milestone exists to find — a claim verified only from inside the developing checkout, where nobody ever typed the command a stranger types first. The handbook's *"`type claude` is the check that matters"* comes from the same session: the human's shell aliased `opencode` to their own host arrangement, so `PATH` was never consulted and the reported error, `nono: Profile not found: opencode-claude`, came from outside this repository entirely.
+1. **No agent could be started by hand at all, and the whole suite was green.** Asked to type `opencode` inside the environment, a human got a hang and no output. The pre-flight omitted `--allow-cwd`, on the reasoning recorded at [`M4a`](#m4a) that it writes nothing inside the project; measured, the flag is the *consent*, and without it nono's behaviour depends on `stdin` — [three states, tabulated](research.md#the-three-states-of---allow-cwd). On a terminal it **asks**, and the pre-flight had sent both its streams to `/dev/null`, so the question was invisible and the wrapper waited forever. Fixed here, with the flag on both confined runs and nono's own stderr now quoted on a refusal (P9). Two things about this are worth more than the fix. First, **no check could have caught it**: `validate.sh` pins every check's `stdin` to `/dev/null`, which is the one state in which the prompt does not happen, so `check_r6`'s new fourth arm asserts on the argv the pre-flight passes rather than on the outcome. Second, it is precisely the failure this milestone exists to find — a claim verified only from inside the developing checkout, where nobody ever typed the command a stranger types first. The handbook's *"`type claude` is the check that matters"* comes from the same session: the human's shell aliased `opencode` to their own host arrangement, so `PATH` was never consulted and the reported error, `nono: Profile not found: opencode-claude`, came from outside this repository entirely.
 1. **And once it could start, it could not start twice.** Behind the hang sat a second defect, in the machinery `M8f` added: `jq: parse error: Expected another key-value pair at line 2, column 48`, naming neither this environment nor the file. `opencode` parses *and edits* its configuration as JSONC, and `M8e` had pointed `skillSurface.path` at that file precisely because a consumer's settings might already be there. So the entry point wrote `{}` on the first start, the agent inserted its own `$schema` into an empty object and left the trailing comma its editor emits, and the second start died — with `set -e` taking the shell down before the `mv` and leaving a zero-byte temporary behind. The developing checkout had been in that state since `M8f` landed. Fixed here: `skillSurface` gains an `owned` flag, `opencode` is pointed at `.agents/opencode/config.json` through `OPENCODE_CONFIG` — an *additional* scope, so the consumer's own configuration is no longer read, written or fingerprinted — and the file is rewritten whole on every start. The measurements, the four-scope precedence chain and the rejected alternatives are in [research.md](research.md#the-second-opencodes-configuration-file-is-jsonc-and-the-agent-writes-to-it). What this precondition adds to the one above is the reason no check saw it either: every fixture in the suite starts from a project where that file does not exist, which is the one state the defect cannot occur in. `check_opencode` now **seeds** the file with what the agent leaves behind, because starting a session twice turned out not to reproduce it reliably — the same agent mangled the file on one run and left it alone on the next.
 
 - [x] Check written and seen to FAIL
 - [x] FR-19: the canonical reference is `github:GRBurst/agent-sandbox`, named identically in every document; the handbook's current owner and repository are both wrong and are corrected
 - [x] No step depends on the author's configuration (SC-5), and the run inherits **nothing** from the developing environment — asserted by the check itself, which fails if any agent resolves before `nix develop` has been entered
 - [x] The clean `$HOME` is created before the run and `$XDG_CONFIG_HOME` inside it exists before the mechanism is invoked, or the mechanism silently reads the real home instead ([M1e](research.md#m1e--machine-readable-resolved-policy))
-- [x] The binary cache is reachable by the stranger too: this repository's own `nixConfig` declares `https://cache.numtide.com` and its key, because an input's `nixConfig` is not inherited ([M4b](#m4b--a-confined-claude-starts-status-implemented)). Since a stranger is not a trusted user, the handbook's command carries `--accept-flake-config` and the check passes it too
+- [x] The binary cache is reachable by the stranger too: this repository's own `nixConfig` declares `https://cache.numtide.com` and its key, because an input's `nixConfig` is not inherited ([M4b](#m4b)). Since a stranger is not a trusted user, the handbook's command carries `--accept-flake-config` and the check passes it too
 - [x] Nothing is passed `--impure`, and the lock is the committed one (P8)
 - [x] Three violations planted rather than the one named here, each seen to FAIL, reverted, recorded in plan.md — `M4b` already planted the confinement arm, and this task adds the arm that is specifically about consuming from the ref
 
@@ -1286,6 +1370,8 @@ ______________________________________________________________________
 The suite is at `2 of 31 checks failed`: `check_sc3`, still missing `j7_1 rep1 rep2`, and `check_j1_1` itself.
 
 This check needs no positive control against confinement, and the reason is worth writing down rather than leaving as an omission: that observable is a *set* — the granted reach compared against the registry — and a set is already discriminating, because with confinement removed there is no manifest to read at all. [D9](plan.md#decisions) binds the checks whose observable is a *failure*. It does need the inheritance control named above, which is a different problem: there the failure mode is a check that passes without the ref taking any part at all.
+
+<a id="m9b"></a>
 
 ### M9b — Entering and verifying twice change nothing (Status: DONE)
 
@@ -1315,6 +1401,8 @@ An assertion that two things are equal is the shape most easily satisfied by not
 
 With `check_rep1` and `check_rep2` defined, `check_sc3` reports `scenario with no check: j7_1` — down from `j7_1 rep1 rep2`, and the last of the three is `M9c`'s. The whole suite is at `2 of 33 checks failed` in 12m45s: `check_sc3` for that one scenario, and `check_j1_1` still waiting on a human to push.
 
+<a id="m9c"></a>
+
 ### M9c — The claims are checked on clean machines, per platform (Status: DONE)
 
 **Scenario**: Journey 7.1
@@ -1332,13 +1420,13 @@ With `check_rep1` and `check_rep2` defined, `check_sc3` reports `scenario with n
 - [x] Violation planted (the workflow runs only the cheapest layer), seen to FAIL, reverted, recorded in [plan.md](plan.md#planted-violations)
 - [x] `AGENTS.md`'s "no CD pipeline" sentence amended to permit non-deploying CI, retaining the prohibition on deployment
 
-The second arm is what makes this checkable at all: exit 0 alone is also what a suite that ran nothing produces, which is why `validate.sh` treats "no checks ran" as a failure ([M1a](#m1a--the-scenario--check-bijection-status-done)). The cross-platform comparison is the one assertion in the suite that no single machine can make, so it lives here rather than in a check.
+The second arm is what makes this checkable at all: exit 0 alone is also what a suite that ran nothing produces, which is why `validate.sh` treats "no checks ran" as a failure ([M1a](#m1a)). The cross-platform comparison is the one assertion in the suite that no single machine can make, so it lives here rather than in a check.
 
-**Checkpoint**: `check_sc3` passes for the first time — every scenario has its check, and the bijection is closed. The set it has been naming since [M1a](#m1a--the-scenario--check-bijection-status-done) is empty for the first time. Its size is deliberately not written down here: it was twenty when this line was first drafted, it was already twenty-two, and Journey 8 made it twenty-four. The check derives it from `spec.md`, which is the point.
+**Checkpoint**: `check_sc3` passes for the first time — every scenario has its check, and the bijection is closed. The set it has been naming since [M1a](#m1a) is empty for the first time. Its size is deliberately not written down here: it was twenty when this line was first drafted, it was already twenty-two, and Journey 8 made it twenty-four. The check derives it from `spec.md`, which is the point.
 
 **Findings**
 
-- **The check reads the workflow as a parsed document, never as text, and the first draft proved why.** Written as `grep` over the file, the `continue-on-error` arm failed against a workflow that does not use it — it had matched the comment saying so. Every textual arm now reads the strings the document *says*, via `yq -r '[.. | select(tag == "!!str")] | .[]'`, so a workflow may explain itself without failing the check that reads it. This is the same class of defect as [`M9a`](#m9a--a-stranger-enters-from-the-reference-status-done)'s purity guard counting its own text, arriving through a different door.
+- **The check reads the workflow as a parsed document, never as text, and the first draft proved why.** Written as `grep` over the file, the `continue-on-error` arm failed against a workflow that does not use it — it had matched the comment saying so. Every textual arm now reads the strings the document *says*, via `yq -r '[.. | select(tag == "!!str")] | .[]'`, so a workflow may explain itself without failing the check that reads it. This is the same class of defect as [`M9a`](#m9a)'s purity guard counting its own text, arriving through a different door.
 - **`on` has to be quoted.** YAML 1.1 reads a bare `on` as a boolean, so the key becomes `true` and both `yamllint` and any arm asserting `push`/`pull_request` are looking at a key that is not there — against a file GitHub itself accepts. The quoting is load-bearing for the observer, not for the runner.
 - **The platform set is derived, not written down.** The matrix's `system` values are diffed against `nix eval .#agentBinaries --apply builtins.attrNames`, so adding a platform to the flake fails this check until the workflow carries it, and removing one fails it until the workflow drops it. The runner images are then controlled per row — a `linux` system must map to an image beginning `ubuntu` and a `darwin` one to `macos` — because a matrix of two rows both landing on `ubuntu-latest` satisfies a set comparison perfectly while verifying one platform twice.
 - **The cross-platform comparison drops every store path, and that is the assertion rather than a concession.** One platform's substrate legitimately carries a locale archive and a tracer the other has no use for, so a byte comparison of the two descriptions could never be equal and an equality over them would have to be abandoned or faked. What survives the filter is the project's own grant, whatever the leak registry justifies, and the `$WORKDIR` state redirection — which is precisely the set FR-20 requires both platforms to agree on, expressed in terms neither platform's semantics decides.
@@ -1354,9 +1442,11 @@ The second arm is what makes this checkable at all: exit 0 alone is also what a 
 
 The suite is at `1 of 34 checks failed`: `check_sc3` green for the first time, and `check_j1_1` still waiting on a human to push the reference.
 
-### M9d — On macOS there is nowhere to put the outside (Status: IMPLEMENTED)
+<a id="m9d"></a>
 
-**Scenario**: the same Journey 7.1 as [M9c](#m9c--the-claims-are-checked-on-clean-machines-per-platform-status-done), for the platform that run left unmeasured.
+### M9d — On macOS there is nowhere to put the outside (Status: DONE)
+
+**Scenario**: the same Journey 7.1 as [M9c](#m9c), for the platform that run left unmeasured.
 
 **The limitation, in plain words**
 
@@ -1446,21 +1536,23 @@ gap is recorded rather than discovered.
 - [x] `integration.sh`'s precondition 2 restated to say what that directory is for and why macOS constrains it
 - [x] Violation planted — a root the description grants — seen to FAIL, reverted, recorded in [plan.md](plan.md#planted-violations). Two of them, because the two granted roots fail differently: the project, which the derivation rejects without asking, and `/tmp`, which nono answers `insufficient_access` for and which a session on Linux nevertheless starts in
 - [x] Sessions start on macOS, measured in CI: the fourth run takes `$RUNNER_TEMP` as the root and the failures drop from 23 to 11, none of them a refusal to start
-- [x] The directive above answered, and its decision recorded in [plan.md](plan.md#decisions). **No longer a precondition on the checks, and that is a deliberate reversal**: the derivation asks the question of the host at run time instead of settling it in advance, so the harness stops depending on an answer nobody has. What the directive would still change is the *candidate list* — a macOS location better than the real home, or a restructuring that needs no ungranted directory at all — so it is carried into [M10a](#m10a--close-out-status-implemented) for reconsideration rather than blocking here. **Answered there and recorded as [D20](plan.md#d20).** The candidate list stands: `$HOME/.agent-sandbox` is P1's third accepted leak rather than something the rule refuses, no better macOS location is *available* — `system_read_macos` names `/tmp` outright and resolves it to `/private/tmp`, and the one candidate that survives on paper, `/private/var/folders`, is unreachable because this environment's own `shellHook` sets `TMPDIR` inside the project before any check runs — and the directory is left behind rather than removed, because an `rmdir` would race the concurrent checks that share it
+- [x] The directive above answered, and its decision recorded in [plan.md](plan.md#decisions). **No longer a precondition on the checks, and that is a deliberate reversal**: the derivation asks the question of the host at run time instead of settling it in advance, so the harness stops depending on an answer nobody has. What the directive would still change is the *candidate list* — a macOS location better than the real home, or a restructuring that needs no ungranted directory at all — so it is carried into [M10a](#m10a) for reconsideration rather than blocking here. **Answered there and recorded as [D20](plan.md#d20).** The candidate list stands: `$HOME/.agent-sandbox` is P1's third accepted leak rather than something the rule refuses, no better macOS location is *available* — `system_read_macos` names `/tmp` outright and resolves it to `/private/tmp`, and the one candidate that survives on paper, `/private/var/folders`, is unreachable because this environment's own `shellHook` sets `TMPDIR` inside the project before any check runs — and the directory is left behind rather than removed, because an `rmdir` would race the concurrent checks that share it
 
-The three criteria this task used to carry about the macOS job being green now belong to [M9e](#m9e--the-eleven-failures-the-macos-arm-found-status-pending), because the derived root is what made them reachable in the first place.
+The three criteria this task used to carry about the macOS job being green now belong to [M9e](#m9e), because the derived root is what made them reachable in the first place.
 
 **What landed, ahead of the directive**
 
 `outside_root <label>` in [scripts/validate.sh](../../scripts/validate.sh) — in the driver rather than in a layer, because both the integration and the end-to-end layer fabricate host homes. It tries `$XDG_RUNTIME_DIR`, then `$RUNNER_TEMP`, then `$HOME/.agent-sandbox`, rejects any candidate under the checkout without asking, and takes the first that is writable and that `nono why --op readwrite` answers `path_not_granted` for. Anything else — a partial grant included — is refused with the verdict every candidate got. All 23 call sites now read `outside=$(outside_root <label>) || return 1`; `check_r6` and `check_substrate_denials`, which took an ambient `XDG_RUNTIME_DIR` directly, take theirs from the same helper. `check_j7_1` deliberately keeps a project-local directory, since it reads a file and starts no session.
 
-Two things this leaves open, both for [M10a](#m10a--close-out-status-implemented) rather than for here. The last candidate writes under the real home, which is a write outside the project and so is the accepted-leak question the directive was posed to settle. And the derivation's answer is only as good as the list it tries: on a host offering none of the three, the suite refuses to run rather than reporting a boundary it could not observe — the right failure, but a failure.
+Two things this leaves open, both for [M10a](#m10a) rather than for here. The last candidate writes under the real home, which is a write outside the project and so is the accepted-leak question the directive was posed to settle. And the derivation's answer is only as good as the list it tries: on a host offering none of the three, the suite refuses to run rather than reporting a boundary it could not observe — the right failure, but a failure.
 
 ______________________________________________________________________
 
-### M9e — The eleven failures the macOS arm found (Status: IMPLEMENTED)
+<a id="m9e"></a>
 
-**Scenario**: the same Journey 7.1. With [M9d](#m9d--on-macos-there-is-nowhere-to-put-the-outside-status-implemented)'s derived root in place, sessions start on darwin and the suite reaches the assertions for the first time. Eleven of them fail, and they are four unrelated things wearing one colour. A fifth class, E, was introduced by class B's own fix and found when run 7 measured it.
+### M9e — The eleven failures the macOS arm found (Status: DONE)
+
+**Scenario**: the same Journey 7.1. With [M9d](#m9d)'s derived root in place, sessions start on darwin and the suite reaches the assertions for the first time. Eleven of them fail, and they are four unrelated things wearing one colour. A fifth class, E, was introduced by class B's own fix and found when run 7 measured it.
 
 The evidence is in [research.md § M9d](research.md#m9d--the-macos-arm-and-the-eleven-failures-behind-it) and [§ M9e](research.md#m9e--the-four-classes-answered-without-a-mac), both written to be read cold. What follows is only what has to change. Each class is one commit; C is a change to the product and is the one to do first.
 
@@ -1486,7 +1578,7 @@ The plan was to find the canary a better location. It does not need one: a denia
 
 - [x] `lib/preflight.sh` probes a location outside the project by **reading** it rather than writing a canary into it. One confined invocation carries reads-denied, writes-denied and nothing-landed, reporting through its exit status — measured returning 0 against an ungranted path and 10 against a granted one, in 118 ms, so the pre-flight's two invocations stay two and it needs neither a `nix build` nor a `nono why`
 - [x] It walks two candidates, `$XDG_RUNTIME_DIR` then `$HOME`, rather than probing `$HOME` alone. Probing `$HOME` alone was implemented first and **measured refusing a correct host**: a session nested inside another sandbox cannot read its own `$HOME` unconfined, so the positive control fails and no agent can start. The outer session's runtime directory is readable to it and granted to nobody inside, which is what the old code relied on and what macOS does not set
-- [x] A candidate that cannot serve is skipped with its verdict — inside the project, or not readable from here — and only an exhausted list refuses, carrying every candidate's verdict so the reason it gave up is readable rather than guessed at (**P9**). With this the pre-flight writes **nothing** outside the project in any passing case, so no leak-registry entry and no `P1` accepted-leak entry is owed — the question [M10a](#m10a--close-out-status-implemented) carries for the harness is not the same question, and this one is gone rather than answered
+- [x] A candidate that cannot serve is skipped with its verdict — inside the project, or not readable from here — and only an exhausted list refuses, carrying every candidate's verdict so the reason it gave up is readable rather than guessed at (**P9**). With this the pre-flight writes **nothing** outside the project in any passing case, so no leak-registry entry and no `P1` accepted-leak entry is owed — the question [M10a](#m10a) carries for the harness is not the same question, and this one is gone rather than answered
 - [x] Assertion 3's existing `sh -c ": > …"` is replaced by the subshell form `( : > … ) 2>/dev/null`. `:` is a special builtin, so a redirection failure aborts the shell outright: the assertion passed by reading the shell's abort as the child's denial, and `2>/dev/null` on the outer command never suppressed the message either
 - [x] `check_r6` — the pre-flight check, named `check_pf` in an earlier draft of this task — carries five arms. Its third became the read-sense positive control (`chmod 000`, both candidates pointed at it so the refusal must list both), and its fourth is new: the probe location **granted**, which is the false-alarm case that had no coverage, asserting the refusal says `cannot verify confinement` and **not** `confinement is not enforced`
 - [x] Violations planted and recorded: the probe pointed at a granted path with the old accusing message restored, seen to fail on the arm-4 assertion; and the positive-control skip removed, seen to fail seven assertions across arms 2, 3 and 4 by reading an unreadable directory's refusal as a denial. Both reverted
@@ -1539,7 +1631,7 @@ Landed as `d5d333d`.
 - [x] `commit_session`'s captures move into `$proj/capture` on the same reasoning, the noise floor's among them. It carries no `landed` control, so it needs no exclusion — but the floor's capture had to move with it, or the floor keeps producing paths the measured session cannot match
 - [x] The exclusion is `find "$project" -mindepth 1 -not -path "$capture" -not -path "$capture/*"`, which holds on BSD `find` as well, and it is narrow enough that a real write by the agent to the same directory is still caught
 - [x] Why the two bun agents need this and `claude-code` does not is recorded in a comment: Seatbelt checks by path and bun resolves the path of its own standard descriptors at startup, while Landlock does not re-check a descriptor that is already open
-- [ ] Violation planted: the capture put back where a session is granted nothing, seen to reproduce the startup failure. **This plant cannot be run from Linux** — the whole reason the class went unseen for six runs is that Landlock does not re-check an already-open descriptor, so the violation is invisible there by construction. It needs the macOS runner, and run 8 does not supply it: a green darwin arm shows the fix works, not that its absence would have been caught. What *was* planted here is the exclusion's other half: with the capture inside the project and unexcluded, `landed` is non-empty whatever the session did, since `mkdir -p "$capture"` runs before the session; the measurement above shows the exclusion removes it without hollowing the control
+- **Not planted, and carried out of this spec rather than ticked.** Doing so would claim a red nobody saw. It is listed in [docs/HANDBOOK.md § What the automated run does not reach](../../docs/HANDBOOK.md#what-the-automated-run-does-not-reach) among the things that need the other machine, so the debt outlives this spec becoming history. The plant is the capture put back where a session is granted nothing, to reproduce the startup failure. **It cannot be run from Linux** — the whole reason the class went unseen for six runs is that Landlock does not re-check an already-open descriptor, so the violation is invisible there by construction. It needs the macOS runner, and run 8 does not supply it: a green darwin arm shows the fix works, not that its absence would have been caught. What *was* planted here is the exclusion's other half: with the capture inside the project and unexcluded, `landed` is non-empty whatever the session did, since `mkdir -p "$capture"` runs before the session; the measurement above shows the exclusion removes it without hollowing the control
 
 **E — the span the denial assertion covers, which class B widened too far**
 
@@ -1554,13 +1646,13 @@ Landed as `dc5e938`.
 - [x] On darwin the trailer still cannot be narrowed, so `check_j6_2` there asserts over a session that contains **only** the ordinary commit. Making the Linux span match darwin's is what caused this; matching them by narrowing *both* is the direction that preserved the claim
 - [x] `ARMS_NOISE` is assigned only on the branch that creates the file, and `check_j6_2` now refuses a floor that reported nothing rather than subtracting silence — the same control `session_reported` already applies to the measured session, applied to the thing it is measured against
 - [x] Violations planted. The ordinary arm given a read of `$HOME/.gitconfig`, a path the session is granted nothing on: seen to fail with *producing the commit reached for something outside the session*, naming it. The **same read moved to the demand arm**: seen to pass, which is the regression reproduced in miniature and the narrowing shown to be what removes it. The literal Ubuntu case — host `gpg` starting and reading `/usr/share/locale/locale.alias` — still **cannot** be planted from a NixOS host, whose `gpg` is `path_not_granted` so the `execve` fails first; that one is proven by the CI run
-- [x] The `PATH` question is settled as **known drift, not a fix**. Pinning `PATH` to the substrate would not remove the reach: nono's `system_read_linux_core` group grants `/bin`, `/sbin`, `/usr/bin`, `/lib`, `/lib64`, `/etc/ssl` and two dozen more, and it does so **whenever the path exists on the host** — measured across ten samples on NixOS, where every listed path that exists answers `granted_path` and every one that does not answers `path_not_granted`. The repository's own description declares `groups.include: []` and names no `/usr` anywhere, so this reach is nono's default rather than anything this environment asked for. Pinning `PATH` would stop this one check exercising it and leave the grant untouched — a quieter suite around an unchanged boundary, which is the failure mode [debug-macos.md](debug-macos.md#risks-still-open) already names. The divergence it exposes belongs to the product and is carried to [M10a](#m10a--close-out-status-implemented) below
+- [x] The `PATH` question is settled as **known drift, not a fix**. Pinning `PATH` to the substrate would not remove the reach: nono's `system_read_linux_core` group grants `/bin`, `/sbin`, `/usr/bin`, `/lib`, `/lib64`, `/etc/ssl` and two dozen more, and it does so **whenever the path exists on the host** — measured across ten samples on NixOS, where every listed path that exists answers `granted_path` and every one that does not answers `path_not_granted`. The repository's own description declares `groups.include: []` and names no `/usr` anywhere, so this reach is nono's default rather than anything this environment asked for. Pinning `PATH` would stop this one check exercising it and leave the grant untouched — a quieter suite around an unchanged boundary, which is the failure mode [debug-macos.md](debug-macos.md#risks-still-open) already names. The divergence it exposes belongs to the product and is carried to [M10a](#m10a) below
 
 **Closing the arm**
 
 - [x] The temporary instrumentation is gone — `dbg` from `scripts/validate.sh`, `dbg_watch_start`/`dbg_watch_stop` and their call sites from `scripts/checks/integration.sh`, and the probe step from `.github/workflows/verify.yml`, whose answer now lives in `outside_root`. Both watchers had *replaced* an existing `trap … RETURN` that removes `$outside`; removing them restores that cleanup rather than dropping it
 - [x] The macOS job is green: `33 passed, 2 skipped`, and both skips are named in `docs/HANDBOOK.md` with the reason the platform cannot close them
-- [x] `scripts/validate.sh` passes on both platforms — `35 passed` on Linux, and 35 again locally on a NixOS host — and the cross-platform reach comparison ran for the first time and passed. What that job actually compares is weaker than it reads, and is recorded under [M10a](#m10a--close-out-status-implemented)
+- [x] `scripts/validate.sh` passes on both platforms — `35 passed` on Linux, and 35 again locally on a NixOS host — and the cross-platform reach comparison ran for the first time and passed. What that job actually compares is weaker than it reads, and is recorded under [M10a](#m10a)
 - [x] `docs/HANDBOOK.md` states the per-platform instrument split, as a table under *Where the two platforms differ*
 - [x] FR-11's per-platform enforcement tiers are in that table, carrying the sentence this task measured: the two enforcements differ in what they *report*, not only in what they permit
 - [x] `findutils` is recorded as known drift rather than added to `sessionTools`, because the inconsistency is the suite's own — `outside_root` avoids GNU-only `mktemp -p` in the same file — and adding the tool would hide a silent-pass hazard instead of removing it. The **P9** violation it carries is the reason it belongs on the list rather than in the flake
@@ -1575,14 +1667,14 @@ One plant is still owed to a runner rather than to a host: D's, which Landlock c
 
 **The `fetcher-cache-v4.sqlite` failure was misdiagnosed.** It is not intermittent and it is not a broken checkout: it is what any `nix` command does when the shell has not entered the environment, because `XDG_CACHE_HOME` still points into the denied `$HOME`. Prefix with `direnv exec .` and it works first try — which is how `check_r9`'s plant, recorded above as defeated three times, was finally run. Do not retry; check which shell you are in. The shell in this environment does still fail heredocs with `can't create temp file for here document`, so a commit message goes to a file and `git commit -F` reads it back.
 
-**Four weaknesses the audit of the green runs found**, none of them introduced by these fixes and none visible as a failure, all carried to [M10a](#m10a--close-out-status-implemented):
+**Four weaknesses the audit of the green runs found**, none of them introduced by these fixes and none visible as a failure, all carried to [M10a](#m10a):
 
 - The `platforms` job compares an artefact that **cannot express a platform difference**. Stripping `/nix/store/` paths from each description removes the whole of `filesystem.read`, and with `filesystem.allow`, `groups.include` and the leak registry all empty, what is left is one platform-independent expression of `$WORKDIR` placeholders. SC-8 asks that the effective reach observed be the same on both; an identical description is not an observation. The resolved floor, which is exactly where `system_read_macos` and `system_read_linux_core` differ, is subtracted on both sides of every per-platform equality.
 - The same job can **pass having compared nothing**: `for a in $(nix eval …)` cannot trip `set -e`, and `jq -s add` over no input writes `null`, five bytes that the empty-report guard accepts. Its comment also claims the surviving artefact carries *whatever the leak registry justifies*, which is precisely what the strip removes — true today only because the registry is empty.
 - `check_r9`'s `nohost` arm works only because nono **falls back to the host's `$HOME/.config`** when the `XDG_CONFIG_HOME` it is given does not exist, which is where the arm plants the host description. Nothing creates `$outside/cfg` today. Should anything ever create it, the arm goes vacuous in silence.
 - The integration checks **never pass `--accept-flake-config`**, so wherever the runner's user is not trusted the declared substituter is ignored and those builds fall back to `cache.nixos.org` or to source. `e2e.sh` passes the flag at thirteen call sites and the workflow at two; none of the twenty-one `nix` invocations in `integration.sh` do. Run 9's darwin log carries forty-four `ignoring untrusted flake configuration setting` warnings against Linux's zero. The cost is time and log noise rather than correctness — the ignored settings are a cache and its key — but it is the likeliest explanation for darwin taking four minutes longer, and the noise buries a skipping check's reason.
 
-**Two weaknesses this task found and did not fix**, both carried to [M10a](#m10a--close-out-status-implemented):
+**Two weaknesses this task found and did not fix**, both carried to [M10a](#m10a):
 
 - `check_opencode` seeds the skill-surface file **inside the project before the session runs**, so its `landed` control is non-empty by construction and cannot fail on that file alone. It is not vacuous today — 22 of the 23 entries measured are the session's own writes — but the control does not say what it claims. `check_pi`'s equivalent is sound, because the settings file it plants goes into a directory the session had to create first.
 - Both checks build the home manifest with `find -printf`, which is GNU-only. On a runner whose `find` lacks it, `before` and `after` are both empty and the home comparison passes having compared nothing — a silent pass, which **P9** forbids. The same question is already open in *Closing the arm* as `findutils` in `sessionTools`; what is new is that a missing `findutils` does not fail loudly, it fails quietly.
@@ -1591,7 +1683,9 @@ ______________________________________________________________________
 
 ## M10 — Documentation
 
-### M10a — Close out (Status: IMPLEMENTED)
+<a id="m10a"></a>
+
+### M10a — Close out (Status: DONE)
 
 **What this task settled, for whoever reads it next.** Every box is closed and `scripts/validate.sh` reports `35 checks passed` on the final tree. Six things are worth carrying forward, because in each case the audit that set the box was wrong about something and the correction is the finding:
 
@@ -1602,7 +1696,7 @@ ______________________________________________________________________
 - **The `/usr/bin` contradiction was resolved by correcting the sentence**, because opting out was measured: `groups.exclude` removes the reach and validates strictly, but a session under it loses `git` and cannot complete a TLS handshake.
 - **`research.md` did not need consolidating** in the way the box assumed: 208 of its 219 subsections carry a measured value, a decision, a criterion or a `codex` reference.
 
-One thing is owed to a runner rather than to a host, and is not this task's to close: class D's plant in [M9e](#m9e--the-eleven-failures-the-macos-arm-found-status-implemented), which Landlock cannot express.
+One thing is owed to a runner rather than to a host, and is not this task's to close: class D's plant in [M9e](#m9e), which Landlock cannot express.
 
 Four practical things that will cost the next session time if it does not know them are kept below, unchanged, because all four are still true.
 
@@ -1612,7 +1706,7 @@ The work divides in three, and mixing them is what makes it look larger than it 
 
 Four practical things that cost earlier sessions time. Run every `nix` command through `direnv exec .` or it fails on `fetcher-cache-v4.sqlite`, which is the denied `$HOME` and not a broken checkout. The shell cannot do heredocs, so a commit message goes to a file read back with `git commit -F`. `logs/` is gitignored, so CI logs are present only if someone has just put them there. And `check_j1_1` resolves `github:GRBurst/agent-sandbox` through the GitHub API, which allows sixty unauthenticated calls an hour per address — four or five suite runs in an hour exhaust it and the check then fails with `HTTP error 403` and a rate-limit body. That is the quota, not a regression; wait for the reset or read the failure text before believing it.
 
-One box below cannot be ticked from a Linux host: class D's plant in [M9e](#m9e--the-eleven-failures-the-macos-arm-found-status-implemented) needs a macOS runner. It is recorded as owed rather than done, and a green darwin arm is not a substitute for it.
+One box below cannot be ticked from a Linux host: class D's plant in [M9e](#m9e) needs a macOS runner. It is recorded as owed rather than done, and a green darwin arm is not a substitute for it.
 
 - [x] `docs/HANDBOOK.md` updated: how to use what landed, the accepted leak **`$XDG_STATE_HOME/nono`** with its justification, and the coverage gap from [plan.md](plan.md#coverage-gap). Two of the three were already there and were checked rather than rewritten — *Entering the environment* through *The API key inside a session is not your API key* is how to use what landed, and *There are two accepted leaks* carries `$XDG_STATE_HOME/nono` with the reason it cannot be a registry entry. What was missing is the third, and it is now *What the automated run does not reach* under *Verifying the repository*: every gap `plan.md` lists, grouped by what would close it — a real account, the other machine, a human's decision, a push, or a widening of a check's own reach. It restates no assertion, and where a check covers a narrower version of a claim the narrowing is what the entry names
 
@@ -1642,7 +1736,7 @@ One box below cannot be ticked from a Linux host: class D's plant in [M9e](#m9e-
 
 - [x] FR-26: why an executable extension is a larger grant than a declarative one is stated, along with the FR-15 route for a consumer who wants their own anyway. Both landed at the end of *Extending an agent*, which is where the environment's own answer — vendoring under FR-22 — already was. The reason is stated as an inheritance rather than as a rule: an executable extension is code the session runs, so it gets the project readwrite, the network through the mediated proxy and the session's own credential substitute, while a skill is bytes the agent reads and can only *tell* the agent to act. **The size difference turned out to be measurable, not rhetorical.** [M5e](research.md#m5e--an-untrusted-repository-cannot-grant-itself-paths) measured `NONO_ALLOW=<dir>` adding exactly `r+w <dir> (dir)` to the capability set — read-**write**, where a declared skill directory is read-only and individually granted. So the FR-15 route lets a session rewrite the extension every later session will run, which is the precise property FR-25's route is built to deny, and the handbook says so beside the command rather than leaving the asymmetry to be discovered. The `direnv allow` caveat travels with it, because the mechanism cannot tell a variable exported above the checkouts from one a checkout's own `.envrc` exported
 
-- [x] FR-11: the supported platforms are named, each with the enforcement tier its operating system provides, and a weaker guarantee says so with the difference named — the table under *Where the two platforms differ* in `docs/HANDBOOK.md`, landed by [M9e](#m9e--the-eleven-failures-the-macos-arm-found-status-implemented)
+- [x] FR-11: the supported platforms are named, each with the enforcement tier its operating system provides, and a weaker guarantee says so with the difference named — the table under *Where the two platforms differ* in `docs/HANDBOOK.md`, landed by [M9e](#m9e)
 
 - [x] FR-14 and FR-12: every claim the automated run cannot reach is listed with its procedure, and the handbook describes what a human runs without restating the assertions anywhere. The listing landed with the first box; **this box is the procedures**, which FR-14 asks for by name and which a list of gaps does not supply. Each of the seventeen entries now carries either a *By hand* line — a command and what to look for — or an explicit *No procedure*, which four of them get: the credential eviction that takes months, macOS enforcement strength, the darwin denial set with no tracer available, and nothing else. Saying *no procedure* out loud is the **P9** answer; inventing one that cannot be run would be the silent fallback. Five commands were run rather than written down from memory: `nix config show trusted-users` answers `root pallon` here, `direnv status` prints the allowed files, `command -v claude` resolves to a readable script whose `exec nono run` line shows the four absent flags directly, `ls .config/nono/packages` reports the directory does not exist, and `cat lib/leak-registry.nix` shows the empty list. No assertion is restated: every entry points at what a check covers narrowly and leaves the assertion in the check, per FR-12
 
@@ -1652,21 +1746,21 @@ One box below cannot be ticked from a Linux host: class D's plant in [M9e](#m9e-
 
 - [x] The handbook names what the automated run cannot reach: an unattended token flow, the second platform, and a consumer's own trust settings for the substituter. All three are in *What the automated run does not reach*, and this box is the check that the specific three this criterion names are among the seventeen rather than lost in them. The unattended token flow is two entries, not one — *Logging in through the browser* for the flow itself and *A provider request that succeeds* for the half that leaves the machine, because they fail for different reasons and a human runs different things for each. The second platform is the whole of *Things that need the other machine*, five entries. The trust settings are their own entry with `nix config show trusted-users` as the procedure, and it says what no other entry has to: the answer is a property of the reader's machine, so nothing here can check which of the three routes they took
 
-- [x] **Egress is mediated, not restricted**, and the handbook says so rather than letting a reader infer otherwise from the filesystem confinement: raw TCP is denied but arbitrary HTTPS through the injected proxy succeeds, so a session that asks an agent to fetch a package reaches the registry ([M8d](#m8d--pi-and-pre-provisioned-extensions-status-implemented)). The drift entry this task retires is the absence of that sentence, not the behaviour. Landed as its own paragraph at the end of *What the environment guarantees*, placed there deliberately: it follows the accepted leaks, so a reader arrives at it having just read the filesystem boundary at its strictest, which is exactly the moment the wrong inference is available. It says what the proxy is for — injecting credentials and keeping the real one outside, a confidentiality property — and what it is **not**, an allow-list, with restricting which hosts a session may contact named as out of scope rather than as a gap. The last line is the one that matters to a reader deciding whether to trust this: what stops an agent exfiltrating your other projects is that it cannot **read** them, not that it cannot **send**. The same sentence opens the `README.md`'s refused-case section, so a reader who never opens the handbook still meets it
+- [x] **Egress is mediated, not restricted**, and the handbook says so rather than letting a reader infer otherwise from the filesystem confinement: raw TCP is denied but arbitrary HTTPS through the injected proxy succeeds, so a session that asks an agent to fetch a package reaches the registry ([M8d](#m8d)). The drift entry this task retires is the absence of that sentence, not the behaviour. Landed as its own paragraph at the end of *What the environment guarantees*, placed there deliberately: it follows the accepted leaks, so a reader arrives at it having just read the filesystem boundary at its strictest, which is exactly the moment the wrong inference is available. It says what the proxy is for — injecting credentials and keeping the real one outside, a confidentiality property — and what it is **not**, an allow-list, with restricting which hosts a session may contact named as out of scope rather than as a gap. The last line is the one that matters to a reader deciding whether to trust this: what stops an agent exfiltrating your other projects is that it cannot **read** them, not that it cannot **send**. The same sentence opens the `README.md`'s refused-case section, so a reader who never opens the handbook still meets it
 
 - [x] The stranger's copyable command carries `--accept-flake-config`, because the declared substituter is ignored for anyone who is not a trusted user — measured, not assumed ([research.md](research.md#m9--preconditions-for-the-end-to-end-layer-measured-before-it-exists)). Already true and checked rather than edited: *Entering the environment* gives `nix develop --accept-flake-config github:GRBurst/agent-sandbox` as the from-a-ref command, with the flag justified in the following sentence as part of the command rather than an optimisation. The root `README.md` written above carries the same command with the same flag and the same reason, so the two copyable forms agree. **The other side of this fact is a defect and is still open**: the integration checks pass the flag at none of their twenty-one `nix` call sites, which is the box near the end of this task — whichever way that is fixed, the two must not disagree
 
 - [x] `docs/CONSTITUTION.md` P1's accepted-leak list amended to its second entry — **`$XDG_STATE_HOME/nono`**, with the reason it is accepted rather than fixed and cannot be a leak-registry entry either. The list also gains a sentence the single-entry version did not need: the two entries are not the same kind of thing, because the first is on every path into the environment and the second only on the path a confined session takes. **The criterion says "second" and there is now a third, which the box below adds** — that is not drift in this box, it is the decision that box was waiting on having been taken while this one was written
 
-- [x] **The harness's own outside reconsidered**, which [M9d](#m9d--on-macos-there-is-nowhere-to-put-the-outside-status-implemented) shipped ahead of its research directive. `outside_root` derives the location from the host rather than naming one, so the mechanism is not in question; the candidate list is. Three things to settle with the directive's answer in hand: whether `$HOME/.agent-sandbox` — a write outside the project, and the last resort on any host without `$XDG_RUNTIME_DIR` or `$RUNNER_TEMP`, which is every developer macOS — is a second accepted leak in P1's list beside `$XDG_STATE_HOME/nono` or something the rule must refuse; whether a macOS location exists that is neither under `/private` nor under `/Users`, which would remove the question entirely; and whether the directory the helper creates should be removed when the suite is done rather than left behind empty. If it stays a leak, it is enumerated with its justification like the other, and the handbook says a verification run writes there. Settled as [D20](plan.md#d20), with all three sub-questions answered and one of them measured rather than reasoned. It **is** an accepted leak, P1's third, and the entry carries the distinction that makes it acceptable: nothing a consumer runs writes there, only the suite does. Refusing it was the alternative and was rejected because it makes the suite unrunnable on the developer macOS FR-11 names as supported. On the macOS location: `system_read_macos` does **not** grant `/private` wholesale — it grants `/private/etc`, `/private/etc/ssl`, `/private/var/db/dyld`, `/var/db`, `/System/Library`, `/Library` and `/usr/share` — but it names **`/tmp` outright, resolving it to `/private/tmp`**, which kills the obvious candidate. The one that survives on paper is `/private/var/folders/…`, macOS's per-user `$TMPDIR`, which no group names; it is unreachable because this environment's own `shellHook` sets `TMPDIR` to `$PWD/.tmp` before any check runs, so what a check can see is inside the project and is correctly rejected. No better candidate is *available*, which is not the same as none existing, and the record says which. The directory is **left behind**: each check removes its own scratch subdirectory, an `rmdir` at the end would race the concurrent checks sharing the parent, and the handbook saying a verification run creates it is cheaper and more useful than a cleanup that can lose. The handbook says a verification run writes there, and that running an agent never does. *This box also answers the directive [M9d](#m9d--on-macos-there-is-nowhere-to-put-the-outside-status-implemented) carried.*
+- [x] **The harness's own outside reconsidered**, which [M9d](#m9d) shipped ahead of its research directive. `outside_root` derives the location from the host rather than naming one, so the mechanism is not in question; the candidate list is. Three things to settle with the directive's answer in hand: whether `$HOME/.agent-sandbox` — a write outside the project, and the last resort on any host without `$XDG_RUNTIME_DIR` or `$RUNNER_TEMP`, which is every developer macOS — is a second accepted leak in P1's list beside `$XDG_STATE_HOME/nono` or something the rule must refuse; whether a macOS location exists that is neither under `/private` nor under `/Users`, which would remove the question entirely; and whether the directory the helper creates should be removed when the suite is done rather than left behind empty. If it stays a leak, it is enumerated with its justification like the other, and the handbook says a verification run writes there. Settled as [D20](plan.md#d20), with all three sub-questions answered and one of them measured rather than reasoned. It **is** an accepted leak, P1's third, and the entry carries the distinction that makes it acceptable: nothing a consumer runs writes there, only the suite does. Refusing it was the alternative and was rejected because it makes the suite unrunnable on the developer macOS FR-11 names as supported. On the macOS location: `system_read_macos` does **not** grant `/private` wholesale — it grants `/private/etc`, `/private/etc/ssl`, `/private/var/db/dyld`, `/var/db`, `/System/Library`, `/Library` and `/usr/share` — but it names **`/tmp` outright, resolving it to `/private/tmp`**, which kills the obvious candidate. The one that survives on paper is `/private/var/folders/…`, macOS's per-user `$TMPDIR`, which no group names; it is unreachable because this environment's own `shellHook` sets `TMPDIR` to `$PWD/.tmp` before any check runs, so what a check can see is inside the project and is correctly rejected. No better candidate is *available*, which is not the same as none existing, and the record says which. The directory is **left behind**: each check removes its own scratch subdirectory, an `rmdir` at the end would race the concurrent checks sharing the parent, and the handbook saying a verification run creates it is cheaper and more useful than a cleanup that can lose. The handbook says a verification run writes there, and that running an agent never does. *This box also answers the directive [M9d](#m9d) carried.*
 
 - [x] **The `/usr/bin` a session can read.** `flake.nix` says every tool a session finds on `PATH` is one it was granted, and the shipped description declares `groups.include: []`. nono nonetheless grants read over `/bin`, `/sbin`, `/usr/bin`, `/lib`, `/lib64`, `/etc/ssl` and two dozen further host paths through its own `system_read_linux_core` group, for every one of them that exists on the host — measured in [research.md § M9e](research.md#m9e--what-run-7-measured-and-the-one-regression-it-introduced). On a runner that carries `/usr/bin/gpg`, a session reaches a host binary nobody declared. Either the description opts out of the group and the substrate is the whole reach, or the reach is stated as what it is and the sentence in `flake.nix` is corrected. It cannot stay as it is, because the two statements contradict each other. **Took the second: the sentence is corrected and the reach is stated.** Both branches were measured before choosing, which is what made the choice cheap — `groups.exclude` on `system_read_linux_core` and `system_read_macos` does remove the whole reach, turning `/usr/bin`, `/bin`, `/lib`, `/etc/ssl` and `/usr/bin/gpg` from `granted_path` to `path_not_granted`, and `nono profile validate --strict` accepts the result. But a session under it **loses `git` entirely and cannot complete an HTTPS handshake**: the mechanism manages `PATH` itself and `/etc/ssl` goes with the group. So opting out is reachable and is a piece of work — the substrate's own directories granted explicitly, `PATH` and the CA bundle established from the closure — not a one-line correction, and shipping it unfinished would ship a description under which no agent starts. `flake.nix`'s comment now says what it grants rather than what a session may read, with the group's reach and the measured cost of excluding it recorded beside it, and `docs/HANDBOOK.md` gains a known-drift entry saying a session can read part of the host system that this environment did not ask for. It is drift rather than a defect because the reach is read-only and covers no home directory and no other project; it is drift rather than nothing because it is undeclared and host-shaped, which is what this repository otherwise refuses
 
 - [x] **`check_opencode`'s `landed` control** is satisfied in part by a file the check itself seeds into the project before the session, so it cannot fail on that file alone. Either the control compares the project before and after, like the home manifest beside it, or the seed moves out of the listing. **Took the first option, because the second is three exclusions rather than one.** The seed plants the surface file *and* `mkdir -p`s its parent directories, so moving it out of the listing would mean naming the file, its directory and `.agents` above it — and the next seed anyone adds would reopen the defect silently. A before-and-after over the project needs no such list: whatever the check itself created is on both sides and cancels. The snapshot is taken after the seed and after `mkdir -p "$capture"`, and the capture subtree is excluded on *both* sides rather than cancelled, because its contents are written during the run by the session's own redirections. Measured on one real run: the old listing form counted **23** entries, one of them the seed, matching the audit's reading exactly; the difference form counts **24** on the same run — it catches changes as well as additions, so the `config.json` the session genuinely rewrites is counted, along with the directory mtimes the writes moved. Planted and recorded in [plan.md](plan.md#planted-violations): with the after-snapshot made a copy of the before-snapshot, the control fails with its own message, where the listing form would have passed on the seed alone
 
-- [x] **`find -printf` is GNU-only**, and where it is missing the home comparison compares two empty files and passes. The `findutils` question below is about availability; this one is about the silence, which **P9** forbids regardless of how the first is answered. **The silence is now a fatal, and it was reproduced before being fixed.** `require_gnu_find` probes `find "$REPO_ROOT" -maxdepth 0 -printf ''` — nothing walked, nothing printed — and `die`s with what would otherwise happen. Fatal rather than a check failure, because a manifest the suite cannot build is an environment unable to answer the question rather than an answer of *no*. Five checks depended on the flag, not two: `check_j2_1`, `check_j3_1`, `check_opencode` and `check_pi` through nine identical manifest pipelines, and `check_j8_1` through `tree_manifest`. The nine became one `dir_manifest`, which is not a refactor for its own sake — it is how the guard has **one** place to live rather than nine, and it takes trailing `find` predicates so the box above's exclusions still compose. Both plants are recorded in [plan.md](plan.md#planted-violations), and the second is the one that matters: with the guard removed and the manifest emptied, **`check_pi` exits 0**, the home comparison agreeing because both sides are empty. That is the silent pass reproduced, and it is what makes the guard evidence rather than decoration
+- [x] **`find -printf` is GNU-only**, and where it is missing the home comparison compares two empty files and passes. The `findutils` question below is about availability; this one is about the silence, which **P9** forbids regardless of how the first is answered. **The silence is now a fatal, and it was reproduced before being fixed.** `require_gnu_find` probes `find "$REPO_ROOT" -maxdepth 0 -printf ''` — nothing walked, nothing printed — and `die`s with what would otherwise happen. It calls `die`, because a manifest the suite cannot build is an environment unable to answer the question rather than an answer of *no* — though `die` runs inside `run_check`'s command substitution, so what a reader sees is the asking check failing and the run carrying on to the next, not the suite aborting. Five checks depended on the flag, not two: `check_j2_1`, `check_j3_1`, `check_opencode` and `check_pi` through nine identical manifest pipelines, and `check_j8_1` through `tree_manifest`. The nine became one `dir_manifest`, which is not a refactor for its own sake — it is how the guard has **one** place to live rather than nine, and it takes trailing `find` predicates so the box above's exclusions still compose. Both plants are recorded in [plan.md](plan.md#planted-violations), and the second is the one that matters: with the guard removed and the manifest emptied, **`check_pi` exits 0**, the home comparison agreeing because both sides are empty. That is the silent pass reproduced, and it is what makes the guard evidence rather than decoration
 
-- [x] **The cross-platform comparison observes no reach.** FR-20 and SC-8 ask that the effective reach be the same on both platforms; the `platforms` job diffs each runner's description with every `/nix/store/` path stripped, which — the substrate being the whole of `filesystem.read`, and `filesystem.allow`, `groups.include` and the leak registry all empty — leaves one platform-independent expression that can differ only if someone adds a platform conditional under `lib/`. The floor where the two platforms actually differ is subtracted on both sides of every per-platform `check_sc1` equality. Either the job compares something a platform can change, or SC-8's second clause is verified by hand and said so in the handbook, which is where [M9e](#m9e--the-eleven-failures-the-macos-arm-found-status-implemented) left it. **Took the second, because the first is not available.** The job already catches the one thing a platform *can* change — a conditional under `lib/` resolving to a path outside the store survives the strip — and it cannot be made to catch more: the effective reach genuinely differs in nono's floor, and no artefact a runner can upload expresses that difference. Measured while settling it: the resolved manifest lists **no** non-store grant at all, while `nono why` answers `granted_path` for `/usr/bin` against the very same description. So the invisibility is not the strip's doing and no filter fixes it. What changed is that the job now claims what it does: the step is *The description this platform resolved*, the job's step is *Neither platform's description was authored differently*, and the comment says it is a comparison of **authorship, not of reach** — the substrate being dropped rather than compared because it legitimately differs, `strace` being in the Linux closure and no other. The job is deliberately no longer named for SC-8, because naming a job after a claim it cannot make is how a green run comes to mean less than it reads. The handbook carries SC-8's second clause as a hand step with its procedure, and its paragraph is rewritten around the measurement rather than the inference
+- [x] **The cross-platform comparison observes no reach.** FR-20 and SC-8 ask that the effective reach be the same on both platforms; the `platforms` job diffs each runner's description with every `/nix/store/` path stripped, which — the substrate being the whole of `filesystem.read`, and `filesystem.allow`, `groups.include` and the leak registry all empty — leaves one platform-independent expression that can differ only if someone adds a platform conditional under `lib/`. The floor where the two platforms actually differ is subtracted on both sides of every per-platform `check_sc1` equality. Either the job compares something a platform can change, or SC-8's second clause is verified by hand and said so in the handbook, which is where [M9e](#m9e) left it. **Took the second, because the first is not available.** The job already catches the one thing a platform *can* change — a conditional under `lib/` resolving to a path outside the store survives the strip — and it cannot be made to catch more: the effective reach genuinely differs in nono's floor, and no artefact a runner can upload expresses that difference. Measured while settling it: the resolved manifest lists **no** non-store grant at all, while `nono why` answers `granted_path` for `/usr/bin` against the very same description. So the invisibility is not the strip's doing and no filter fixes it. What changed is that the job now claims what it does: the step is *The description this platform resolved*, the job's step is *Neither platform's description was authored differently*, and the comment says it is a comparison of **authorship, not of reach** — the substrate being dropped rather than compared because it legitimately differs, `strace` being in the Linux closure and no other. The job is deliberately no longer named for SC-8, because naming a job after a claim it cannot make is how a green run comes to mean less than it reads. The handbook carries SC-8's second clause as a hand step with its procedure, and its paragraph is rewritten around the measurement rather than the inference
 
 - [x] **The same job can pass having compared nothing.** `for a in $(nix eval …)` cannot trip `set -e`, and `jq -s add` over no input writes `null` — five bytes, which the `[ ! -s "$r" ]` guard accepts. A broken evaluator on both runners is a green FR-20 comparison. The step's comment also claims the surviving artefact carries *whatever the leak registry justifies*, which is exactly what the strip removes; it reads as true only while the registry is empty. **Both halves reproduced before either was fixed**, and the comment went with the box above. The producer: pointed at an attribute that does not exist, the `for a in $(…)` form exits **0** and writes `null` — five bytes — because a command substitution cannot trip `set -e`. It is now `mapfile` into a variable whose count is asserted, so the same failure says `no agent evaluated` and exits 1, and a second guard requires one entry per agent so a build that failed for one of them cannot upload a shorter report that diffs equal against an equally short one. The comparison: handed two `null` artefacts, the `[ ! -s "$r" ]` guard **passed, having compared two nulls**; `jq -e 'type == "object" and length > 0'` refuses them and names what it found. Both plants are in [plan.md](plan.md#planted-violations), and the new guard was run against the real run-10 artefacts as well — three agents each, admitted — because a guard that only rejects is a guard nobody can distinguish from a broken one
 
@@ -1680,6 +1774,6 @@ One box below cannot be ticked from a Linux host: class D's plant in [M9e](#m9e-
 
 - [x] Touched files formatted and linted per [AGENTS.md](../../AGENTS.md#4-verify-every-change). Fifteen files were touched across the four kinds §4's table names, and every tool in it was run against them: `nixfmt --check` and `nix flake check` for `flake.nix` — *all checks passed*; `shfmt -d` and `shellcheck` for `scripts/validate.sh` and all four layer files; `yamlfmt -lint` and `yamllint` for `.github/workflows/verify.yml`; and `mdformat` for all eight markdown files. The markdown was checked for **idempotence** rather than merely run through — each file copied, formatted, and compared byte-for-byte against the original — because a formatter that is run but whose output is never compared proves nothing, which is the same silent-pass shape this task spent six boxes removing from the checks. That check also caught the thing worth catching here: the reformat of this file that arrived before the task began was not `mdformat`'s output at all but a different tool's, 183 lines of thematic-break and emphasis churn, and it was reverted rather than committed
 
-- [x] `scripts/validate.sh` passes — `35 checks passed`, exit 0, on the final tree, run as `direnv exec . bash scripts/validate.sh` with no `--layer`. That is the whole suite including the end-to-end layer, and it is the run that matters here because six of this task's boxes changed the checks themselves: the two `check_opencode` and `check_pi` manifest controls, `check_r9`'s `nohost` arm, `check_j1_1`'s quota branch, and the thirty `--accept-flake-config` call sites, which touch every layer. An earlier full run in this task came back `34 passed, 1 failed` with `check_j1_1` on the GitHub API quota — the same failure the box above now makes legible — so this count was taken after the quota reset rather than around it
+- [x] `scripts/validate.sh` passes — `35 checks passed`, exit 0, on the final tree, run as `direnv exec . bash scripts/validate.sh` with no `--layer`. That is the whole suite including the end-to-end layer, and it is the run that matters here because six of this task's boxes changed the checks themselves: the two `check_opencode` and `check_pi` manifest controls, `check_r9`'s `nohost` arm, `check_j1_1`'s quota branch, and the thirty `--accept-flake-config` call sites, which touch every layer. An earlier full run in this task came back `34 passed, 1 failed` with `check_j1_1` on the GitHub API quota — the same failure the box above now makes legible — so this count was taken after the quota reset rather than around it. **CI then ran the same tree on both platforms and is what closed this task**: at commit `4b1eb06`, the tree this task leaves behind, the Linux arm reports `35 checks passed` with nothing skipped, the darwin arm `33 checks passed, 2 skipped` — `check_substrate_denials` for want of a tracer and `check_j8_1`, both skips being the ones [M9e](#m9e) documents rather than new ones — and the `platforms` job's authorship comparison passes with an empty diff, including the two guards the boxes above added against it passing on nothing
 
 The accepted leak is named precisely here because it was named wrongly for most of this feature's life: the mechanism anchors its supervisory state at `$XDG_STATE_HOME/nono`, and one of the two research rounds asserted `$HOME/.nono`. It is an accepted leak rather than a fixable one because the mechanism refuses to grant any path overlapping its own state root, so relocating it into the project would make the project ungrantable ([D13](plan.md#decisions)).

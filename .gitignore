@@ -27,14 +27,6 @@ target/
 # belongs to this project and no other.
 /.agents/
 
-/prompts.md
-
 # CI run output fetched with `gh run view --log` while debugging a job. It is
 # evidence, not source: what was found in it belongs in research.md.
 /logs/
-
-# direnv
-.direnv
-
-# pre-commit
-.pre-commit-config.yaml

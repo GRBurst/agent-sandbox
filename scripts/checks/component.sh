@@ -254,11 +254,9 @@ confinement_validates_one() {
 	done
 
 	# M6a criterion 3, against the list the caller parsed out of the devShell
-	# hook. XDG_STATE_HOME is named as a literal because it is exactly the
-	# criterion: it is the one root the devShell cannot redirect, since nono
-	# anchors its own protected state root at the ambient value, and it is
-	# therefore the one a blanket redirection of "whatever the shell hook does"
-	# would leave behind.
+	# hook. Two roots are named as literals below because the derived list cannot
+	# reach either of them, and each is named for the reason it is out of reach
+	# rather than to pad the list.
 	local name
 	for name in "${shell_roots[@]}"; do
 		jq -e --arg k "$name" 'has($k)' <<<"$got" >/dev/null ||
@@ -270,6 +268,17 @@ confinement_validates_one() {
 	jq -e 'has("XDG_STATE_HOME")' <<<"$got" >/dev/null ||
 		{
 			printf 'a %s session does not redirect XDG_STATE_HOME, the one root the devShell cannot redirect, so it is the one a blanket redirection leaves behind\n' "$agent"
+			found=1
+		}
+	# TMPDIR is the other way round: the devShell does redirect it, but the name
+	# is not an XDG one, so the derived mirror above looks straight past it. It is
+	# also the only root whose absence is silent — every XDG fallback lands under
+	# HOME and is denied, while /tmp is granted, so a tool falling back there
+	# writes outside the project and nothing reports it. The one root that fails
+	# quietly is the one worth a literal.
+	jq -e 'has("TMPDIR")' <<<"$got" >/dev/null ||
+		{
+			printf 'a %s session does not redirect TMPDIR, and /tmp is granted, so a tool falling back to it writes outside the project and nothing reports it\n' "$agent"
 			found=1
 		}
 

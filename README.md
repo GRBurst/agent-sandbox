@@ -24,39 +24,48 @@ Every row is what the file at that path actually does.
 | The agent table | `lib/agents.nix` | One entry per agent this environment knows how to confine: `claude-code`, `opencode`, `pi`. The set is closed, so a name that is not in it is an error rather than a default. |
 | The leak registry | `lib/leak-registry.nix` | The single file naming every path outside the project and outside a session's own execution substrate that a session may still reach. Each entry justifies itself twice. It is **empty** today. |
 | The confinement description | `lib/confinement.nix` | Builds one description per agent, with `$WORKDIR` left as a placeholder the mechanism expands at run time — so one reviewable artefact in the store serves every project. |
-| The entry point | `lib/confined-agent.nix` | The wrapper each agent's own command name resolves to. `claude` inside the environment *is* the confined session; the raw binary is reachable only by store path. |
+| The entry point | `lib/confined-agent.nix` | The wrapper each agent's own command name resolves to. `claude` inside the environment *is* the confined session; the raw binary is reachable only by store path. It also runs the pre-flight, copies the host's commit identity into the project once, and turns a declared skill surface into read-only grants. |
 | The pre-flight | `lib/preflight.sh` | Runs before anything else starts and proves confinement is enforced *on this host*, by watching a confined probe be refused a path outside the project. It observes a denial rather than reading a kernel interface. |
 | The environment | `flake.nix` | The devShell, the two systems it is built for, and the `shellHook` that points every tool's config, cache and temp path inside the checkout. |
-| The bootstrap | `.envrc` | The three variables `nix` needs exported before it can read the flake at all. Their values are duplicated on purpose, and a check fails if the two files drift. |
+| The pin | `flake.lock` | Which `nono` and which agent, exactly. Every agent and the mechanism come from one input, so this file is what a review of "what am I running" reads. |
+| The bootstrap | `.envrc` | Three things: it reads a parent `.envrc` if there is one, exports the three variables `nix` needs before it can read the flake at all, and then enters the flake. Those three values are duplicated on purpose, and a check fails if the two files drift. |
 | The verification | `scripts/validate.sh`, `scripts/checks/*.sh` | The single entry point for every claim this repository makes, over four layers — unit, component, integration, end to end. One exit status is the whole report. |
-| The continuous run | `.github/workflows/verify.yml` | That same one command on both supported platforms, plus the one assertion no single machine can make: that the two grant the same reach. |
-| The rules | `docs/CONSTITUTION.md`, `AGENTS.md` | What the code must be like, and how we work. Every plan is gated on the first. |
+| The static stages | `justfile` | Formatting, linting and the action pins, one recipe per file kind and `just static` for all of them. It asserts nothing of its own and does not wrap the suite: verification has one entry point and the static stages have another. |
+| The continuous run | `.github/workflows/verify.yml` | That same one command on both supported platforms, plus a comparison of the two descriptions. That comparison is of *authorship*, not of reach: it catches a platform conditional nobody meant to write, and cannot tell you the two grant the same thing. |
+| The rules | `docs/CONSTITUTION.md`, `AGENTS.md` | What the code must be like, and how we work. Every plan is gated on the first. `CLAUDE.md` is a symlink to `AGENTS.md`, for agents that look for that name. |
 
 The flake's own outputs, per system:
 
 ```sh
-nix build .#confinement-claude-code   # the description a session is confined by; jq . result is the whole review
-nix build .#substrate-claude-code     # the store paths a session may execute; cat result/store-paths
-nix build .#claude                    # the entry point itself, under the agent's own command name
-nix build .#nono                      # the pinned mechanism, so a review reads the version the entry points enforce with
+nix build --accept-flake-config .#confinement-claude-code   # the description a session is confined by; jq . result is the whole review
+nix build --accept-flake-config .#substrate-claude-code     # the store paths a session may execute; cat result/store-paths
+nix build --accept-flake-config .#claude                    # the entry point itself, under the agent's own command name
+nix build --accept-flake-config .#nono                      # the pinned mechanism, so a review reads the version the entry points enforce with
+```
+
+Two are readable without a build, which is the point of exposing them:
+
+```sh
+nix eval --accept-flake-config --json .#leakRegistry                            # every accepted reach, in full
+nix eval --accept-flake-config --json .#agents --apply builtins.attrNames       # the closed set of agent names
 ```
 
 ## Structure
 
 ```mermaid
 flowchart LR
-    ref["github:GRBurst/agent-sandbox"]
+    ref(["github:GRBurst/agent-sandbox"])
     flake["flake.nix"]
     table["lib/agents.nix"]
     registry["lib/leak-registry.nix"]
     generator["lib/confinement.nix"]
-    description(["/nix/store/...-nono-profile-agent.json"])
+    description(["/nix/store/...-nono-profile-claude-code.json"])
     entry["lib/confined-agent.nix"]
     preflight["lib/preflight.sh"]
     mechanism["nono run"]
     agent["claude / opencode / pi"]
-    project(["$PWD"])
     state(["$XDG_STATE_HOME/nono"])
+    project(["$PWD"])
 
     ref --> flake
     flake --> table
@@ -72,12 +81,13 @@ flowchart LR
     mechanism --> state
 
     classDef outside stroke-dasharray: 5 5
-    class state outside
+    class ref,state outside
 ```
 
-A dashed outline is the one thing outside the project boundary.
-`$XDG_STATE_HOME/nono` stays on the host because the mechanism anchors its own supervisory state there and refuses to start when any granted path overlaps it — so relocating it into the project would make the project ungrantable.
-It is an accepted leak, enumerated as such in [docs/CONSTITUTION.md](docs/CONSTITUTION.md).
+A dashed outline marks a location outside the project: where the environment is fetched from, and where the mechanism keeps its own state.
+`$XDG_STATE_HOME/nono` stays on the host because the mechanism anchors its supervisory state there and refuses to start when any granted path overlaps it — so relocating it into the project would make the project ungrantable.
+It is an accepted leak, and it is one of three, all enumerated in [docs/CONSTITUTION.md](docs/CONSTITUTION.md).
+The other two are not on this path: a parent `.envrc` above your checkout, read by direnv before the flake is ever evaluated, and a fallback directory the suite uses on a host that offers it nowhere else to work.
 
 ## What happens, in order
 
@@ -96,7 +106,7 @@ sequenceDiagram
     Note over direnv: TMPDIR, XDG_CACHE_HOME and XDG_DATA_HOME<br/>are exported first, because nix needs all<br/>three to read the flake at all
     direnv->>nix: use flake .
     nix->>shell: build it, then run the shellHook
-    shell->>shell: export the rest, and create every directory it names
+    shell->>shell: export the rest, and create the four roots they hang off
     shell-->>you: a shell where claude, opencode and pi are the confined entry points
 ```
 
@@ -120,10 +130,17 @@ sequenceDiagram
     pre->>nono: run a probe confined, aimed at a path outside the project
     nono-->>pre: denied
     pre-->>entry: confinement is enforced on this host
-    entry->>nono: nono run --profile <store path> --workdir $PWD --allow-cwd -- claude
+    entry->>project: write .agents/git/config, unless it is already there
+    entry->>project: point the agent at any declared skill surface
+    entry->>nono: nono run --profile <store path> --workdir $PWD --allow-cwd --read <each declared surface> -- claude
     nono->>agent: start it, with the redirected environment
     agent->>project: read and write, here and nowhere else
 ```
+
+Two of those steps write inside the project, and both are create-if-absent, so entering twice changes nothing.
+The commit identity is copied out of the host's `user.name` and `user.email` once — nothing else, and never a credential — because the session's `git` is pointed at a project file and would otherwise have no identity at all.
+The skill surface is the one host location a session reads on purpose: directories named in `AGENT_SANDBOX_SKILLS`, each granted `--read` by its own resolved name and no ancestor, so the session can use them and cannot edit them.
+The declaration arrives in a variable rather than from a file in the project, but what keeps a checkout you cloned from a stranger from naming your home directory is your `direnv allow` and not an enforcement.
 
 `--allow-cwd` is not decoration. It is the run-time consent that makes the working-directory grant happen at all; the description only sets its *level*.
 Without the flag a non-interactive session reaches nothing but the store, while the resolved manifest still claims the project readwrite — so the manifest cannot be used to notice this.
@@ -151,7 +168,9 @@ sequenceDiagram
 
 A refusal is the honest answer here, not a fallback.
 A session that started without confinement having been *observed* would be a session whose whole guarantee rests on an assumption, so the pre-flight refuses and says which candidate said what.
-The same refusal is what a project that **is** your home directory gets: there is no path left outside it to be refused.
+A project that **is** your home directory is refused too, but earlier and for a different reason.
+The mechanism keeps its own supervisory state under your home, so a working-directory grant on your home would overlap the state it protects and it will not start at all — which the pre-flight's *first* assertion catches, before it has looked for anywhere to probe.
+The exit status is the same `77`, and it carries nono's own words for what went wrong.
 
 ### Case 3: refused, because the session reached outside its project
 
@@ -180,13 +199,14 @@ Note what is **not** confined here. Egress is *mediated*, not restricted: raw TC
 ## Verifying it
 
 ```sh
-nix develop -c bash scripts/validate.sh   # the single entry point; every check, every layer
-bash scripts/validate.sh --list           # name the checks without running them
-bash scripts/validate.sh --layer unit     # one layer; unit and component need no devShell
-nix flake check                           # evaluate the devShell for this system
+nix develop --accept-flake-config -c bash scripts/validate.sh   # the single entry point; every check, every layer
+bash scripts/validate.sh --list                                 # name the checks without running them
+bash scripts/validate.sh --layer unit                           # one layer at a time
+nix flake check --accept-flake-config                           # evaluate the devShell for this system
+just static                                                     # the static stages: formatting, linting, the action pins
 ```
 
-It exits zero, and the count is the report: `35 checks passed` on `x86_64-linux`, `33 passed, 2 skipped` on `aarch64-darwin`.
+It exits zero, and the count is the report: `35 checks passed` on `x86_64-linux`, `33 checks passed, 2 skipped` on `aarch64-darwin`.
 A skip is not a pass — both are named, with the reason the platform forces them, under [Where the two platforms differ](docs/HANDBOOK.md#where-the-two-platforms-differ).
 What a green run does **not** reach is listed under [What the automated run does not reach](docs/HANDBOOK.md#what-the-automated-run-does-not-reach), so every gap is a known one.
 

@@ -1482,7 +1482,7 @@ Appending the same path to `read` rather than `allow` fires the reach assertion 
 
 ## M7 — The credential surface, and interception measured rather than reasoned
 
-Measured on x86_64-linux against the pinned **nono 0.74.0**, whereas [`M1b`](#m1b--pointing-an-agent-at-a-substituted-endpoint) was measured at 0.73.0. Everything below comes either from `nono profile schema` — a 103,981-byte JSON Schema, so the whole surface is machine-readable and needs no `strings` over the binary — or from live sessions against the shipped `.#confinement-claude-code` with one `jq` edit between arms.
+Measured on x86_64-linux against the pinned **nono 0.74.0**, whereas [`M1b`](#m1b--credential-substitution-per-agent) was measured at 0.73.0. Everything below comes either from `nono profile schema` — a 103,981-byte JSON Schema, so the whole surface is machine-readable and needs no `strings` over the binary — or from live sessions against the shipped `.#confinement-claude-code` with one `jq` edit between arms.
 
 ### The credential surface is five top-level keys plus two under `network`
 
@@ -2729,7 +2729,7 @@ It is self-calibrating, costs one 118 ms invocation, spells no platform-specific
 This is the property-based form AGENTS.md §4 asks for: *the session added no denial of its own*, rather than *the denied set matches this list*.
 
 Two more trailer features are worth knowing before writing the parser.
-A path in a deny group prints as `[permanently restricted]` with a footer naming the profile key that would override it, `filesystem.bypass_protection` — which is the first sight of that key and bears on [M10a](tasks.md#m10a--close-out-status-implemented)'s question about fabricating a home under `/private`.
+A path in a deny group prints as `[permanently restricted]` with a footer naming the profile key that would override it, `filesystem.bypass_protection` — which is the first sight of that key and bears on [M10a](tasks.md#m10a)'s question about fabricating a home under `/private`.
 And each trailer prints a `Fix flags:` line spelling the exact `--read`/`--read-file`/`--write` that would grant each blocked path, so a failure message can quote the remedy rather than describe it.
 
 ### U2 — no, and the audit trail is where that was settled
@@ -2965,7 +2965,7 @@ Three nono facilities were checked as better instruments and none serves:
 The evaluator's `cannot open SQLite database … fetcher-cache-v4.sqlite` failure is **not intermittent**, and an earlier round of this document said it was.
 It is what any `nix` command does when the shell has not entered the environment: `XDG_CACHE_HOME` still points into the `$HOME` the ambient sandbox denies, so the fetcher cache cannot be opened. Reproduced three times out of three from an unentered shell, and gone on the first attempt under `direnv exec .`.
 What made it look intermittent is that the two shells are easy to confuse, and a check that hits it reports `the agent table has 0 entries and 0 commands` — its own anti-vacuity control firing on an unusable evaluator rather than the property failing.
-This is what had left `check_r9`'s `nohost` plant unrun across three attempts; under `direnv exec .` the plant ran first try and bit, which is recorded in [tasks.md § M9e](tasks.md#m9e--the-eleven-failures-the-macos-arm-found-status-implemented).
+This is what had left `check_r9`'s `nohost` plant unrun across three attempts; under `direnv exec .` the plant ran first try and bit, which is recorded in [tasks.md § M9e](tasks.md#m9e).
 The rule is to check which shell you are in rather than to retry.
 
 The shell also fails heredocs with `can't create temp file for here document`, so a commit message goes to a file read back with `git commit -F`.

@@ -37,6 +37,12 @@ session_env() {
 		"TMPDIR=$REPO_ROOT/.tmp/session"
 		"XDG_STATE_HOME=$state"
 		NONO_NO_UPDATE_CHECK=1
+		# The entry point exports this too, so a check driving a real agent is
+		# covered twice over; a check that calls `nono run` itself is covered
+		# only from here. Without it a denied path raises a review on the
+		# terminal, which is not a stream this suite redirects: it survives
+		# validate.sh's `</dev/null` because it opens the terminal directly.
+		NONO_NO_SAVE_PROMPT=1
 	)
 }
 
@@ -340,7 +346,13 @@ check_r6() {
 	# to /dev/null with everything else. An interactive user got a cursor and no
 	# explanation. Every arm above, and every check in this suite, runs under
 	# validate.sh's `</dev/null`, so all of them take nono's non-interactive
-	# path and none of them can ever see the question.
+	# path for *this* question and none of them can ever see it.
+	#
+	# That reasoning holds only for a prompt that reads stdin. It does not
+	# generalise, and taking it as general was wrong: nono's save-profile review
+	# opens the terminal directly, so it appeared on a real run of this suite
+	# after the check it belonged to had already reported. The session
+	# environments suppress that one by name rather than by redirection.
 	#
 	# Allocating a pty would be the direct observation, and it is not available:
 	# a nested sandbox denies /dev/ptmx, so the check would skip on exactly the
@@ -1021,7 +1033,9 @@ check_r3() {
 check_r4() {
 	local agent=claude-code
 	# The flake attribute of an entry point is the binary's name, not the
-	# agent's. M8 pairs the two per agent; until then both are written out.
+	# agent's. M8 exposed `.#agentBinaries` to pair them, which check_j8_1 reads
+	# per agent; this check exercises one reference agent, so it writes both out
+	# rather than paying for an evaluation to look one pair up.
 	local entry=claude
 	local entry_dir ref value registry backup outside home scratch canary
 	local source needle replacement why rebuilt restored rc found=0

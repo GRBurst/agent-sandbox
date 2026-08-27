@@ -35,9 +35,11 @@ Everything this repository ships exists so that one project's agents, credential
   Prefer the tool's own variable over a blanket `XDG_CONFIG_HOME`.
   The blanket covers neither the tools that hardcode a path nor the ones that read a differently-named variable, and it makes every future tool look handled when it is not.
 - **`XDG_CACHE_HOME` is the one blanket that is allowed**, because it holds purely derived data that can be deleted at any time.
-- **The bootstrap is the one exception, and it is exactly two variables.**
-  `TMPDIR` and `XDG_CACHE_HOME` are exported before the environment is evaluated, because the evaluator needs them to read its own configuration.
-  Their values must be byte-identical in both places, and a check parses both files rather than trusting the comment that says they agree.
+- **The bootstrap is the one exception, and it is three variables.**
+  `TMPDIR`, `XDG_CACHE_HOME` and `XDG_DATA_HOME` are exported before the environment is evaluated, because the evaluator needs them to read its own configuration.
+  The third is there because nix records the flake configuration a user has accepted under `XDG_DATA_HOME`, and writes there before it will evaluate a flake that declares `nixConfig` at all — which this one does.
+  It is a blanket, so it is also a violation of the rule above, recorded rather than claimed away.
+  The three must **resolve** to the same value in both places, and a check evaluates both files rather than comparing their text: nix's indented strings escape where a shell does not, so byte-identical source is the wrong criterion.
 - **`TMPPREFIX` matters as much as `TMPDIR`.**
   zsh writes heredoc bodies to `$TMPPREFIX*` rather than to `$TMPDIR`, so a stale value fails every heredoc with `can't create temp file for here document` while `$TMPDIR` still looks correct.
 - **A settings file that cannot expand variables gets absolute paths, and the duplication is checked.**
@@ -269,7 +271,7 @@ After green:        Refactor separately, prove an empty eval diff (CLEAN)
 Commit unit:        One scenario, green and clean
 
 Isolation:          Nothing outside the project. Own variable per tool, not a blanket
-                    Two variables in the bootstrap, byte-identical, checked
+                    Three variables in the bootstrap, resolved rather than compared, checked
                     Leaks are enumerated and justified, never discovered
 Guards:             A check earns belief only by failing when its guard is removed
                     Plant the violation, watch it FAIL, revert, record it in the plan

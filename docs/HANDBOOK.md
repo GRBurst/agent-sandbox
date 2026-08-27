@@ -9,15 +9,15 @@ For the principles every change is measured against, see [CONSTITUTION.md](CONST
 ## What this repository is
 
 A **consumable development environment**.
-A project points at it from a flake, a devenv configuration or a devcontainer — from GitHub or from a local checkout — and gets a shell with agents already configured and confined to that project.
+A project points at it as a flake — from GitHub or from a local checkout — and gets a shell with agents already configured and confined to that project.
 
 **Project isolation is the product.**
 Credentials, caches, history and agent state belong to one project and are not visible from another.
 Every guarantee below exists to serve that, and every one of them is meant to be checkable rather than asserted.
 
-The repository is early.
-The consumable surface — what a downstream flake actually imports, and what it gets — is not specified yet; that is the job of the first spec.
-What exists today is the isolation mechanism and the process around it, and [Known drift](#known-drift) is the honest list of what does not yet hold.
+The consumable surface — what a downstream flake imports and what it gets — is specified by [spec 001](../specs/001-agent-sandbox/spec.md) and landed.
+Three agents enter confined, the isolation claims have checks that fail when they break, and both supported platforms run the suite unattended.
+[Known drift](#known-drift) is the honest list of what still does not hold, and [What the automated run does not reach](#what-the-automated-run-does-not-reach) the list of what holds but is verified by hand.
 
 ## Entering the environment
 
@@ -42,8 +42,9 @@ See [Where the agents come from](#where-the-agents-come-from) for what that cost
 
 That path is **checked and green**.
 `check_j1_1` enters from that reference into a clean `$HOME`, and it passes now that the reference carries this environment.
-The flake declares `x86_64-linux` and `aarch64-darwin`, which are the two systems for which the agents exist upstream, and both have been entered: the suite runs unattended on each, `x86_64-linux` asserting every check and `aarch64-darwin` skipping two it has no instrument for.
+The flake declares `x86_64-linux` and `aarch64-darwin`, which are the two systems this environment is verified on, and both have been entered: the suite runs unattended on each, `x86_64-linux` asserting every check and `aarch64-darwin` skipping two it has no instrument for.
 See [Where the two platforms differ](#where-the-two-platforms-differ).
+The agents are available upstream for `aarch64-linux` as well; it is undeclared because no runner has entered it, and a declared system nothing has entered would claim more than is known.
 
 There is no devenv path.
 `devenv.nix` and `devenv.yaml` generated a devcontainer whose bind mounts were the leak the first spec exists to remove, and both are deleted.
@@ -196,8 +197,9 @@ export AGENT_SANDBOX_SKILLS="$HOME/skills:$HOME/work/skills"   # once, for the m
 claude                                                          # every agent honours it
 ```
 
-Nothing inside a project can set it.
-A checkout you cloned from a stranger cannot ask for your home directory, because the declaration is not a file the project carries.
+What keeps a cloned project from asking for your home directory is your `direnv allow`, not an enforcement.
+The entry point reads the variable out of the calling environment and cannot tell where it was exported from, so a checkout's own `.envrc` can set it as readily as your shell profile can — and once you have allowed that `.envrc`, it has.
+Read the thing before you allow it, as you would with any other line in it.
 
 Each directory you name is granted **read-only**, individually, with no parent of it granted.
 A session can read what you wrote there and cannot change it: the surface is lent, not handed over.
@@ -349,7 +351,7 @@ Inside the project, that agent finds none of your `~/.config` settings, subagent
 This is a tracked violation of the constitution's "prefer the tool's own variable" rule, recorded as `C1` in the feature's plan, and it is kept only because `nono` has no variable of its own: pointed at a directory that does not exist it falls back to the host's `~/.config` silently, which would let host confinement descriptions decide what a confined session may reach.
 Skills you authored yourself come with you by the separate route above, declared once for the machine rather than by widening this; the other authoring surfaces do not, and that is the gap that section names.
 
-**`XDG_DATA_HOME` is a blanket too, and it splits direnv's own trust store in two.**
+**`XDG_DATA_HOME` is a blanket too, tracked as `C2` in the feature's plan, and it splits direnv's own trust store in two.**
 direnv records which `.envrc` files you have approved under `$XDG_DATA_HOME/direnv/allow`, and `.envrc` moves that root inside the checkout before `use flake` runs — it has to, because nix reads `trusted-settings.json` from there before it will evaluate a flake that declares `nixConfig`.
 So from the moment the environment loads there are two trust stores: the host's, and this checkout's.
 Approving a directory from inside the project writes the token into `<project>/.local/share/direnv/allow`, where nothing outside can see it, and the reverse holds as well.
@@ -358,8 +360,10 @@ Approve it and you have written a duplicate token that only exists while you are
 Nothing leaks and nothing breaks, but expect it, and prefer leaving the checkout in a shell that never entered it — start a session from outside if you intend to move around.
 
 **A confined session gets its own set, and none of the table above reaches it.**
-The variables in that table are the *shell's*, and the boundary passes almost nothing through: measured, a session inherits `HOME` and a handful of locale and terminal variables, and not one `XDG_*` root nor `TMPDIR`.
-So the session's redirection is declared in its confinement description instead, and is a superset of the shell's:
+The variables in that table are the *shell's*, and the boundary passes almost nothing through: measured, a session inherits ten entries and no others — `HOME`, `USER`, `LOGNAME`, `PWD`, `SHELL`, `TERM`, `COLORTERM`, `LANG`, `TZ` and the pattern `LC_*` — and not one `XDG_*` root nor `TMPDIR`.
+So the session's redirection is declared in its confinement description instead.
+Every `XDG_*` root the shell redirects is redirected for a session too, which is what `check_confinement_validates` asserts, by reading the names out of the `shellHook` and requiring each of them in the description.
+The two lists are not otherwise the same: a session adds `XDG_STATE_HOME`, and the shell's `TMPPREFIX`, `npm_config_cache`, `NPM_CONFIG_USERCONFIG`, `DOCKER_CONFIG` and `CURL_HOME` have no counterpart here.
 
 | Variable | Resolves to |
 | --- | --- |
@@ -421,29 +425,38 @@ Run it with `bash`, not `zsh` — `${!v}` is bash's indirect expansion.
 ```sh
 nix develop -c bash scripts/validate.sh   # the single entry point; every check, every layer
 bash scripts/validate.sh --list           # name the checks without running them
-bash scripts/validate.sh --layer unit     # one layer only; unit and component need no devShell
+bash scripts/validate.sh --layer unit     # one layer only
 nix flake check                           # evaluates the devShell for this system
 nix flake check --all-systems             # and for the other one, which needs a remote builder to go further
-nixfmt flake.nix lib/*.nix                # format the nix
-mdformat AGENTS.md docs specs             # format the markdown
-shellcheck scripts/validate.sh scripts/checks/*.sh   # lint the shell
+just static                               # every static stage: formatting, linting, the action pins
+just fmt                                  # rewrite what is not formatted, rather than reporting it
 ```
 
 `scripts/validate.sh` is what [AGENTS.md](../AGENTS.md#4-verify-every-change) names as the single entry point.
+The `justfile` names the static stages of §4's table so they are runnable rather than remembered — `just --list` gives them all, and `just fmt-check`, `just lint` and `just pins` are the three `just static` runs in turn.
+It deliberately wraps no assertion of its own and does not wrap the suite: there is one entry point for behaviour and one for the static stages, and they do not overlap.
 
 **The integration layer has to run inside the devShell**, which is why the first line says `nix develop -c`.
-`lib/preflight.sh` execs its probe by bare name, so on a host that carries its own `true` outside the granted substrate the probe is denied and `check_r6` fails for a reason that has nothing to do with the check.
-The unit and component layers have no such dependency.
+`lib/preflight.sh` execs by bare name — `true` for its first step, then `sh` for the probe that runs `ls` and `rm` — so on a host carrying its own copy of one of those outside the granted substrate the probe is denied and `check_r6` fails for a reason that has nothing to do with the check.
+The unit and component layers do not depend on that `PATH`, which is the whole of what they do without.
+Neither runs outside nix: both call `jq` from the devShell, the unit layer evaluates the flake and its remote input, and the component layer builds derivations.
 
-It **exits zero**: `35 checks passed` on `x86_64-linux`, and `33 passed, 2 skipped` on `aarch64-darwin`.
+It **exits zero**: `35 checks passed` on `x86_64-linux`, and `33 checks passed, 2 skipped` on `aarch64-darwin`.
 `check_sc3` asserts a scenario-to-check bijection and was the feature's progress bar while it failed; it passes now, so every scenario in the spec has a check.
 An exit status of zero is the whole report, and a skip is not a pass — the two the darwin arm reports are named under [Where the two platforms differ](#where-the-two-platforms-differ).
 
-**No check can see an interactive prompt.**
+**No check can see a prompt that reads `stdin`, and redirection is not what keeps a terminal quiet.**
 `validate.sh` runs every check with `stdin` on `/dev/null`, which it must — an agent started in print mode reads stdin and will otherwise drain the loop feeding it the list of checks to run.
 The cost is that a green suite says nothing about what happens on a terminal.
 This was not hypothetical: the agent entry points shipped for a while unable to start at all, hanging on a consent question the mechanism asked on `stdin` while the wrapper sent its text to `/dev/null`, and every check passed throughout.
-Where interactive behaviour is the criterion, assert on the arguments a command is invoked with instead — `check_r6`'s fourth arm logs the entry point's own `nono run` argv and requires the consent flag on every one — and enter the shell and type an agent's name by hand as well.
+Where interactive behaviour is the criterion, assert on the arguments a command is invoked with instead — `check_r6`'s fifth arm logs the pre-flight's own `nono run` argv and requires the consent flag on every one — and enter the shell and type an agent's name by hand as well.
+
+Redirecting the three streams covers less than it looks.
+A denied path makes the mechanism offer to save that path as a grant, and it asks by opening the terminal rather than by reading `stdin`, so `</dev/null` does not reach it: it surfaced on a real run of the suite, interleaved after the check that caused it had already reported `PASS`.
+The entry point and the two session environments therefore set `NONO_NO_SAVE_PROMPT=1` alongside `NONO_NO_UPDATE_CHECK=1`, by name rather than by redirection.
+Suppressing it withholds nothing — the denial is still reported — and the offer could never have worked here anyway: it writes a profile under `XDG_CONFIG_HOME`, which is inside the project, and a session is started with `--profile` as an argument, which beats a discovered profile.
+Accepting it would leave a file in your checkout that reads as a widening of the confinement and has no effect.
+A path an agent genuinely needs belongs in the description or the leak registry, where it has to justify itself.
 
 ### What the automated run does not reach
 
@@ -474,8 +487,12 @@ None of them restates an assertion; where a check exists for a *narrower* versio
   *By hand:* start the same agent on each platform and read the capability banner it prints to stderr — the `r`, `w` and `r+w` lines. Compare the two by eye. Differences in store paths are expected and are the substrate; anything else is not.
 - **A host genuinely unable to enforce confinement.** Every runner has the primitive, so the check plants the violation rather than reproducing the condition.
   *By hand:* run an entry point on a kernel too old to provide it, and expect nothing to start, a message naming the missing primitive, and exit status `77`. Accepted as unreproducible if no such machine is available — the plant is what stands in for it.
+- **That the credential-capture exclusion would be caught if it regressed.** The exclusion keeps the session's own capture directory out of the write control, and the control passes with it in place. What no Linux run can show is the control failing without it: Landlock does not re-check a descriptor that is already open, so the violation the exclusion exists to catch is invisible there. A green macOS run says the arrangement works, not that its absence would be noticed.
+  *By hand, on a Mac:* put the capture back inside the control's reach and run `bash scripts/validate.sh --layer integration`, expecting the session to fail to start. The Linux half — that the exclusion does not hollow the control out — is asserted unattended.
 - **A machine with no warm store.** Consuming from the published reference is covered, but both the runner and any developer checkout have a populated store already.
   *By hand:* on a machine that has never built this, or after `nix store gc`, run the one command under [Entering the environment](#entering-the-environment) and let it finish.
+- **Anything the mechanism says on a terminal rather than on a stream.** Both the working-directory consent question and the save-profile review are invisible to every check, for the same reason: observing them needs a pty, and a nested sandbox denies `/dev/ptmx`, so a check written for them would skip on exactly the machine most likely to run it. That `NONO_NO_SAVE_PROMPT=1` suppresses the review is asserted by nothing.
+  *By hand:* run the suite on a terminal. A run that reaches its count without a cursor appearing is the observation. If one does appear, the environment variable is no longer the switch and the entry point needs a different one.
 
 **Things that are a human's decision rather than a behaviour.**
 
@@ -497,8 +514,8 @@ None of them restates an assertion; where a check exists for a *narrower* versio
 
 - **The pre-flight outside the devShell.** `lib/preflight.sh` execs its probe by bare name, so it depends on `PATH` resolving that name inside the granted substrate. On a host carrying its own copy outside the substrate the probe is denied and the pre-flight reports the wrong cause — fail-closed, but misleading.
   *By hand:* invoke an entry point by store path from a shell that never entered the environment, and read what it says. This is why the integration layer runs under `nix develop`, and why you enter through the devShell.
-- **Four of nono's six configuration channels.** Two are asserted against a session; `--extends` and `--bypass-protection` are flags the entry point does not pass, and their absence is asserted by reading the entry point's text rather than by running one.
-  *By hand:* `cat $(command -v claude)` and read the `nono run` line for yourself. Four flags being absent from a command line is a thing you can see; it is only the *reading* of it that is unautomated.
+- **Two of nono's six configuration channels.** `NONO_PROFILE` and `NONO_ALLOW` are asserted against a live session by `check_r5`; `--extends` and `--bypass-protection` are flags the entry point does not pass, and their absence is asserted by reading the entry point's text rather than by running one.
+  *By hand:* `cat $(command -v claude)` and read the `nono run` line for yourself. Two flags being absent from a command line is a thing you can see; it is only the *reading* of it that is unautomated.
 
 ## Where the two platforms differ
 
@@ -510,9 +527,9 @@ Both supported platforms are verified by the same command. They are not equally 
 | tier | enforced, and observable from outside the sandbox | enforced, and **experimental** — the guarantee, not whether the platform is verified |
 | how a refusal reads | `Permission denied` | `Operation not permitted` |
 | syscall tracer | `strace`, in the devShell | none. `dtruss` needs SIP disabled, `fs_usage` needs root |
-| supervisor trailer | absent — `No path denials were observed during this session.` | present — `N paths blocked` and a line per path |
+| supervisor trailer | none at all, refused or not | present — `N paths blocked` and a line per path, or `No path denials were observed during this session.` where it refused nothing |
 | a protected path | a grant on `$HOME/.ssh` wins | marked `[permanently restricted]`, overridable only via `filesystem.bypass_protection` |
-| suite result | `35 checks passed` | `33 passed, 2 skipped` |
+| suite result | `35 checks passed` | `33 checks passed, 2 skipped` |
 
 **The two enforcements differ in what they report, not only in what they permit.** That is the practical difference: the trailer and the tracer are the same code in one binary, and Landlock starves the reporting path while Seatbelt feeds it. So a denial is *observable* on darwin without a tracer, and a permitted read is observable only on Linux. Every check that needs one of the two carries the split in one place.
 
@@ -530,7 +547,7 @@ Comparing effective reach across platforms is therefore **verified by hand**, an
 ## Known drift
 
 This is the honest list of places where the repository does not yet do what it says, kept here rather than in a spec so it cannot be mistaken for backlog that someone else owns.
-It is the natural input to the first spec.
+It is the natural input to the next spec.
 
 **Portability.**
 
@@ -541,7 +558,7 @@ It is the natural input to the first spec.
 
 - **A project that *is* your home directory cannot start an agent.** The pre-flight proves confinement is enforced by reading a path outside the project and requiring the refusal; where the project is the whole home there is no such path left, so it refuses with `cannot verify confinement` rather than starting. That is the honest answer — confining a session whose project is the entire home would grant it everything — and per **P9** it is a refusal that says so rather than a session that runs unverified.
 - Confinement is now observed rather than asserted, on both sides. `check_r6` proves the pre-flight refuses a host that cannot enforce it and `check_j1_1` compares a real session's granted reach against the project, the execution substrate and the leak registry; the refusal side is now checked too — `check_r1` reads a planted SSH key from inside a session and watches it fail, `check_r2` writes outside the project and watches the file not appear, `check_r3` puts an API-key canary in the host environment and proves it does not cross, `check_r4` has a session rewrite the source of its own confinement and proves nothing widens until a human re-enters, `check_r5` commits a confinement description to the checkout and proves the entry point does not read it, `check_r10` plants a host git configuration that runs a program and proves it neither crosses nor runs, `check_r8` presents a substitute that is no longer valid and proves the answer names an authentication failure rather than a denial, `check_r11` puts a demand for a signature in a checkout's own configuration and proves the commit is refused with no object created and no key read, and `check_j8_2` plants a whole host-global agent installation and compares the session's granted reach to the project, the substrate and the registry as a set. Each of them reads, writes or runs something it *is* allowed in the same session, so a session that failed to start cannot pass — and `check_controls` reads the suite's own text to keep it that way, because a refusal check whose control has been deleted goes on passing while proving nothing.
-- A session is granted the closure of what it runs, and each agent has a substrate of its own: 128 store paths for `claude-code` and 128 for `opencode`, rather than the 67,000 the store holds. The leak registry is now **empty**. `check_j4_1` asserts the substitute's form, that the real value is nowhere in the session's environment or at rest in the project, and that two sessions get different substitutes; `check_j5_1` asserts that one credential in your environment serves every project and every agent, each minted a substitute of its own; and `check_r8` presents a substitute that is no longer valid and proves the answer is an authentication failure rather than a denial. What still has no check is a real provider refusing a substitute copied out of a session, which needs a real account and is verified by hand.
+- A session is granted the closure of what it runs, and each of the three agents has a substrate of its own: on the order of a hundred and thirty store paths each rather than the tens of thousands the store holds. No number is written down anywhere, `check_sc1` deriving the set from the built derivation, so a nixpkgs bump moves it without falsifying anything. The leak registry is now **empty**. `check_j4_1` asserts the substitute's form, that the real value is nowhere in the session's environment or at rest in the project, and that two sessions get different substitutes; `check_j5_1` asserts that one credential in your environment serves every project and every agent, each minted a substitute of its own; and `check_r8` presents a substitute that is no longer valid and proves the answer is an authentication failure rather than a denial. What still has no check is a real provider refusing a substitute copied out of a session, which needs a real account and is verified by hand.
 - **Two projects at once are checked concurrently, not one after the other.** `check_j3_1` runs two sessions in sibling checkouts at the same time and asserts that each reaches exactly one of them, that the two differ, and that neither can write into the other — confirmed from outside the sandbox, since a denial reported from inside is the sandbox's own account of itself. The two halves are separate on purpose: a *read-only* grant on a sibling checkout is a leak that no write attempt would ever observe.
 - **A grant on an exact path beats a `deny` the mechanism carries for it.** The five `required` deny groups, `deny_credentials` among them, are not a backstop behind the leak registry — a registry entry naming `$HOME/.ssh` would read the key, with the deny sitting beside the grant in the resolved manifest. A grant on an *ancestor* of denied paths is refused and the session does not start, but do not expect the message to say so: granting `$HOME` is refused first for overlapping nono's own protected state root, at a path that need not even exist, and the deny rules are never mentioned. So the registry's strictness is the whole of the guarantee.
 - **A confinement description written inside the project is one the mechanism will find, and what refuses it is a single command-line argument.** The blanket `XDG_CONFIG_HOME` puts nono's user profile directory inside the checkout, so a profile committed to a repository is listed by `nono profile list` and grants what it asks for the moment anything resolves it by name. The entry point passes `--profile <store path>` as an argument, and an argument beats `NONO_PROFILE`, which is why an untrusted checkout cannot grant itself paths. Nothing refuses the file itself.
@@ -556,14 +573,15 @@ It is the natural input to the first spec.
 
 - **Inside a confined session, nothing does any more.** The session's description now names `TMPDIR` and four `XDG_*` roots including `XDG_STATE_HOME`, and each is observed resolving under the project and being writable there. What remains is the *shell's* `XDG_STATE_HOME`, which stays on the host and must: the mechanism resolves its own protected state root from that value and refuses to grant any path overlapping it, so redirecting it would make your checkout ungrantable. That the shell's and the session's resolutions are independent is measured, not assumed.
 - A tool that ignores its relocation variable is still unaccounted for, and that is by design rather than by omission: it resolves a path under `$HOME`, which the session denies, and it fails visibly. What no check covers is a tool that neither honours the variable nor writes under `$HOME` — one that hardcodes `/tmp`, say, which is writable inside a session because it is in the floor the mechanism grants every process.
+  The floor is not symmetric, and the asymmetry is measured: a session may create, remove and `stat` its own entries under `/tmp`, and may not enumerate the directory. So a tool hardcoding `/tmp` writes and is not reported, while a tool *looking* for something there is denied — which is why a denied `/tmp` path appearing on a run is normally a read, and normally `claude`'s.
 - **`claude --bg` does not work, and will not.** The background service listens on a socket under `/tmp`, at a path the payload hardcodes and derives from a digest of the configuration root, so no relocation variable moves it. The session is denied the `bind` and the `connect`, waits out its own 45-second timeout and exits 1 saying `Couldn't reach the background service`. Nothing escapes: the home directory is untouched and everything the attempt does write stays under the project. Allowing it would mean granting a recursively writable directory outside the project — nono's socket-bind flag implies a grant on the parent, and today's Linux fallback is recursive — to a daemon that outlives the session, so it stays refused. Interactive sessions and `claude agents --json` are unaffected.
 
 **Tools the environment does not provide.**
 
 - `git` is now in the devShell, and so is `strace` on Linux. `node` is not: it resolves from the host user profile, which by [AGENTS.md](../AGENTS.md#3-environment-and-tooling) §3 means it is *not available*, and a confined session cannot run it because it is outside the substrate.
-- **`findutils` is not declared, and two checks depend on a GNU-only flag.** `check_opencode` and `check_pi` build their home manifests with `find -printf`, which BSD `find` does not have. It resolves on both runners today only because `nix develop`'s own stdenv supplies it. Where it does not, both manifests come out empty and the comparison passes having compared nothing — a silent pass, which is the failure mode **P9** forbids. `outside_root` in the same suite already avoids GNU-only `mktemp -p` for BSD's sake, so the suite is inconsistent with itself here.
+- **`findutils` is not declared, and five checks depend on a GNU-only flag.** `check_j2_1`, `check_j3_1`, `check_opencode`, `check_pi` and `check_j8_1` build their manifests with `find -printf`, which BSD `find` does not have. It resolves on both runners today only because `nix develop`'s own stdenv supplies it. Where it does not, `require_gnu_find` fails the check that asked rather than letting an empty manifest compare against an empty manifest — the silent pass this used to be is gone, and what remains drift is that the suite depends on a tool the environment never declared.
 
 **Orphans and small things.**
 
-- There is no `justfile`, so the commands above are typed rather than named. `just` itself is in the devShell, so what is missing is the file and not the tool.
-- `statix` and `deadnix` are absent entirely.
+- The static stages are named in the `justfile` and run by `just static`, but **no automated run fails for them**: CI runs `scripts/validate.sh` and nothing else, so an unformatted file, an unlinted script or an action pin that no longer matches its tag comment reaches a green run. What closed is the typing, not the gap.
+- `statix` and `deadnix` are absent entirely, so `just lint` covers the shell, the YAML and the flake's evaluation, and nothing lints the nix beyond formatting.
